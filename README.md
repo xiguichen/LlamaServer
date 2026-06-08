@@ -100,12 +100,20 @@ The `.ipa` is **unsigned**; sign + install it on-device with any of:
 - **[AltStore](https://altstore.io/)** — similar, with on-device refresh.
 - **ESign / TrollStore** (device/iOS-version dependent).
 
-After install:
+After install — three ways to add a model, then run it:
 
-1. Add a `.gguf` model: open the **Files** app → On My iPhone → **LlamaServer**,
-   and copy a model in (file sharing is enabled). Or pick it via **Choose .gguf**.
-2. Tap **Choose .gguf**, pick the model, set a port (default `8443`), tap **Start Server**.
-3. The UI shows the endpoint, e.g. `https://192.168.1.50:8443`. Point your OpenAI
+1. **Add a `.gguf` model** (any of):
+   - **Download from URL**: paste a direct `.gguf` link (e.g. a Hugging Face
+     `…/resolve/main/model.gguf`) into the *Download from URL* field and tap
+     **Download** — progress is shown live.
+   - **Import**: tap **Import** (Models section) to copy a `.gguf` from Files /
+     iCloud into the app.
+   - **Files app / Finder**: drop a `.gguf` into On My iPhone → **LlamaServer**,
+     then Import it.
+2. **Pick a model** from the **Models** list (tap to select; swipe to delete).
+   All models live in the app's `Documents/models` and persist between launches.
+3. Set a port (default `8443`) and tap **Start Server**.
+4. The UI shows the endpoint, e.g. `https://192.168.1.50:8443`. Point your OpenAI
    client there (disable TLS verification for the self-signed cert).
 
 > Use small, quantized models (e.g. 1B–3B, `Q4_K_M`) — phones are RAM-limited.
@@ -148,6 +156,7 @@ This was authored without a compiler. Most-likely things to adjust on the first 
 
 ## Roadmap / TODO
 
+- [x] Model library: list / select / import / **download from URL**.
 - [ ] Streaming responses (SSE) for `/v1/chat/completions`.
 - [ ] Persist the last-used model and settings.
 - [x] Pin a specific `llama.cpp` release tag (`b9553`, prebuilt xcframework).
