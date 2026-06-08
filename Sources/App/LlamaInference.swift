@@ -1,0 +1,270 @@
+import Foundation
+import llama   // module provided by vendor/llama.xcframework
+
+/// Thin Swift wrapper around the llama.cpp C API.
+///
+/// Mirrors the flow of llama.cpp's `examples/simple/simple.cpp`:
+///   load model -> create context -> tokenize prompt -> decode loop -> sample.
+///
+/// NOTE: a single `LlamaInference` / `llama_context` is NOT thread-safe. Callers
+/// must serialize access (the HTTP server does this with a serial queue).
+///
+/// This file is pinned to a recent llama.cpp API (functions such as
+/// `llama_model_load_from_file`, `llama_init_from_model`, `llama_model_get_vocab`,
+/// the `llama_sampler_*` chain API, and `llama_vocab_is_eog`). If you bump the
+/// pinned llama.cpp tag in scripts/build-llama-xcframework.sh and the build fails,
+/// this is the file to adjust.
+final class LlamaInference {
+
+    enum InferenceError: Error, LocalizedError {
+        case backendInit
+        case modelLoad(String)
+        case contextInit
+        case tokenize
+        case decode
+
+        var errorDescription: String? {
+            switch self {
+            case .backendInit:        return "Failed to initialize llama backend."
+            case .modelLoad(let p):   return "Failed to load model at \(p)."
+            case .contextInit:        return "Failed to create llama context."
+            case .tokenize:           return "Failed to tokenize input."
+            case .decode:             return "llama_decode failed (context may be full)."
+            }
+        }
+    }
+
+    private let model: OpaquePointer
+    private let context: OpaquePointer
+    private let vocab: OpaquePointer
+    private let contextSize: Int
+
+    let modelName: String
+
+    // MARK: - Lifecycle
+
+    init(modelPath: String, contextSize: Int = 4096, threads: Int32 = 0) throws {
+        // Backend init is idempotent across instances within a process.
+        llama_backend_init()
+
+        self.modelName = (modelPath as NSString).lastPathComponent
+        self.contextSize = contextSize
+
+        var modelParams = llama_model_default_params()
+        // Offload everything to Metal GPU when available.
+        modelParams.n_gpu_layers = 999
+
+        guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
+            throw InferenceError.modelLoad(modelPath)
+        }
+        self.model = loadedModel
+
+        guard let loadedVocab = llama_model_get_vocab(loadedModel) else {
+            llama_model_free(loadedModel)
+            throw InferenceError.contextInit
+        }
+        self.vocab = loadedVocab
+
+        var ctxParams = llama_context_default_params()
+        ctxParams.n_ctx = UInt32(contextSize)
+        ctxParams.n_batch = UInt32(min(contextSize, 512))
+        let hwThreads = Int32(ProcessInfo.processInfo.activeProcessorCount)
+        let useThreads = threads > 0 ? threads : max(1, hwThreads)
+        ctxParams.n_threads = useThreads
+        ctxParams.n_threads_batch = useThreads
+
+        guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
+            llama_model_free(loadedModel)
+            throw InferenceError.contextInit
+        }
+        self.context = ctx
+    }
+
+    deinit {
+        llama_free(context)
+        llama_model_free(model)
+        // Intentionally do NOT call llama_backend_free() here: other instances
+        // in the same process may still need the backend. It is freed on exit.
+    }
+
+    // MARK: - Prompt formatting (chat template)
+
+    /// Applies the model's built-in chat template (when present) to a list of
+    /// messages, falling back to a generic ChatML-style layout.
+    func formatPrompt(messages: [ChatMessage]) -> String {
+        // Build C array of llama_chat_message with strdup'd strings.
+        var cMessages: [llama_chat_message] = []
+        var allocated: [UnsafeMutablePointer<CChar>] = []
+        cMessages.reserveCapacity(messages.count)
+
+        for message in messages {
+            let rolePtr = strdup(message.role)!
+            let contentPtr = strdup(message.content)!
+            allocated.append(rolePtr)
+            allocated.append(contentPtr)
+            cMessages.append(
+                llama_chat_message(role: UnsafePointer(rolePtr),
+                                   content: UnsafePointer(contentPtr))
+            )
+        }
+        defer { allocated.forEach { free($0) } }
+
+        let tmpl = llama_model_chat_template(model, nil) // default template, if any
+
+        // First call to size the buffer.
+        var bufferSize = 0
+        for message in messages {
+            bufferSize += message.role.utf8.count + message.content.utf8.count + 16
+        }
+        bufferSize = max(bufferSize * 2, 1024)
+
+        var buffer = [CChar](repeating: 0, count: bufferSize)
+        let written = cMessages.withUnsafeBufferPointer { ptr -> Int32 in
+            llama_chat_apply_template(
+                tmpl,
+                ptr.baseAddress,
+                ptr.count,
+                true,            // add assistant generation prompt
+                &buffer,
+                Int32(buffer.count)
+            )
+        }
+
+        if written < 0 {
+            return fallbackPrompt(messages: messages)
+        }
+
+        if Int(written) > buffer.count {
+            // Grow and retry once.
+            buffer = [CChar](repeating: 0, count: Int(written) + 1)
+            let retry = cMessages.withUnsafeBufferPointer { ptr -> Int32 in
+                llama_chat_apply_template(tmpl, ptr.baseAddress, ptr.count, true,
+                                          &buffer, Int32(buffer.count))
+            }
+            if retry < 0 { return fallbackPrompt(messages: messages) }
+            return String(cString: buffer)
+        }
+
+        // `written` is the length; the buffer is already NUL padded.
+        return String(cString: buffer)
+    }
+
+    private func fallbackPrompt(messages: [ChatMessage]) -> String {
+        var out = ""
+        for message in messages {
+            out += "<|im_start|>\(message.role)\n\(message.content)<|im_end|>\n"
+        }
+        out += "<|im_start|>assistant\n"
+        return out
+    }
+
+    // MARK: - Tokenization
+
+    private func tokenize(_ text: String, addBOS: Bool) throws -> [llama_token] {
+        let utf8 = Array(text.utf8CString)
+        let utf8Count = Int32(text.utf8.count)
+
+        // Negative return = required token count.
+        let needed = -llama_tokenize(vocab, utf8, utf8Count, nil, 0, addBOS, true)
+        guard needed > 0 else {
+            // Empty input still tokenizes to BOS in some models; allow 0.
+            if needed == 0 { return [] }
+            throw InferenceError.tokenize
+        }
+
+        var tokens = [llama_token](repeating: 0, count: Int(needed))
+        let count = llama_tokenize(vocab, utf8, utf8Count, &tokens, needed, addBOS, true)
+        guard count >= 0 else { throw InferenceError.tokenize }
+        return Array(tokens.prefix(Int(count)))
+    }
+
+    private func piece(for token: llama_token) -> String {
+        var buffer = [CChar](repeating: 0, count: 256)
+        let n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, true)
+        if n < 0 {
+            var bigger = [CChar](repeating: 0, count: Int(-n) + 1)
+            let m = llama_token_to_piece(vocab, token, &bigger, Int32(bigger.count), 0, true)
+            guard m > 0 else { return "" }
+            let data = Data(bytes: bigger, count: Int(m))
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        guard n > 0 else { return "" }
+        let data = Data(bytes: buffer, count: Int(n))
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    // MARK: - Generation
+
+    struct GenerationResult {
+        let text: String
+        let promptTokens: Int
+        let completionTokens: Int
+    }
+
+    /// Generates a completion for the given (already chat-formatted) prompt.
+    /// `onToken` is called for each decoded piece; return `false` to stop early.
+    func generate(prompt: String,
+                  maxTokens: Int,
+                  temperature: Float,
+                  topP: Float,
+                  onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
+
+        // Reset the KV cache so each request starts fresh.
+        llama_kv_self_clear(context)
+
+        let promptTokens = try tokenize(prompt, addBOS: true)
+        guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
+
+        // Build the sampler chain: top-p -> temperature -> distribution sampling.
+        var samplerParams = llama_sampler_chain_default_params()
+        samplerParams.no_perf = true
+        let sampler = llama_sampler_chain_init(samplerParams)
+        defer { llama_sampler_free(sampler) }
+
+        if temperature <= 0 {
+            llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
+        } else {
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(topP, 1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(0xFFFFFFFF)) // default seed
+        }
+
+        // Decode the prompt.
+        var tokens = promptTokens
+        var batch = tokens.withUnsafeMutableBufferPointer { buf in
+            llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+        }
+        guard llama_decode(context, batch) == 0 else { throw InferenceError.decode }
+
+        var output = ""
+        var generated = 0
+        let limit = max(1, maxTokens)
+
+        while generated < limit {
+            let nCtxUsed = promptTokens.count + generated
+            if nCtxUsed >= contextSize { break }
+
+            let newToken = llama_sampler_sample(sampler, context, -1)
+            if llama_vocab_is_eog(vocab, newToken) { break }
+            llama_sampler_accept(sampler, newToken)
+
+            let text = piece(for: newToken)
+            output += text
+            generated += 1
+
+            if let onToken = onToken, onToken(text) == false {
+                break
+            }
+
+            var next = [newToken]
+            batch = next.withUnsafeMutableBufferPointer { buf in
+                llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+            }
+            guard llama_decode(context, batch) == 0 else { throw InferenceError.decode }
+        }
+
+        return GenerationResult(text: output,
+                                promptTokens: promptTokens.count,
+                                completionTokens: generated)
+    }
+}

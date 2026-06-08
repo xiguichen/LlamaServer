@@ -1,0 +1,81 @@
+# XcodeGen project specification.
+#
+# We generate the .xcodeproj in CI (macOS runner) with `xcodegen generate`.
+# This avoids having to hand-maintain a project.pbxproj on Windows.
+#
+# Prerequisites that CI prepares BEFORE running `xcodegen generate`:
+#   1. vendor/llama.xcframework   (downloaded by scripts/fetch-llama-xcframework.sh)
+#   2. Resources/server.p12       (built by scripts/generate-cert.sh)
+
+name: LlamaServer
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  Telegraph:
+    url: https://github.com/Building42/Telegraph.git
+    from: "0.30.0"
+
+targets:
+  LlamaServer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/App
+      - path: Resources
+        # Resources/server.p12 is generated in CI; treat the folder as resources.
+        buildPhase: resources
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: LlamaServer
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Let users add .gguf models via the Files app / Finder file sharing.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # We are an HTTPS *server*; allow local networking prompts.
+        NSLocalNetworkUsageDescription: "LlamaServer serves LLM requests to other devices on your local network."
+        # Keep serving while screen is on; background execution is limited by iOS.
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.llamaserver
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        # Unsigned build — re-signing happens later on-device (AltStore/Sideloadly/etc).
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        # Note: llama.framework's modulemap auto-links Metal / Accelerate /
+        # Foundation / c++, so no extra OTHER_LDFLAGS are needed.
+    dependencies:
+      - package: Telegraph
+      - framework: vendor/llama.xcframework
+        embed: true
+        codeSign: false
+
+schemes:
+  LlamaServer:
+    build:
+      targets:
+        LlamaServer: all
+    run:
+      config: Debug
+    archive:
+      config: Release

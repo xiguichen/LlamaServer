@@ -1,0 +1,15 @@
+# Normalize line endings. Critical for shell scripts: CRLF breaks bash on the
+# Linux/macOS CI runner ("bash\r: command not found").
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.swift text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.plist text eol=lf
+*.md    text eol=lf
+
+# Binary
+*.p12   binary
+*.png   binary
+*.jpg   binary

@@ -1,0 +1,83 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      llama_tag:
+        description: "llama.cpp release tag with an xcframework.zip asset (e.g. b9553)"
+        required: false
+        default: "b9553"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      # Override on a manual run via the workflow input above.
+      LLAMA_TAG: ${{ github.event.inputs.llama_tag || 'b9553' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Cache llama.xcframework
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: vendor/llama.xcframework
+          key: llama-xcframework-${{ env.LLAMA_TAG }}-${{ hashFiles('scripts/fetch-llama-xcframework.sh') }}
+
+      - name: Fetch prebuilt llama.xcframework
+        if: steps.cache-llama.outputs.cache-hit != 'true'
+        run: bash scripts/fetch-llama-xcframework.sh
+
+      - name: Generate self-signed TLS certificate
+        run: bash scripts/generate-cert.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project LlamaServer.xcodeproj \
+            -scheme LlamaServer
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project LlamaServer.xcodeproj \
+            -scheme LlamaServer \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package unsigned IPA
+        run: bash scripts/package-ipa.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LlamaServer-unsigned-ipa
+          path: LlamaServer-unsigned.ipa
+          if-no-files-found: error
