@@ -26,7 +26,9 @@ final class LlamaHTTPServer {
     }
 
     private let inference: LlamaInference
-    private let server = Server()
+    /// Created in `start()` once the TLS identity is available (Telegraph takes
+    /// the identity at construction; there is no public post-init setter).
+    private var server: Server?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
     private let p12Password: String
@@ -34,11 +36,10 @@ final class LlamaHTTPServer {
     init(inference: LlamaInference, p12Password: String = "llamaserver") {
         self.inference = inference
         self.p12Password = p12Password
-        configureRoutes()
     }
 
-    var isRunning: Bool { server.isRunning }
-    var port: Int { Int(server.port) }
+    var isRunning: Bool { server?.isRunning ?? false }
+    var port: Int { Int(server?.port ?? 0) }
 
     // MARK: - Start / Stop
 
@@ -49,18 +50,21 @@ final class LlamaHTTPServer {
         guard let identity = CertificateIdentity(p12URL: p12URL, passphrase: p12Password) else {
             throw ServerError.identityLoad
         }
-        // Enable HTTPS with our self-signed identity.
-        server.tlsConfig = TLSConfig(identity: identity)
+        // Telegraph enables HTTPS by passing the identity at construction.
+        let server = Server(identity: identity, caCertificates: [])
+        configureRoutes(on: server)
         try server.start(port: Int(port))
+        self.server = server
     }
 
     func stop() {
-        server.stop()
+        server?.stop()
+        server = nil
     }
 
     // MARK: - Routes
 
-    private func configureRoutes() {
+    private func configureRoutes(on server: Server) {
         server.route(.GET, "health") { _ in
             HTTPResponse(.ok, headers: ["Content-Type": "application/json"],
                          body: #"{"status":"ok"}"#.data(using: .utf8)!)

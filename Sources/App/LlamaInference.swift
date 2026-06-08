@@ -210,7 +210,10 @@ final class LlamaInference {
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
 
         // Reset the KV cache so each request starts fresh.
-        llama_kv_self_clear(context)
+        // (b9553 replaced llama_kv_self_clear with the memory API.)
+        if let memory = llama_get_memory(context) {
+            llama_memory_clear(memory, true)
+        }
 
         let promptTokens = try tokenize(prompt, addBOS: true)
         guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
