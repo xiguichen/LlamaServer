@@ -5,25 +5,26 @@ struct ContentView: View {
     @EnvironmentObject private var viewModel: ServerViewModel
     @State private var showingImporter = false
 
-    /// .gguf has no registered UTType; treat it as raw data so the importer
-    /// shows all files and we accept whatever the user picks.
+    /// .gguf has no registered UTType; accept any file and let the user pick.
     private var allowedTypes: [UTType] { [.data, .item] }
 
     var body: some View {
         NavigationView {
             Form {
-                modelSection
+                modelsSection
+                downloadSection
                 serverSection
                 statusSection
                 logSection
             }
             .navigationTitle("LlamaServer")
+            .onAppear { viewModel.refreshModels() }
             .fileImporter(isPresented: $showingImporter,
                           allowedContentTypes: allowedTypes,
                           allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
-                    if let url = urls.first { viewModel.selectModel(url: url) }
+                    if let url = urls.first { viewModel.importModel(from: url) }
                 case .failure(let error):
                     viewModel.log("File pick failed: \(error.localizedDescription)")
                 }
@@ -32,21 +33,79 @@ struct ContentView: View {
         .navigationViewStyle(.stack)
     }
 
-    // MARK: - Sections
+    // MARK: - Models
 
-    private var modelSection: some View {
-        Section("Model") {
-            HStack {
-                Text(viewModel.selectedModelURL?.lastPathComponent ?? "No model selected")
-                    .foregroundColor(viewModel.selectedModelURL == nil ? .secondary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Button("Choose .gguf") { showingImporter = true }
+    private var modelsSection: some View {
+        Section {
+            if viewModel.models.isEmpty {
+                Text("No models yet. Import a .gguf or download one below.")
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(viewModel.models) { model in
+                    Button { viewModel.selectModel(model) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: viewModel.selectedModel == model
+                                  ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(viewModel.selectedModel == model
+                                                 ? .accentColor : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.name).lineLimit(1).truncationMode(.middle)
+                                Text(model.sizeText).font(.caption).foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.plain)
                     .disabled(viewModel.isRunning || viewModel.isBusy)
+                }
+                .onDelete { viewModel.deleteModels(at: $0) }
+            }
+        } header: {
+            HStack {
+                Text("Models")
+                Spacer()
+                Button { showingImporter = true } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .disabled(viewModel.isRunning || viewModel.isBusy)
             }
         }
     }
+
+    // MARK: - Download
+
+    private var downloadSection: some View {
+        Section("Download from URL") {
+            TextField("https://…/model.gguf", text: $viewModel.downloadURLString)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .keyboardType(.URL)
+                .disabled(viewModel.downloader.isDownloading)
+
+            if viewModel.downloader.isDownloading {
+                VStack(alignment: .leading, spacing: 8) {
+                    ProgressView(value: viewModel.downloader.progress)
+                    HStack {
+                        Text(viewModel.downloader.progressText)
+                            .font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        Button("Cancel", role: .destructive) { viewModel.cancelDownload() }
+                    }
+                }
+            } else {
+                Button { viewModel.startDownload() } label: {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+                .disabled(viewModel.downloadURLString.isEmpty || viewModel.isRunning)
+            }
+
+            if let err = viewModel.downloader.error, !viewModel.downloader.isDownloading {
+                Text(err).font(.caption).foregroundColor(.red)
+            }
+        }
+    }
+
+    // MARK: - Server config
 
     private var serverSection: some View {
         Section("Server") {
@@ -71,12 +130,12 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Status / control
+
     private var statusSection: some View {
         Section("Status") {
             HStack {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 10, height: 10)
+                Circle().fill(statusColor).frame(width: 10, height: 10)
                 Text(viewModel.status.label)
                 Spacer()
                 if viewModel.isBusy { ProgressView() }
@@ -100,7 +159,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(viewModel.isRunning ? .red : .green)
-            .disabled(viewModel.isBusy || (viewModel.selectedModelURL == nil && !viewModel.isRunning))
+            .disabled(viewModel.isBusy || (viewModel.selectedModel == nil && !viewModel.isRunning))
         }
     }
 

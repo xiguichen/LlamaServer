@@ -1,8 +1,8 @@
 import Foundation
 import Combine
 
-/// Drives the UI: model selection, starting/stopping the inference engine and
-/// the HTTPS server, and surfacing status + logs.
+/// Drives the UI: model library (list / import / download), selecting a model,
+/// and starting/stopping the inference engine + HTTPS server.
 @MainActor
 final class ServerViewModel: ObservableObject {
 
@@ -22,15 +22,32 @@ final class ServerViewModel: ObservableObject {
         }
     }
 
+    // Server state
     @Published private(set) var status: Status = .stopped
-    @Published var selectedModelURL: URL?
     @Published var port: String = "8443"
     @Published var contextSize: String = "4096"
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
+    // Model library
+    @Published private(set) var models: [ModelFile] = []
+    @Published var selectedModel: ModelFile?
+    @Published var downloadURLString: String = ""
+
+    /// Re-published so the UI updates on download progress.
+    let downloader = ModelDownloader()
+
     private var inference: LlamaInference?
     private var httpServer: LlamaHTTPServer?
+    private var cancellables = Set<AnyCancellable>()
+
+    init() {
+        // Forward the downloader's changes so views observing this VM refresh.
+        downloader.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        refreshModels()
+    }
 
     var isRunning: Bool {
         if case .running = status { return true }
@@ -47,18 +64,86 @@ final class ServerViewModel: ObservableObject {
         return "https://\(ip):\(port)"
     }
 
-    // MARK: - Model selection
+    // MARK: - Model library
 
-    func selectModel(url: URL) {
-        selectedModelURL = url
-        log("Selected model: \(url.lastPathComponent)")
+    func refreshModels() {
+        models = ModelStore.shared.list()
+        // Drop selection if the file is gone.
+        if let selected = selectedModel, !models.contains(selected) {
+            selectedModel = models.first(where: { $0.url == selected.url })
+        }
+    }
+
+    func selectModel(_ model: ModelFile) {
+        guard !isRunning, !isBusy else { return }
+        selectedModel = model
+        log("Selected model: \(model.name)")
+    }
+
+    func importModel(from url: URL) {
+        log("Importing \(url.lastPathComponent)…")
+        Task.detached(priority: .userInitiated) {
+            do {
+                let dest = try ModelStore.shared.importModel(from: url)
+                await MainActor.run {
+                    self.refreshModels()
+                    self.selectedModel = self.models.first { $0.url == dest }
+                    self.log("Imported \(dest.lastPathComponent)")
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("Import failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func deleteModels(at offsets: IndexSet) {
+        guard !isRunning, !isBusy else { return }
+        let targets = offsets.map { models[$0] }
+        for model in targets {
+            do {
+                try ModelStore.shared.delete(model.url)
+                log("Deleted \(model.name)")
+                if selectedModel == model { selectedModel = nil }
+            } catch {
+                log("Delete failed: \(error.localizedDescription)")
+            }
+        }
+        refreshModels()
+    }
+
+    // MARK: - Download
+
+    func startDownload() {
+        let urlString = downloadURLString
+        guard !urlString.isEmpty else { return }
+        log("Downloading from \(urlString)")
+        downloader.start(urlString: urlString) { [weak self] dest in
+            Task { @MainActor in
+                guard let self else { return }
+                if let dest = dest {
+                    self.refreshModels()
+                    self.selectedModel = self.models.first { $0.url == dest }
+                    self.downloadURLString = ""
+                    self.log("Downloaded \(dest.lastPathComponent)")
+                } else {
+                    self.log("Download failed: \(self.downloader.error ?? "cancelled")")
+                }
+            }
+        }
+    }
+
+    func cancelDownload() {
+        downloader.cancel()
+        log("Download cancelled")
     }
 
     // MARK: - Start / Stop
 
     func start() {
         guard !isRunning, !isBusy else { return }
-        guard let modelURL = selectedModelURL else {
+        guard let model = selectedModel else {
             status = .error("No model selected")
             return
         }
@@ -67,21 +152,16 @@ final class ServerViewModel: ObservableObject {
             return
         }
         let ctxSize = Int(contextSize) ?? 4096
+        let modelPath = model.url.path
 
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
-        log("Starting… loading model into memory")
+        log("Starting… loading \(model.name) into memory")
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-
-            // Access the security-scoped resource for files picked from Files app.
-            let needsScopedAccess = modelURL.startAccessingSecurityScopedResource()
-            defer { if needsScopedAccess { modelURL.stopAccessingSecurityScopedResource() } }
-
             do {
-                let engine = try LlamaInference(modelPath: modelURL.path,
-                                                contextSize: ctxSize)
+                let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize)
                 let server = LlamaHTTPServer(inference: engine)
                 try server.start(port: portValue)
 
@@ -90,9 +170,7 @@ final class ServerViewModel: ObservableObject {
                     self.httpServer = server
                     self.status = .running
                     self.log("Model loaded. HTTPS server listening on port \(portValue).")
-                    if let url = self.serverURL {
-                        self.log("Reachable at \(url)")
-                    }
+                    if let url = self.serverURL { self.log("Reachable at \(url)") }
                 }
             } catch {
                 await MainActor.run {
