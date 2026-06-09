@@ -108,7 +108,7 @@ struct ContentView: View {
     // MARK: - Server config
 
     private var serverSection: some View {
-        Section("Server") {
+        Section {
             HStack {
                 Text("Port")
                 Spacer()
@@ -127,6 +127,10 @@ struct ContentView: View {
                     .frame(width: 100)
                     .disabled(viewModel.isRunning || viewModel.isBusy)
             }
+        } header: {
+            Text("Server")
+        } footer: {
+            Text("Context is automatically capped to fit this device's memory (and the model's trained window). Large values like 140000 aren't possible on-device.")
         }
     }
 

@@ -22,14 +22,16 @@ final class LlamaInference {
         case contextInit
         case tokenize
         case decode
+        case insufficientMemory(String)
 
         var errorDescription: String? {
             switch self {
-            case .backendInit:        return "Failed to initialize llama backend."
-            case .modelLoad(let p):   return "Failed to load model at \(p)."
-            case .contextInit:        return "Failed to create llama context."
-            case .tokenize:           return "Failed to tokenize input."
-            case .decode:             return "llama_decode failed (context may be full)."
+            case .backendInit:           return "Failed to initialize llama backend."
+            case .modelLoad(let p):      return "Failed to load model \((p as NSString).lastPathComponent). The architecture may be unsupported by this llama.cpp build."
+            case .contextInit:           return "Failed to create llama context."
+            case .tokenize:              return "Failed to tokenize input."
+            case .decode:                return "llama_decode failed (context may be full)."
+            case .insufficientMemory(let m): return m
             }
         }
     }
@@ -37,18 +39,38 @@ final class LlamaInference {
     private let model: OpaquePointer
     private let context: OpaquePointer
     private let vocab: OpaquePointer
-    private let contextSize: Int
+
+    /// The effective context size actually used (may be smaller than requested
+    /// after clamping to the device's memory budget and the model's train window).
+    let contextSize: Int
 
     let modelName: String
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize: Int = 4096, threads: Int32 = 0) throws {
+    init(modelPath: String, contextSize requestedContext: Int = 4096, threads: Int32 = 0) throws {
         // Backend init is idempotent across instances within a process.
         llama_backend_init()
 
         self.modelName = (modelPath as NSString).lastPathComponent
-        self.contextSize = contextSize
+
+        // Memory budget. iOS jetsam-kills (SIGKILL — uncatchable) apps well below
+        // total RAM, so be conservative. We use this to fail *gracefully* with a
+        // message instead of letting a too-big load/KV-cache crash the app.
+        let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
+        let budget = Int(Double(totalRAM) * 0.55)
+        let computeReserve = 320 * 1024 * 1024   // activation/compute buffers headroom
+
+        // Pre-check the model file size before attempting the load that would
+        // otherwise OOM-kill the whole app.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: modelPath),
+           let fileSize = (attrs[.size] as? NSNumber)?.intValue,
+           fileSize + computeReserve > budget {
+            let f = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
+            let b = ByteCountFormatter.string(fromByteCount: Int64(budget), countStyle: .file)
+            throw InferenceError.insufficientMemory(
+                "Model is \(f) but only ~\(b) is usable on this device. Try a smaller model (1–3B, Q4).")
+        }
 
         var modelParams = llama_model_default_params()
         // Offload everything to Metal GPU when available.
@@ -65,9 +87,37 @@ final class LlamaInference {
         }
         self.vocab = loadedVocab
 
+        // Clamp the context size to (a) the model's trained window, (b) a hard
+        // ceiling, and (c) what the KV cache can fit in the memory budget.
+        // Without this, a large value (e.g. 140000) allocates a multi-GB KV cache
+        // and the app is instantly OOM-killed.
+        let nLayer    = Int(llama_model_n_layer(loadedModel))
+        let nHead     = max(1, Int(llama_model_n_head(loadedModel)))
+        let nHeadKV   = max(1, Int(llama_model_n_head_kv(loadedModel)))
+        let nEmbd     = Int(llama_model_n_embd(loadedModel))
+        let nCtxTrain = Int(llama_model_n_ctx_train(loadedModel))
+        let modelSize = Int(llama_model_size(loadedModel))
+
+        let headDim = max(1, nEmbd / nHead)
+        // K + V, f16 (2 bytes), across all layers, per token.
+        let kvBytesPerToken = max(1, 2 * nLayer * (headDim * nHeadKV) * 2)
+
+        var effective = min(max(256, requestedContext), 32768)
+        if nCtxTrain > 0 { effective = min(effective, nCtxTrain) }
+
+        let kvBudget = budget - modelSize - computeReserve
+        if kvBudget < kvBytesPerToken * 256 {
+            llama_model_free(loadedModel)
+            throw InferenceError.insufficientMemory(
+                "Not enough free memory for a usable KV cache after loading this model. Try a smaller model.")
+        }
+        let maxCtxByMemory = (kvBudget / kvBytesPerToken / 256) * 256   // round down to 256
+        effective = min(effective, maxCtxByMemory)
+        self.contextSize = effective
+
         var ctxParams = llama_context_default_params()
-        ctxParams.n_ctx = UInt32(contextSize)
-        ctxParams.n_batch = UInt32(min(contextSize, 512))
+        ctxParams.n_ctx = UInt32(effective)
+        ctxParams.n_batch = UInt32(min(effective, 512))
         let hwThreads = Int32(ProcessInfo.processInfo.activeProcessorCount)
         let useThreads = threads > 0 ? threads : max(1, hwThreads)
         ctxParams.n_threads = useThreads

@@ -165,11 +165,15 @@ final class ServerViewModel: ObservableObject {
                 let server = LlamaHTTPServer(inference: engine)
                 try server.start(port: portValue)
 
+                let effectiveCtx = engine.contextSize
                 await MainActor.run {
                     self.inference = engine
                     self.httpServer = server
                     self.status = .running
-                    self.log("Model loaded. HTTPS server listening on port \(portValue).")
+                    if effectiveCtx < ctxSize {
+                        self.log("Context reduced to \(effectiveCtx) tokens to fit device memory.")
+                    }
+                    self.log("Model loaded (context \(effectiveCtx)). HTTP server listening on port \(portValue).")
                     if let url = self.serverURL { self.log("Reachable at \(url)") }
                 }
             } catch {
