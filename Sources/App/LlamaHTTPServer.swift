@@ -54,7 +54,7 @@ final class LlamaHTTPServer {
     private func configureRoutes(on server: Server) {
         server.route(.GET, "health") { _ in
             HTTPResponse(.ok, headers: ["Content-Type": "application/json"],
-                         body: #"{"status":"ok"}"#.data(using: .utf8)!)
+                         body: Data(#"{"status":"ok"}"#.utf8))
         }
 
         server.route(.GET, "v1/models") { [weak self] _ in
@@ -74,7 +74,15 @@ final class LlamaHTTPServer {
         return json(encodable: list, status: .ok)
     }
 
+    /// Reject request bodies larger than this to avoid a memory-spike crash.
+    private static let maxRequestBytes = 8 * 1024 * 1024
+    /// Upper bound on client-requested completion length (a foot-gun otherwise).
+    private static let maxCompletionTokens = 4096
+
     private func chatCompletionResponse(request: HTTPRequest) -> HTTPResponse {
+        guard request.body.count <= Self.maxRequestBytes else {
+            return errorResponse("Request body too large", status: .badRequest)
+        }
         let decoder = JSONDecoder()
         guard let body = try? decoder.decode(ChatCompletionRequest.self, from: request.body) else {
             return errorResponse("Invalid request body", status: .badRequest)
@@ -83,10 +91,13 @@ final class LlamaHTTPServer {
             return errorResponse("`messages` must not be empty", status: .badRequest)
         }
 
+        // Durable breadcrumb before any native inference work.
+        NSLog("[LlamaServer] chat request: %d message(s)", body.messages.count)
+
         let prompt = inference.formatPrompt(messages: body.messages)
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
-        let maxTokens = body.max_tokens ?? 512
+        let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
 
         // Run inference synchronously on the serial queue (one request at a time).
         var result: LlamaInference.GenerationResult?

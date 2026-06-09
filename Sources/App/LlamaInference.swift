@@ -76,9 +76,17 @@ final class LlamaInference {
         // Offload everything to Metal GPU when available.
         modelParams.n_gpu_layers = 999
 
+        // Durable breadcrumb: if llama.cpp hard-aborts (GGML_ABORT/SIGABRT) on an
+        // unsupported architecture or OOMs during load, this line is the last
+        // thing in the device console — so a crash is never "without any log".
+        NSLog("[LlamaServer] loading model '%@' (requested ctx %d, budget %d MB)",
+              self.modelName, requestedContext, budget / (1024 * 1024))
+
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
+            NSLog("[LlamaServer] model load returned NULL for '%@'", self.modelName)
             throw InferenceError.modelLoad(modelPath)
         }
+        NSLog("[LlamaServer] model loaded OK: '%@'", self.modelName)
         self.model = loadedModel
 
         guard let loadedVocab = llama_model_get_vocab(loadedModel) else {
@@ -123,11 +131,14 @@ final class LlamaInference {
         ctxParams.n_threads = useThreads
         ctxParams.n_threads_batch = useThreads
 
+        NSLog("[LlamaServer] creating context (%d tokens) for '%@'", effective, self.modelName)
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
+            NSLog("[LlamaServer] context creation returned NULL")
             llama_model_free(loadedModel)
             throw InferenceError.contextInit
         }
         self.context = ctx
+        NSLog("[LlamaServer] context ready (%d tokens)", effective)
     }
 
     deinit {
@@ -146,18 +157,25 @@ final class LlamaInference {
         var cMessages: [llama_chat_message] = []
         var allocated: [UnsafeMutablePointer<CChar>] = []
         cMessages.reserveCapacity(messages.count)
+        // Free everything on every exit path (including early returns below).
+        defer { allocated.forEach { free($0) } }
 
         for message in messages {
-            let rolePtr = strdup(message.role)!
-            let contentPtr = strdup(message.content)!
+            // strdup returns nil only on allocation failure — fall back safely
+            // instead of force-unwrapping (which would crash).
+            guard let rolePtr = strdup(message.role) else {
+                return fallbackPrompt(messages: messages)
+            }
             allocated.append(rolePtr)
+            guard let contentPtr = strdup(message.content) else {
+                return fallbackPrompt(messages: messages)
+            }
             allocated.append(contentPtr)
             cMessages.append(
                 llama_chat_message(role: UnsafePointer(rolePtr),
                                    content: UnsafePointer(contentPtr))
             )
         }
-        defer { allocated.forEach { free($0) } }
 
         let tmpl = llama_model_chat_template(model, nil) // default template, if any
 
@@ -282,7 +300,12 @@ final class LlamaInference {
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(0xFFFFFFFF)) // default seed
         }
 
-        // Decode the prompt.
+        // Decode the prompt. Breadcrumb first: a too-long prompt or a native
+        // abort here would otherwise kill the process with no trace.
+        NSLog("[LlamaServer] decoding prompt (%d tokens, ctx %d)", promptTokens.count, contextSize)
+        if promptTokens.count >= contextSize {
+            throw InferenceError.decode
+        }
         var tokens = promptTokens
         var batch = tokens.withUnsafeMutableBufferPointer { buf in
             llama_batch_get_one(buf.baseAddress, Int32(buf.count))

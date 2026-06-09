@@ -49,13 +49,27 @@ final class ModelStore {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Destination URL for a given file name inside the library, ensuring a
-    /// non-empty `.gguf` name.
+    /// Destination URL for a given file name inside the library, ensuring a safe,
+    /// non-empty `.gguf` name. Sanitizes against path traversal — a name from an
+    /// untrusted download URL must not be able to escape the models directory.
     func destinationURL(for fileName: String) -> URL {
-        var name = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Keep only the final path component, then strip separators / leading
+        // dots so values like "..", "../x", or "a/b" can't traverse out.
+        var name = (fileName as NSString).lastPathComponent
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") { name.removeFirst() }
         if name.isEmpty { name = "model.gguf" }
         if !name.lowercased().hasSuffix(".gguf") { name += ".gguf" }
-        return directory.appendingPathComponent(name)
+
+        let dest = directory.appendingPathComponent(name)
+        // Defense in depth: confirm the result is still directly inside the dir.
+        guard dest.deletingLastPathComponent().standardizedFileURL.path
+                == directory.standardizedFileURL.path else {
+            return directory.appendingPathComponent("model.gguf")
+        }
+        return dest
     }
 
     /// Copies a (possibly security-scoped) picked file into the library.
