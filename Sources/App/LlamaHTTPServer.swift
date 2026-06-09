@@ -1,41 +1,35 @@
 import Foundation
 import Telegraph
 
-/// HTTPS server exposing an OpenAI-compatible API backed by `LlamaInference`.
+/// HTTP server exposing an OpenAI-compatible API backed by `LlamaInference`.
 ///
 /// Endpoints:
 ///   GET  /health                 -> { "status": "ok" }
 ///   GET  /v1/models              -> OpenAI model list
 ///   POST /v1/chat/completions    -> OpenAI chat completion (non-streaming)
 ///
-/// TLS identity is loaded from the bundled `server.p12` (self-signed, generated
-/// by scripts/generate-cert.sh). LAN clients must trust / ignore the self-signed
-/// cert (e.g. curl --insecure, or OpenAI clients with verification disabled).
+/// Plain HTTP (no TLS) for friction-free use on a trusted local network — LAN
+/// clients just use `http://<device-ip>:<port>` with no certificate to trust.
+/// Do not expose this directly to untrusted networks.
 final class LlamaHTTPServer {
 
     enum ServerError: Error, LocalizedError {
-        case missingCertificate
-        case identityLoad
+        case startFailed(String)
 
         var errorDescription: String? {
             switch self {
-            case .missingCertificate: return "server.p12 not found in app bundle."
-            case .identityLoad:       return "Could not load TLS identity from server.p12."
+            case .startFailed(let message): return message
             }
         }
     }
 
     private let inference: LlamaInference
-    /// Created in `start()` once the TLS identity is available (Telegraph takes
-    /// the identity at construction; there is no public post-init setter).
     private var server: Server?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
-    private let p12Password: String
 
-    init(inference: LlamaInference, p12Password: String = "llamaserver") {
+    init(inference: LlamaInference) {
         self.inference = inference
-        self.p12Password = p12Password
     }
 
     var isRunning: Bool { server?.isRunning ?? false }
@@ -44,14 +38,7 @@ final class LlamaHTTPServer {
     // MARK: - Start / Stop
 
     func start(port: UInt16) throws {
-        guard let p12URL = Bundle.main.url(forResource: "server", withExtension: "p12") else {
-            throw ServerError.missingCertificate
-        }
-        guard let identity = CertificateIdentity(p12URL: p12URL, passphrase: p12Password) else {
-            throw ServerError.identityLoad
-        }
-        // Telegraph enables HTTPS by passing the identity at construction.
-        let server = Server(identity: identity, caCertificates: [])
+        let server = Server()
         configureRoutes(on: server)
         try server.start(port: Int(port))
         self.server = server

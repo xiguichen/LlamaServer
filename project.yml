@@ -3,9 +3,8 @@
 # We generate the .xcodeproj in CI (macOS runner) with `xcodegen generate`.
 # This avoids having to hand-maintain a project.pbxproj on Windows.
 #
-# Prerequisites that CI prepares BEFORE running `xcodegen generate`:
-#   1. vendor/llama.xcframework   (downloaded by scripts/fetch-llama-xcframework.sh)
-#   2. Resources/server.p12       (built by scripts/generate-cert.sh)
+# Prerequisite that CI prepares BEFORE running `xcodegen generate`:
+#   vendor/llama.xcframework   (downloaded by scripts/fetch-llama-xcframework.sh)
 
 name: LlamaServer
 
@@ -26,9 +25,6 @@ targets:
     platform: iOS
     sources:
       - path: Sources/App
-      - path: Resources
-        # Resources/server.p12 is generated in CI; treat the folder as resources.
-        buildPhase: resources
     info:
       path: Sources/App/Info.plist
       properties:

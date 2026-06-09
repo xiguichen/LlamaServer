@@ -44,9 +44,6 @@ jobs:
         if: steps.cache-llama.outputs.cache-hit != 'true'
         run: bash scripts/fetch-llama-xcframework.sh
 
-      - name: Generate self-signed TLS certificate
-        run: bash scripts/generate-cert.sh
-
       - name: Generate Xcode project
         run: xcodegen generate
 

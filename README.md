@@ -1,18 +1,18 @@
 # LlamaServer (iOS)
 
 Run a local LLM on your iPhone and serve it to your LAN over an **OpenAI-compatible
-HTTPS API**. Built around [llama.cpp](https://github.com/ggml-org/llama.cpp).
+HTTP API**. Built around [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
 - **No Mac required to build.** The app is built in **GitHub Actions** on a macOS
   runner and produces an **unsigned `.ipa`**.
 - **No Apple Developer account / no code signing in CI.** Re-signing happens later,
   on-device, with a sideloading tool (AltStore, Sideloadly, ESign, etc.).
 - **UI** to pick a `.gguf` model, set port/context size, and **Start/Stop** the server.
-- **HTTPS** server (self-signed cert) reachable from other machines on the same network.
+- **HTTP** server reachable from other machines on the same network (no cert hassle).
 
-> Status: scaffolding is complete and self-consistent, but it has **not been
-> compiled** (authored on Windows). The first CI run is the source of truth — see
-> [Known risks](#known-risks-first-build).
+> Status: **builds in CI** and produces a valid unsigned IPA. Runtime (loading a
+> model + serving inference) is unverified — that needs a real device. See
+> [Caveats](#caveats).
 
 ---
 
@@ -25,7 +25,7 @@ executable, this app:
 1. **Links llama.cpp as a framework** (`llama.xcframework`) directly into the app.
    The framework is the **official prebuilt** artifact downloaded from llama.cpp's
    GitHub releases (no local compilation).
-2. Runs an **in-process HTTPS server** ([Telegraph](https://github.com/Building42/Telegraph))
+2. Runs an **in-process HTTP server** ([Telegraph](https://github.com/Building42/Telegraph))
    that wraps llama inference and exposes the OpenAI API.
 
 The UI "Start/Stop" controls loading the model + starting/stopping that embedded server.
@@ -38,10 +38,10 @@ The UI "Start/Stop" controls loading the model + starting/stopping that embedded
 | GET    | `/v1/models`            | Lists the loaded model               |
 | POST   | `/v1/chat/completions`  | OpenAI chat completion (non-streaming) |
 
-Example from another machine on the network (self-signed cert → `--insecure`):
+Example from another machine on the network:
 
 ```bash
-curl --insecure https://<iphone-ip>:8443/v1/chat/completions \
+curl http://<iphone-ip>:8443/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"local","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
@@ -54,17 +54,17 @@ curl --insecure https://<iphone-ip>:8443/v1/chat/completions \
 project.yml                       XcodeGen spec (the .xcodeproj is generated in CI)
 Sources/App/
   LlamaServerApp.swift            App entry point
-  ContentView.swift               SwiftUI UI (model picker, start/stop, logs)
+  ContentView.swift               SwiftUI UI (models list, import, download, start/stop)
   ServerViewModel.swift           UI <-> engine/server glue
+  ModelStore.swift                Model library (list/import/delete in Documents/models)
+  ModelDownloader.swift           URL download to disk with live progress
   LlamaInference.swift            llama.cpp C API wrapper (load/tokenize/generate)
-  LlamaHTTPServer.swift           HTTPS server + OpenAI routes (Telegraph)
+  LlamaHTTPServer.swift           HTTP server + OpenAI routes (Telegraph)
   OpenAIModels.swift              Codable request/response types
   NetworkInfo.swift               LAN IPv4 discovery
   Info.plist                      App metadata + file sharing + local-network usage
-Resources/                        server.p12 (generated) is bundled here
 scripts/
   fetch-llama-xcframework.sh      Downloads official prebuilt llama.xcframework -> vendor/
-  generate-cert.sh                Generates the self-signed Resources/server.p12
   package-ipa.sh                  Wraps the .app into an unsigned .ipa
 .github/workflows/build.yml       CI: build -> unsigned .ipa artifact
 ```
@@ -82,7 +82,7 @@ scripts/
    contains `LlamaServer-unsigned.ipa`.
 
 The pipeline:
-`fetch prebuilt llama.xcframework` → `generate self-signed cert` → `xcodegen generate` →
+`fetch prebuilt llama.xcframework` → `xcodegen generate` →
 `xcodebuild (CODE_SIGNING_ALLOWED=NO)` → `package Payload/ → .ipa` → upload artifact.
 
 > The prebuilt framework is **downloaded, not compiled** — and cached across runs.
@@ -113,8 +113,8 @@ After install — three ways to add a model, then run it:
 2. **Pick a model** from the **Models** list (tap to select; swipe to delete).
    All models live in the app's `Documents/models` and persist between launches.
 3. Set a port (default `8443`) and tap **Start Server**.
-4. The UI shows the endpoint, e.g. `https://192.168.1.50:8443`. Point your OpenAI
-   client there (disable TLS verification for the self-signed cert).
+4. The UI shows the endpoint, e.g. `http://192.168.1.50:8443`. Point your OpenAI
+   client there (plain HTTP — no certificate needed).
 
 > Use small, quantized models (e.g. 1B–3B, `Q4_K_M`) — phones are RAM-limited.
 
@@ -125,7 +125,6 @@ After install — three ways to add a model, then run it:
 ```bash
 brew install xcodegen
 bash scripts/fetch-llama-xcframework.sh     # downloads vendor/llama.xcframework
-bash scripts/generate-cert.sh               # produces Resources/server.p12
 xcodegen generate
 open LlamaServer.xcodeproj
 ```
@@ -136,21 +135,17 @@ open LlamaServer.xcodeproj
 
 ---
 
-## Known risks (first build)
+## Caveats
 
-This was authored without a compiler. Most-likely things to adjust on the first CI run:
+The project **builds green** in CI and produces a valid unsigned IPA. Remaining
+caveats:
 
-1. **llama.cpp API drift.** `Sources/App/LlamaInference.swift` is written against a
-   recent C API (`llama_model_load_from_file`, `llama_init_from_model`,
-   `llama_sampler_*`, `llama_vocab_is_eog`, `llama_kv_self_clear`, …) matching the
-   pinned tag **`b9553`**. If you change `LLAMA_TAG` in
+1. **Runtime is unverified.** The build + IPA structure are confirmed, but actually
+   loading a model and serving inference can only be proven on a real iPhone.
+2. **llama.cpp API drift.** `Sources/App/LlamaInference.swift` is written against the
+   pinned tag **`b9553`** C API. If you change `LLAMA_TAG` in
    `scripts/fetch-llama-xcframework.sh` and the build fails, adjust that file.
-2. **xcframework layout / module name.** Verified for `b9553`: the zip contains
-   `build-apple/llama.xcframework`, the device slice is `ios-arm64`, and the module
-   is named `llama` (the modulemap auto-links Metal/Accelerate/Foundation/c++).
-3. **Telegraph TLS API.** Uses `Server()`, `server.tlsConfig = TLSConfig(identity:)`,
-   `CertificateIdentity(p12URL:passphrase:)`. Verify against the resolved Telegraph
-   version (`from: 0.30.0` in `project.yml`).
+3. **Plain HTTP.** The server has no TLS — only expose it on trusted local networks.
 4. **`UIBackgroundModes: audio`** is a placeholder to reduce suspension; iOS still
    limits background networking. Keep the app foregrounded for reliable serving.
 

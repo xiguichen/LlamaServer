@@ -61,7 +61,7 @@ final class ServerViewModel: ObservableObject {
 
     var serverURL: String? {
         guard let ip = ipAddress else { return nil }
-        return "https://\(ip):\(port)"
+        return "http://\(ip):\(port)"
     }
 
     // MARK: - Model library
