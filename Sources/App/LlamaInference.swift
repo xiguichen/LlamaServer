@@ -306,11 +306,14 @@ final class LlamaInference {
         if promptTokens.count >= contextSize {
             throw InferenceError.decode
         }
+        // The batch from llama_batch_get_one points INTO this buffer, so the
+        // decode must happen while the pointer is valid (inside the closure).
         var tokens = promptTokens
-        var batch = tokens.withUnsafeMutableBufferPointer { buf in
-            llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+        let promptDecode = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
+            let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+            return llama_decode(context, batch)
         }
-        guard llama_decode(context, batch) == 0 else { throw InferenceError.decode }
+        guard promptDecode == 0 else { throw InferenceError.decode }
 
         var output = ""
         var generated = 0
@@ -333,10 +336,11 @@ final class LlamaInference {
             }
 
             var next = [newToken]
-            batch = next.withUnsafeMutableBufferPointer { buf in
-                llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+            let stepDecode = next.withUnsafeMutableBufferPointer { buf -> Int32 in
+                let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
+                return llama_decode(context, batch)
             }
-            guard llama_decode(context, batch) == 0 else { throw InferenceError.decode }
+            guard stepDecode == 0 else { throw InferenceError.decode }
         }
 
         return GenerationResult(text: output,
