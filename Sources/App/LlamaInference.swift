@@ -333,23 +333,37 @@ final class LlamaInference {
             offset += count
         }
 
+        // Diagnostic: how does the formatted prompt end? It should include the
+        // assistant generation header (e.g. "<|im_start|>assistant").
+        let promptTail = String(prompt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
+        FileLogger.shared.log("prompt tail: …\(promptTail)")
+
         var output = ""
         var generated = 0
+        var finishReason = "length"
         let limit = max(1, maxTokens)
 
         while generated < limit {
             let nCtxUsed = promptTokens.count + generated
-            if nCtxUsed >= contextSize { break }
+            if nCtxUsed >= contextSize { finishReason = "context_full"; break }
 
             let newToken = llama_sampler_sample(sampler, context, -1)
-            if llama_vocab_is_eog(vocab, newToken) { break }
+            if llama_vocab_is_eog(vocab, newToken) {
+                finishReason = generated == 0 ? "eog_immediate" : "eog"
+                break
+            }
             llama_sampler_accept(sampler, newToken)
 
             let text = piece(for: newToken)
+            if generated == 0 {
+                let snippet = text.replacingOccurrences(of: "\n", with: "\\n")
+                FileLogger.shared.log("first token id=\(newToken) piece='\(snippet)'")
+            }
             output += text
             generated += 1
 
             if let onToken = onToken, onToken(text) == false {
+                finishReason = "stopped"
                 break
             }
 
@@ -360,6 +374,8 @@ final class LlamaInference {
             }
             guard stepDecode == 0 else { throw InferenceError.decode }
         }
+
+        FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason))")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,
