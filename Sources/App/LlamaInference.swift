@@ -44,6 +44,10 @@ final class LlamaInference {
     /// after clamping to the device's memory budget and the model's train window).
     let contextSize: Int
 
+    /// Logical max tokens per llama_decode call. A single decode must NOT exceed
+    /// this or llama.cpp aborts (ggml_abort) — the prompt is decoded in chunks.
+    let batchSize: Int
+
     let modelName: String
 
     // MARK: - Lifecycle
@@ -122,10 +126,11 @@ final class LlamaInference {
         let maxCtxByMemory = (kvBudget / kvBytesPerToken / 256) * 256   // round down to 256
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
+        self.batchSize = min(effective, 512)
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(effective)
-        ctxParams.n_batch = UInt32(min(effective, 512))
+        ctxParams.n_batch = UInt32(batchSize)
         let hwThreads = Int32(ProcessInfo.processInfo.activeProcessorCount)
         let useThreads = threads > 0 ? threads : max(1, hwThreads)
         ctxParams.n_threads = useThreads
@@ -305,18 +310,28 @@ final class LlamaInference {
 
         // Decode the prompt. Breadcrumb first: a too-long prompt or a native
         // abort here would otherwise kill the process with no trace.
-        FileLogger.shared.log("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize))")
+        FileLogger.shared.log("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
         if promptTokens.count >= contextSize {
             throw InferenceError.decode
         }
+        // A single llama_decode must NOT exceed n_batch or llama.cpp aborts
+        // (ggml_abort/SIGABRT), so feed the prompt in batchSize-sized chunks.
+        // Positions auto-continue across calls from the context's KV state.
         // The batch from llama_batch_get_one points INTO this buffer, so the
         // decode must happen while the pointer is valid (inside the closure).
         var tokens = promptTokens
-        let promptDecode = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
-            let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
-            return llama_decode(context, batch)
+        let total = tokens.count
+        var offset = 0
+        while offset < total {
+            let count = min(batchSize, total - offset)
+            let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
+                let chunk = buf.baseAddress!.advanced(by: offset)
+                let batch = llama_batch_get_one(chunk, Int32(count))
+                return llama_decode(context, batch)
+            }
+            guard status == 0 else { throw InferenceError.decode }
+            offset += count
         }
-        guard promptDecode == 0 else { throw InferenceError.decode }
 
         var output = ""
         var generated = 0
