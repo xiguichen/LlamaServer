@@ -46,7 +46,20 @@ final class ServerViewModel: ObservableObject {
         downloader.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // Show persisted history (incl. breadcrumbs from before any prior crash).
+        logs = FileLogger.shared.tail(maxLines: 200)
         refreshModels()
+    }
+
+    /// URL of the on-disk log (for ShareLink / Files app).
+    var logFileURL: URL { FileLogger.shared.fileURL }
+
+    /// Reload the persisted log into the panel (e.g. after a crash + relaunch).
+    func reloadLogs() { logs = FileLogger.shared.tail(maxLines: 200) }
+
+    func clearLogs() {
+        FileLogger.shared.clear()
+        logs = []
     }
 
     var isRunning: Bool {
@@ -205,6 +218,8 @@ final class ServerViewModel: ObservableObject {
         let timestamp = Self.formatter.string(from: Date())
         logs.append("[\(timestamp)] \(message)")
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
+        // Persist to disk (crash-survivable; readable via Files app / Share).
+        FileLogger.shared.log(message)
     }
 
     private static let formatter: DateFormatter = {

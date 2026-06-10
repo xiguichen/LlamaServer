@@ -18,7 +18,10 @@ struct ContentView: View {
                 logSection
             }
             .navigationTitle("LlamaServer")
-            .onAppear { viewModel.refreshModels() }
+            .onAppear {
+                viewModel.refreshModels()
+                viewModel.reloadLogs()
+            }
             .fileImporter(isPresented: $showingImporter,
                           allowedContentTypes: allowedTypes,
                           allowsMultipleSelection: false) { result in
@@ -168,7 +171,7 @@ struct ContentView: View {
     }
 
     private var logSection: some View {
-        Section("Logs") {
+        Section {
             if viewModel.logs.isEmpty {
                 Text("No activity yet.").foregroundColor(.secondary)
             } else {
@@ -178,11 +181,28 @@ struct ContentView: View {
                             Text(line)
                                 .font(.system(.caption2, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
                         }
                     }
                 }
-                .frame(height: 160)
+                .frame(height: 180)
             }
+        } header: {
+            HStack {
+                Text("Logs")
+                Spacer()
+                Button { viewModel.reloadLogs() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                ShareLink(item: viewModel.logFileURL) {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                Button(role: .destructive) { viewModel.clearLogs() } label: {
+                    Image(systemName: "trash")
+                }
+            }
+        } footer: {
+            Text("Logs persist to llamaserver.log and survive a crash. Read them on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload — the last line shows the step that crashed.")
         }
     }
 

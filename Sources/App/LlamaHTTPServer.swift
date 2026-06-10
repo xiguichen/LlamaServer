@@ -92,7 +92,7 @@ final class LlamaHTTPServer {
         }
 
         // Durable breadcrumb before any native inference work.
-        NSLog("[LlamaServer] chat request: %d message(s)", body.messages.count)
+        FileLogger.shared.log("chat request: \(body.messages.count) message(s)")
 
         let prompt = inference.formatPrompt(messages: body.messages)
         let temperature = Float(body.temperature ?? 0.8)

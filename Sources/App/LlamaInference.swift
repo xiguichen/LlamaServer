@@ -76,17 +76,17 @@ final class LlamaInference {
         // Offload everything to Metal GPU when available.
         modelParams.n_gpu_layers = 999
 
-        // Durable breadcrumb: if llama.cpp hard-aborts (GGML_ABORT/SIGABRT) on an
-        // unsupported architecture or OOMs during load, this line is the last
-        // thing in the device console — so a crash is never "without any log".
-        NSLog("[LlamaServer] loading model '%@' (requested ctx %d, budget %d MB)",
-              self.modelName, requestedContext, budget / (1024 * 1024))
+        // Durable breadcrumb flushed to disk: if llama.cpp hard-aborts
+        // (GGML_ABORT/SIGABRT) on an unsupported architecture or OOMs during
+        // load, this line survives the crash in llamaserver.log — so a crash is
+        // never "without any log", and it's readable on-device (no Mac needed).
+        FileLogger.shared.log("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
 
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
-            NSLog("[LlamaServer] model load returned NULL for '%@'", self.modelName)
+            FileLogger.shared.log("model load returned NULL for '\(self.modelName)'")
             throw InferenceError.modelLoad(modelPath)
         }
-        NSLog("[LlamaServer] model loaded OK: '%@'", self.modelName)
+        FileLogger.shared.log("model loaded OK: '\(self.modelName)'")
         self.model = loadedModel
 
         guard let loadedVocab = llama_model_get_vocab(loadedModel) else {
@@ -131,14 +131,14 @@ final class LlamaInference {
         ctxParams.n_threads = useThreads
         ctxParams.n_threads_batch = useThreads
 
-        NSLog("[LlamaServer] creating context (%d tokens) for '%@'", effective, self.modelName)
+        FileLogger.shared.log("creating context (\(effective) tokens) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
-            NSLog("[LlamaServer] context creation returned NULL")
+            FileLogger.shared.log("context creation returned NULL")
             llama_model_free(loadedModel)
             throw InferenceError.contextInit
         }
         self.context = ctx
-        NSLog("[LlamaServer] context ready (%d tokens)", effective)
+        FileLogger.shared.log("context ready (\(effective) tokens)")
     }
 
     deinit {
@@ -305,7 +305,7 @@ final class LlamaInference {
 
         // Decode the prompt. Breadcrumb first: a too-long prompt or a native
         // abort here would otherwise kill the process with no trace.
-        NSLog("[LlamaServer] decoding prompt (%d tokens, ctx %d)", promptTokens.count, contextSize)
+        FileLogger.shared.log("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize))")
         if promptTokens.count >= contextSize {
             throw InferenceError.decode
         }
