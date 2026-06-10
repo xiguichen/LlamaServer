@@ -78,7 +78,7 @@ struct ContentView: View {
     // MARK: - Download
 
     private var downloadSection: some View {
-        Section("Download from URL") {
+        Section {
             TextField("https://…/model.gguf", text: $viewModel.downloadURLString)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
@@ -105,6 +105,10 @@ struct ContentView: View {
             if let err = viewModel.downloader.error, !viewModel.downloader.isDownloading {
                 Text(err).font(.caption).foregroundColor(.red)
             }
+        } header: {
+            Text("Download from URL")
+        } footer: {
+            Text("Downloads continue when the screen locks or the app is backgrounded — you don't need to keep the screen on.")
         }
     }
 

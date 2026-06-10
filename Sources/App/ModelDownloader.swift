@@ -12,6 +12,10 @@ final class ModelDownloader: NSObject, ObservableObject {
     @Published private(set) var totalBytes: Int64 = 0
     @Published private(set) var error: String?
 
+    /// Stored by the app delegate when iOS relaunches the app to deliver
+    /// background-download completion events.
+    static var backgroundCompletionHandler: (() -> Void)?
+
     private var task: URLSessionDownloadTask?
     private var suggestedName = "model.gguf"
     private var onComplete: ((URL?) -> Void)?
@@ -23,10 +27,15 @@ final class ModelDownloader: NSObject, ObservableObject {
     private let progressMinInterval: CFAbsoluteTime = 0.1   // ~10 updates/sec max
 
     private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        // Model downloads can be large; allow generous timeouts.
-        config.timeoutIntervalForResource = 60 * 60
+        // A background session lets the download continue when the screen is
+        // locked or the app is backgrounded — the system transfer daemon keeps
+        // going and wakes the app to finish. Avoids losing the connection on
+        // auto-lock/suspend.
+        let config = URLSessionConfiguration.background(withIdentifier: "llamaserver.modeldownload")
+        config.isDiscretionary = false          // user-initiated: start immediately
+        config.sessionSendsLaunchEvents = true  // relaunch app to finish if needed
+        // Model downloads can be large/slow; allow generous resource timeout.
+        config.timeoutIntervalForResource = 6 * 60 * 60
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
@@ -144,6 +153,16 @@ extension ModelDownloader: URLSessionDownloadDelegate {
         } catch {
             setError(error.localizedDescription)
             finish(nil)
+        }
+    }
+
+    /// Called after all background events for the session have been delivered;
+    /// invoke the system-provided completion handler so iOS knows we're done.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            let handler = ModelDownloader.backgroundCompletionHandler
+            ModelDownloader.backgroundCompletionHandler = nil
+            handler?()
         }
     }
 

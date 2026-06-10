@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 /// Drives the UI: model library (list / import / download), selecting a model,
 /// and starting/stopping the inference engine + HTTPS server.
@@ -131,10 +132,13 @@ final class ServerViewModel: ObservableObject {
     func startDownload() {
         let urlString = downloadURLString
         guard !urlString.isEmpty else { return }
+        // Keep the screen awake so auto-lock doesn't suspend us mid-download.
+        UIApplication.shared.isIdleTimerDisabled = true
         log("Downloading from \(urlString)")
         downloader.start(urlString: urlString) { [weak self] dest in
             Task { @MainActor in
                 guard let self else { return }
+                UIApplication.shared.isIdleTimerDisabled = false
                 if let dest = dest {
                     self.refreshModels()
                     self.selectedModel = self.models.first { $0.url == dest }
@@ -149,6 +153,7 @@ final class ServerViewModel: ObservableObject {
 
     func cancelDownload() {
         downloader.cancel()
+        UIApplication.shared.isIdleTimerDisabled = false
         log("Download cancelled")
     }
 
