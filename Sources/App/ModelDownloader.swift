@@ -15,6 +15,12 @@ final class ModelDownloader: NSObject, ObservableObject {
     private var task: URLSessionDownloadTask?
     private var suggestedName = "model.gguf"
     private var onComplete: ((URL?) -> Void)?
+    /// Throttle UI progress publishing. didWriteData fires per network chunk
+    /// (hundreds–thousands/sec); publishing each one storms SwiftUI and pegs the
+    /// main thread, tripping the iOS CPU watchdog. Updated only on the (serial)
+    /// delegate queue.
+    private var lastProgressPublish: CFAbsoluteTime = 0
+    private let progressMinInterval: CFAbsoluteTime = 0.1   // ~10 updates/sec max
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -58,6 +64,7 @@ final class ModelDownloader: NSObject, ObservableObject {
             self.error = nil
         }
 
+        lastProgressPublish = 0   // let the first chunk publish immediately
         let task = session.downloadTask(with: url)
         self.task = task
         task.resume()
@@ -100,12 +107,20 @@ extension ModelDownloader: URLSessionDownloadDelegate {
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
+        // Coalesce high-frequency chunk callbacks into at most ~10 UI updates/sec
+        // (always emit the final one) to avoid a SwiftUI re-render storm.
+        let isFinal = totalBytesExpectedToWrite > 0 && totalBytesWritten >= totalBytesExpectedToWrite
+        let now = CFAbsoluteTimeGetCurrent()
+        guard isFinal || now - lastProgressPublish >= progressMinInterval else { return }
+        lastProgressPublish = now
+
+        let pct = totalBytesExpectedToWrite > 0
+            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            : 0
         DispatchQueue.main.async {
             self.receivedBytes = totalBytesWritten
             self.totalBytes = totalBytesExpectedToWrite
-            self.progress = totalBytesExpectedToWrite > 0
-                ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-                : 0
+            self.progress = pct
         }
     }
 
