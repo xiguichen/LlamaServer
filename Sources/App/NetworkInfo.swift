@@ -23,14 +23,19 @@ enum NetworkInfo {
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
         while let current = ptr {
             let interface = current.pointee
-            let family = interface.ifa_addr.pointee.sa_family
+            defer { ptr = interface.ifa_next }
 
-            if family == UInt8(AF_INET), let addr = interface.ifa_addr {
+            // getifaddrs can return entries with a NULL ifa_addr — guard before
+            // dereferencing, otherwise this nil-derefs and crashes.
+            guard let addr = interface.ifa_addr else { continue }
+            let family = addr.pointee.sa_family
+
+            if family == UInt8(AF_INET) {
                 let name = String(cString: interface.ifa_name)
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 let result = getnameinfo(
                     addr,
-                    socklen_t(interface.ifa_addr.pointee.sa_len),
+                    socklen_t(addr.pointee.sa_len),
                     &host, socklen_t(host.count),
                     nil, 0,
                     NI_NUMERICHOST
@@ -46,7 +51,6 @@ enum NetworkInfo {
                     }
                 }
             }
-            ptr = current.pointee.ifa_next
         }
 
         return preferred ?? fallback
