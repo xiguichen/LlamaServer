@@ -62,7 +62,7 @@ final class FileLogger {
 
     func clear() {
         queue.sync {
-            try? "".write(to: fileURL, options: .atomic)
+            try? Data().write(to: fileURL, options: .atomic)
         }
     }
 
