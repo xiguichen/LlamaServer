@@ -202,8 +202,11 @@ final class LlamaInference {
             return fallbackPrompt(messages: messages)
         }
 
-        if Int(written) > buffer.count {
-            // Grow and retry once.
+        if Int(written) >= buffer.count {
+            // Grow and retry once. Use `>=` because when `written == buffer.count`
+            // the buffer is completely filled with no room for the trailing NUL,
+            // and `String(cString:)` below would then read past the end of the
+            // array (out-of-bounds read / garbage / crash).
             buffer = [CChar](repeating: 0, count: Int(written) + 1)
             let retry = cMessages.withUnsafeBufferPointer { ptr -> Int32 in
                 llama_chat_apply_template(tmpl, ptr.baseAddress, ptr.count, true,
