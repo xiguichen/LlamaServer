@@ -120,6 +120,12 @@ final class LlamaHTTPServer {
             return errorResponse("Generation produced no result", status: .internalServerError)
         }
 
+        // Strip ANSI escape sequences the model may emit (e.g. 24-bit color codes).
+        let cleanText = result.text.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;]*m",
+            with: "",
+            options: .regularExpression)
+
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString)",
             object: "chat.completion",
@@ -128,7 +134,7 @@ final class LlamaHTTPServer {
             choices: [
                 ChatCompletionChoice(
                     index: 0,
-                    message: ChatMessage(role: "assistant", content: result.text),
+                    message: ChatMessage(role: "assistant", content: cleanText),
                     finish_reason: "stop"
                 )
             ],
