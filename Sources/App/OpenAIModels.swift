@@ -57,3 +57,32 @@ struct APIError: Codable {
     }
     let error: Detail
 }
+
+// MARK: - Streaming (SSE) models
+
+struct StreamingChunk: Codable {
+    let id: String
+    let object: String
+    let created: Int
+    let model: String
+    let choices: [StreamingChoice]
+
+    init(id: String, created: Int, model: String, choices: [StreamingChoice]) {
+        self.id = id
+        self.object = "chat.completion.chunk"
+        self.created = created
+        self.model = model
+        self.choices = choices
+    }
+}
+
+struct StreamingChoice: Codable {
+    let index: Int
+    let delta: Delta
+    let finish_reason: String?
+}
+
+struct Delta: Codable {
+    let role: String?
+    let content: String?
+}

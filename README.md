@@ -36,7 +36,7 @@ The UI "Start/Stop" controls loading the model + starting/stopping that embedded
 |--------|-------------------------|--------------------------------------|
 | GET    | `/health`               | `{"status":"ok"}`                    |
 | GET    | `/v1/models`            | Lists the loaded model               |
-| POST   | `/v1/chat/completions`  | OpenAI chat completion (non-streaming) |
+| POST   | `/v1/chat/completions`  | OpenAI chat completion (streaming + non-streaming) |
 
 Example from another machine on the network:
 
@@ -152,7 +152,7 @@ caveats:
 ## Roadmap / TODO
 
 - [x] Model library: list / select / import / **download from URL**.
-- [ ] Streaming responses (SSE) for `/v1/chat/completions`.
+- [x] Streaming responses (SSE) for `/v1/chat/completions`.
 - [ ] Persist the last-used model and settings.
 - [x] Pin a specific `llama.cpp` release tag (`b9553`, prebuilt xcframework).
 - [ ] Optional bearer-token auth for the API.
