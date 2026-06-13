@@ -94,16 +94,17 @@ final class LlamaHTTPServer {
         // Durable breadcrumb before any native inference work.
         FileLogger.shared.log("chat request: \(body.messages.count) message(s)")
 
-        let prompt = inference.formatPrompt(messages: body.messages)
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
         let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
 
-        // Run inference synchronously on the serial queue (one request at a time).
+        // All llama API access (formatPrompt + generate) must be serialized —
+        // the model/context is NOT thread-safe. Run both inside the serial queue.
         var result: LlamaInference.GenerationResult?
         var failure: Error?
         inferenceQueue.sync {
             do {
+                let prompt = inference.formatPrompt(messages: body.messages)
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 temperature: temperature,

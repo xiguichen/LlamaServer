@@ -289,6 +289,8 @@ final class LlamaInference {
         // (b9553 replaced llama_kv_self_clear with the memory API.)
         if let memory = llama_get_memory(context) {
             llama_memory_clear(memory, true)
+        } else {
+            FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared")
         }
 
         let promptTokens = try tokenize(prompt, addBOS: true)
@@ -348,6 +350,11 @@ final class LlamaInference {
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
 
             let newToken = llama_sampler_sample(sampler, context, -1)
+            guard newToken != -1 else {
+                finishReason = "sampler_error"
+                FileLogger.shared.log("llama_sampler_sample returned -1 (invalid token)")
+                break
+            }
             if llama_vocab_is_eog(vocab, newToken) {
                 finishReason = generated == 0 ? "eog_immediate" : "eog"
                 break
