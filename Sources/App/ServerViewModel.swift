@@ -188,6 +188,7 @@ final class ServerViewModel: ObservableObject {
                     self.inference = engine
                     self.httpServer = server
                     self.status = .running
+                    UIApplication.shared.isIdleTimerDisabled = true
                     if effectiveCtx < ctxSize {
                         self.log("Context reduced to \(effectiveCtx) tokens to fit device memory.")
                     }
@@ -210,6 +211,7 @@ final class ServerViewModel: ObservableObject {
         httpServer = nil
         inference = nil       // deinit frees the llama context/model
         status = .stopped
+        UIApplication.shared.isIdleTimerDisabled = false
         log("Server stopped and model unloaded.")
     }
 

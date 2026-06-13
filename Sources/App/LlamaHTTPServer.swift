@@ -29,6 +29,7 @@ final class LlamaHTTPServer {
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
     private var requestCount = 0
     private var heartbeatTimer: Timer?
+    private var listenPort: UInt16 = 0
 
     init(inference: LlamaInference) {
         self.inference = inference
@@ -40,12 +41,18 @@ final class LlamaHTTPServer {
     // MARK: - Start / Stop
 
     func start(port: UInt16) throws {
+        listenPort = port
         let server = Server()
         configureRoutes(on: server)
         try server.start(port: Int(port))
         self.server = server
         DispatchQueue.main.async {
-            self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                if let srv = self.server, !srv.isRunning {
+                    FileLogger.shared.log("[heartbeat] listener down — restarting")
+                    self.restartListener()
+                }
                 FileLogger.shared.log("[heartbeat] alive")
             }
         }
@@ -56,6 +63,24 @@ final class LlamaHTTPServer {
         heartbeatTimer = nil
         server?.stop()
         server = nil
+    }
+
+    /// Re-bind the TCP listener without unloading the model (keeps the inference
+    /// context live). Called when iOS closes the listener socket during suspension.
+    func restartListener() {
+        guard listenPort > 0 else { return }
+        let oldServer = server
+        let newServer = Server()
+        configureRoutes(on: newServer)
+        do {
+            try newServer.start(port: Int(listenPort))
+            oldServer?.stop()
+            self.server = newServer
+            FileLogger.shared.log("listener restarted on port \(listenPort)")
+        } catch {
+            FileLogger.shared.log("listener restart failed: \(error.localizedDescription)")
+            self.server = oldServer
+        }
     }
 
     // MARK: - Routes
