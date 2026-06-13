@@ -27,6 +27,7 @@ final class LlamaHTTPServer {
     private var server: Server?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
+    private var requestCount = 0
 
     init(inference: LlamaInference) {
         self.inference = inference
@@ -91,8 +92,8 @@ final class LlamaHTTPServer {
             return errorResponse("`messages` must not be empty", status: .badRequest)
         }
 
-        // Durable breadcrumb before any native inference work.
-        FileLogger.shared.log("chat request: \(body.messages.count) message(s)")
+        requestCount += 1
+        FileLogger.shared.log("chat request #\(requestCount): \(body.messages.count) message(s)")
 
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
