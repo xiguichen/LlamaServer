@@ -28,6 +28,7 @@ final class LlamaHTTPServer {
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
     private var requestCount = 0
+    private var heartbeatTimer: Timer?
 
     init(inference: LlamaInference) {
         self.inference = inference
@@ -43,9 +44,16 @@ final class LlamaHTTPServer {
         configureRoutes(on: server)
         try server.start(port: Int(port))
         self.server = server
+        DispatchQueue.main.async {
+            self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+                FileLogger.shared.log("[heartbeat] alive")
+            }
+        }
     }
 
     func stop() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
         server?.stop()
         server = nil
     }
