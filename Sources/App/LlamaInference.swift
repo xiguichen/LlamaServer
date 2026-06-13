@@ -287,12 +287,11 @@ final class LlamaInference {
 
         // Reset the KV cache so each request starts fresh.
         // (b9553 replaced llama_kv_self_clear with the memory API.)
+        // NOTE: llama_memory_seq_pos_min/max trigger ggml_abort on empty caches
+        // in this build — do NOT call them for diagnostics.
         if let memory = llama_get_memory(context) {
-            let nSeq = llama_n_rs_seq(context)
-            let posMin = llama_memory_seq_pos_min(memory, -1)
-            let posMax = llama_memory_seq_pos_max(memory, -1)
-            FileLogger.shared.log("KV cache before clear: n_rs_seq=\(nSeq) pos_min=\(posMin) pos_max=\(posMax)")
             llama_memory_clear(memory, true)
+            FileLogger.shared.log("KV cache cleared")
         } else {
             FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared")
         }
