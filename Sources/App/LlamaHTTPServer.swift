@@ -62,8 +62,10 @@ final class LlamaHTTPServer {
 
     private func configureRoutes(on server: Server) {
         server.route(.GET, "health") { _ in
-            HTTPResponse(.ok, headers: ["Content-Type": "application/json"],
-                         body: Data(#"{"status":"ok"}"#.utf8))
+            var resp = HTTPResponse(.ok, headers: ["Content-Type": "application/json"],
+                                    body: Data(#"{"status":"ok"}"#.utf8))
+            resp.headers["Connection"] = "close"
+            return resp
         }
 
         server.route(.GET, "v1/models") { [weak self] _ in
@@ -180,7 +182,9 @@ final class LlamaHTTPServer {
         guard let data = try? encoder.encode(encodable) else {
             return HTTPResponse(.internalServerError)
         }
-        return HTTPResponse(status, headers: ["Content-Type": "application/json"], body: data)
+        var resp = HTTPResponse(status, headers: ["Content-Type": "application/json"], body: data)
+        resp.headers["Connection"] = "close"
+        return resp
     }
 
     private func errorResponse(_ message: String, status: HTTPStatus) -> HTTPResponse {
