@@ -80,6 +80,20 @@ final class LlamaHTTPServer {
     /// Upper bound on client-requested completion length (a foot-gun otherwise).
     private static let maxCompletionTokens = 4096
 
+    private var previousFootprint: UInt64 = 0
+
+    private var memoryMB: UInt64 {
+        // TASK_VM_INFO = 4, phys_footprint matches Xcode memory gauge
+        var info = task_vm_info()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info>.size / MemoryLayout<natural_t>.size)
+        let r = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, 4, $0, &count)
+            }
+        }
+        return r == KERN_SUCCESS ? info.phys_footprint / (1024 * 1024) : 0
+    }
+
     private func chatCompletionResponse(request: HTTPRequest) -> HTTPResponse {
         guard request.body.count <= Self.maxRequestBytes else {
             return errorResponse("Request body too large", status: .badRequest)
@@ -93,7 +107,10 @@ final class LlamaHTTPServer {
         }
 
         requestCount += 1
-        FileLogger.shared.log("chat request #\(requestCount): \(body.messages.count) message(s)")
+        let mem = memoryMB
+        let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
+        previousFootprint = mem
+        FileLogger.shared.log("chat request #\(requestCount): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
