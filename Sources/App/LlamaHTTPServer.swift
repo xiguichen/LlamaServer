@@ -83,15 +83,15 @@ final class LlamaHTTPServer {
     private var previousFootprint: UInt64 = 0
 
     private var memoryMB: UInt64 {
-        // TASK_VM_INFO = 4, phys_footprint matches Xcode memory gauge
-        var info = task_vm_info()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info>.size / MemoryLayout<natural_t>.size)
+        // MACH_TASK_BASIC_INFO = 20
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
         let r = withUnsafeMutablePointer(to: &info) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, 4, $0, &count)
+                task_info(mach_task_self_, 20, $0, &count)
             }
         }
-        return r == KERN_SUCCESS ? info.phys_footprint / (1024 * 1024) : 0
+        return r == KERN_SUCCESS ? info.resident_size / (1024 * 1024) : 0
     }
 
     private func chatCompletionResponse(request: HTTPRequest) -> HTTPResponse {
