@@ -363,7 +363,9 @@ final class LlamaHTTPServer {
         let instruction = """
         You have access to the following tools. When you want to use a tool, respond with EXACTLY this format (no markdown, no extra text around it):
 
-        <tool_call>{"name": "tool_name", "arguments": {"arg1": "val1"}}</tool_call>
+        <tool_call>{"name": "tool_name", "arguments": {"param1": "val1", "param2": "val2"}}</tool_call>
+
+        IMPORTANT: The `arguments` object MUST include ALL required parameters listed in the tool's JSON schema. Never omit a required parameter.
 
         Available tools:
         \(toolsStr)
