@@ -37,8 +37,9 @@ final class LlamaInference {
     }
 
     private let model: OpaquePointer
-    private let context: OpaquePointer
+    private var context: OpaquePointer
     private let vocab: OpaquePointer
+    private let threadCount: Int32
 
     /// The effective context size actually used (may be smaller than requested
     /// after clamping to the device's memory budget and the model's train window).
@@ -135,6 +136,7 @@ final class LlamaInference {
         let useThreads = threads > 0 ? threads : max(1, hwThreads)
         ctxParams.n_threads = useThreads
         ctxParams.n_threads_batch = useThreads
+        self.threadCount = useThreads
 
         FileLogger.shared.log("creating context (\(effective) tokens) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
@@ -144,6 +146,28 @@ final class LlamaInference {
         }
         self.context = ctx
         FileLogger.shared.log("context ready (\(effective) tokens)")
+    }
+
+    /// Frees the old llama_context and creates a fresh one. This is called after
+    /// many generations to flush any accumulated GPU/allocator state that could
+    /// cause Metal to hang on `llama_sampler_sample`.
+    func recreateContext() throws {
+        llama_free(context)
+
+        var ctxParams = llama_context_default_params()
+        ctxParams.n_ctx = UInt32(contextSize)
+        ctxParams.n_batch = UInt32(batchSize)
+        ctxParams.n_threads = threadCount
+        ctxParams.n_threads_batch = threadCount
+
+        guard let ctx = llama_init_from_model(model, ctxParams) else {
+            throw InferenceError.contextInit
+        }
+        context = ctx
+        cachedTokenCount = 0
+        lastPromptText = nil
+        cachedTokenIds = []
+        FileLogger.shared.log("context recreated (\(contextSize) tokens)")
     }
 
     deinit {

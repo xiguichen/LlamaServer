@@ -45,6 +45,11 @@ final class LlamaHTTPServer {
     private var server: StreamableServer?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
+    /// Counter of successful generations. Used to periodically recreate the
+    /// llama_context and flush accumulated GPU/allocator state.
+    private var generationCount = 0
+    /// Recreate the context every N generations to avoid Metal GPU stalls.
+    private let contextRecreateThreshold = 10
     private let requestCountLock = OSAllocatedUnfairLock()
     private var _requestCount = 0
     private var requestCount: Int {
@@ -235,6 +240,11 @@ final class LlamaHTTPServer {
                     }
                     return true
                 }
+                self.generationCount += 1
+                if self.generationCount >= self.contextRecreateThreshold {
+                    try self.inference.recreateContext()
+                    self.generationCount = 0
+                }
 
                 // Final chunk with usage
                 if let usageData = try? JSONEncoder().encode(
@@ -296,6 +306,14 @@ final class LlamaHTTPServer {
                                                 maxTokens: maxTokens,
                                                 temperature: temperature,
                                                 topP: topP)
+
+                // Periodically recreate the context to flush accumulated
+                // GPU/allocator state that could otherwise cause Metal to hang.
+                generationCount += 1
+                if generationCount >= contextRecreateThreshold {
+                    try inference.recreateContext()
+                    generationCount = 0
+                }
             } catch {
                 failure = error
             }
