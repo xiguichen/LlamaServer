@@ -308,7 +308,9 @@ final class LlamaInference {
                 llama_memory_clear(memory, true)
                 FileLogger.shared.log("KV cache cleared\(cachedTokenCount > 0 ? " (last cached \(cachedTokenCount))" : "")")
             } else {
-                FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared")
+                FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared, invalidating tracking")
+                cachedTokenCount = 0
+                lastPromptText = nil
             }
         }
         lastPromptText = prompt

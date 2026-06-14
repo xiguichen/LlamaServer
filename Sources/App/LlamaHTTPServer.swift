@@ -1,5 +1,6 @@
 import Foundation
 import Telegraph
+import os
 
 // MARK: - StreamableServer
 
@@ -44,7 +45,18 @@ final class LlamaHTTPServer {
     private var server: StreamableServer?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
-    private var requestCount = 0
+    private let requestCountLock = OSAllocatedUnfairLock()
+    private var _requestCount = 0
+    private var requestCount: Int {
+        get { requestCountLock.withLock { _requestCount } }
+        set { requestCountLock.withLock { _requestCount = newValue } }
+    }
+    private func nextRequestNumber() -> Int {
+        requestCountLock.withLock {
+            _requestCount += 1
+            return _requestCount
+        }
+    }
     private var heartbeatTimer: Timer?
     private var listenPort: UInt16 = 0
 
@@ -163,8 +175,7 @@ final class LlamaHTTPServer {
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
-        let currentRequest = requestCount + 1
-        requestCount = currentRequest
+        let currentRequest = nextRequestNumber()
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
@@ -260,11 +271,11 @@ final class LlamaHTTPServer {
             return errorResponse("`messages` must not be empty", status: .badRequest)
         }
 
-        requestCount += 1
+        let currentRequest = nextRequestNumber()
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
-        FileLogger.shared.log("chat request #\(requestCount): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.log("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
@@ -296,7 +307,7 @@ final class LlamaHTTPServer {
         // Breadcrumb after generation, before response assembly: lets us tell
         // whether a process death (jetsam SIGKILL leaves no crash report) happens
         // during generation vs. during response encoding/return.
-        FileLogger.shared.log("generation OK: #\(requestCount) \(result.text.count) chars, encoding response")
+        FileLogger.shared.log("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString)",
