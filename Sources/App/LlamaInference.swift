@@ -187,7 +187,8 @@ final class LlamaInference {
         // First call to size the buffer.
         var bufferSize = 0
         for message in messages {
-            bufferSize += message.role.utf8.count + message.content.utf8.count + 16
+            let contentText = message.content ?? ""
+            bufferSize += message.role.utf8.count + contentText.utf8.count + 16
         }
         bufferSize = max(bufferSize * 2, 1024)
 
@@ -228,7 +229,7 @@ final class LlamaInference {
     private func fallbackPrompt(messages: [ChatMessage]) -> String {
         var out = ""
         for message in messages {
-            out += "<|im_start|>\(message.role)\n\(message.content)<|im_end|>\n"
+            out += "<|im_start|>\(message.role)\n\(message.content ?? "")<|im_end|>\n"
         }
         out += "<|im_start|>assistant\n"
         return out

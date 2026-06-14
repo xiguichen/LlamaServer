@@ -19,6 +19,13 @@ struct ChatMessage: Codable {
     let content: String?
     let tool_calls: [ToolCall]?
     let tool_call_id: String?
+
+    init(role: String, content: String?, tool_calls: [ToolCall]? = nil, tool_call_id: String? = nil) {
+        self.role = role
+        self.content = content
+        self.tool_calls = tool_calls
+        self.tool_call_id = tool_call_id
+    }
 }
 
 struct ToolDefinition: Codable {
