@@ -154,9 +154,7 @@ final class LlamaHTTPServer {
                              created: Int(Date().timeIntervalSince1970),
                              owned_by: "local")
         let list = ModelList(object: "list", data: [info])
-        let resp = json(encodable: list, status: .ok)
-        FileLogger.shared.log("models response: \(resp.body?.count ?? 0) bytes")
-        return resp
+        return json(encodable: list, status: .ok)
     }
 
     /// Reject request bodies larger than this to avoid a memory-spike crash.
