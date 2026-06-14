@@ -275,6 +275,7 @@ final class LlamaInference {
         let text: String
         let promptTokens: Int
         let completionTokens: Int
+        let finishReason: String
     }
 
     /// Tracks the total number of tokens in the KV cache after the last generate()
@@ -408,6 +409,8 @@ final class LlamaInference {
                 break
             }
             if llama_vocab_is_eog(vocab, newToken) {
+                let piece = piece(for: newToken).replacingOccurrences(of: "\n", with: "\\n")
+                FileLogger.shared.log("eog token id=\(newToken) piece='\(piece)' after \(generated) generated tokens")
                 finishReason = generated == 0 ? "eog_immediate" : "eog"
                 break
             }
@@ -441,10 +444,12 @@ final class LlamaInference {
         cachedTokenCount = promptTokens.count + generated
         cachedTokenIds = promptTokens + generatedTokenIds
 
-        FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount))")
+        let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
+        FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,
-                                completionTokens: generated)
+                                completionTokens: generated,
+                                finishReason: finishReason)
     }
 }

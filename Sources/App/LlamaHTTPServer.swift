@@ -119,7 +119,8 @@ final class LlamaHTTPServer {
             guard path == "/v1/chat/completions" || path.hasSuffix("/v1/chat/completions") else { return false }
             guard request.body.count <= Self.maxRequestBytes,
                   let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else { return false }
-            FileLogger.shared.log("chat/completions body.stream=\(body.stream ?? false)")
+            let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
+            FileLogger.shared.log("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
             guard body.stream == true else { return false }
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
@@ -318,7 +319,7 @@ final class LlamaHTTPServer {
                 ChatCompletionChoice(
                     index: 0,
                     message: ChatMessage(role: "assistant", content: result.text),
-                    finish_reason: "stop"
+                    finish_reason: result.finishReason
                 )
             ],
             usage: Usage(
