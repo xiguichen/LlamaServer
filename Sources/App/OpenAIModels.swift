@@ -62,6 +62,12 @@ struct AnyCodable: Codable {
         else if let doubleVal = value as? Double { try container.encode(doubleVal) }
         else if let boolVal = value as? Bool { try container.encode(boolVal) }
         else if let stringVal = value as? String { try container.encode(stringVal) }
+        else if let dictVal = value as? [String: AnyCodable] {
+            try container.encode(dictVal)
+        }
+        else if let arrayVal = value as? [AnyCodable] {
+            try container.encode(arrayVal)
+        }
         else if let dictVal = value as? [String: Any] {
             try container.encode(dictVal.mapValues { AnyCodable($0) })
         }
