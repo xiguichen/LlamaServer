@@ -327,6 +327,21 @@ final class LlamaInference {
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(0xFFFFFFFF)) // default seed
         }
 
+        // Cache and error recovery: if anything below fails, the llama context's
+        // internal position counter and KV cache may be in an undefined state
+        // (partial prompt decode and/or partial generation).  Invalidate the
+        // tracking so the next call always clears the cache and starts fresh.
+        var generationSucceeded = false
+        defer {
+            if !generationSucceeded {
+                if cachedTokenCount > 0 || lastPromptText != nil {
+                    FileLogger.shared.log("generation failed — cache tracking invalidated")
+                }
+                cachedTokenCount = 0
+                lastPromptText = nil
+            }
+        }
+
         // Decode the prompt. Breadcrumb first: a too-long prompt or a native
         // abort here would otherwise kill the process with no trace.
         FileLogger.shared.log("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
@@ -398,6 +413,8 @@ final class LlamaInference {
             }
             guard stepDecode == 0 else { throw InferenceError.decode }
         }
+
+        generationSucceeded = true
 
         // Update cache tracking. Next call can skip the cached prefix.
         cachedTokenCount = promptTokens.count + generated

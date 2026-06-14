@@ -163,11 +163,12 @@ final class LlamaHTTPServer {
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
-        requestCount += 1
+        let currentRequest = requestCount + 1
+        requestCount = currentRequest
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
-        FileLogger.shared.log("streaming chat request #\(requestCount): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.log("streaming chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
         guard !body.messages.isEmpty else {
             connection.send(data: "data: {\"error\":\"messages must not be empty\"}\n\n".data(using: .utf8)!, timeout: 10)
@@ -189,7 +190,7 @@ final class LlamaHTTPServer {
         header += "Connection: keep-alive\r\n"
         header += "\r\n"
         connection.send(data: header.data(using: .utf8)!, timeout: 10)
-        FileLogger.shared.log("streaming #\(requestCount): SSE headers sent, token count=\(body.messages.count)")
+        FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
 
         // First chunk announces role
         if let roleData = try? JSONEncoder().encode(
@@ -242,7 +243,7 @@ final class LlamaHTTPServer {
                 }
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.log("streaming #\(self.requestCount): [DONE] sent, closing connection")
+            FileLogger.shared.log("streaming #\(currentRequest): [DONE] sent, closing connection")
             connection.close(immediately: false)
         }
     }
