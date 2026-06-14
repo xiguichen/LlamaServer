@@ -133,10 +133,11 @@ final class LlamaHTTPServer {
 
     private func configureRoutes(on server: Server) {
         server.route(.GET, "health") { _ in
-            let resp = HTTPResponse(.ok, headers: ["Content-Type": "application/json"],
-                                    body: Data(#"{"status":"ok"}"#.utf8))
-            resp.headers["Connection"] = "close"
-            return resp
+            let body = Data(#"{"status":"ok"}"#.utf8)
+            return HTTPResponse(.ok, headers: [
+                "Content-Type": "application/json",
+                "Content-Length": "\(body.count)"
+            ], body: body)
         }
 
         server.route(.GET, "v1/models") { [weak self] _ in
@@ -153,7 +154,9 @@ final class LlamaHTTPServer {
                              created: Int(Date().timeIntervalSince1970),
                              owned_by: "local")
         let list = ModelList(object: "list", data: [info])
-        return json(encodable: list, status: .ok)
+        let resp = json(encodable: list, status: .ok)
+        FileLogger.shared.log("models response: \(resp.body?.count ?? 0) bytes")
+        return resp
     }
 
     /// Reject request bodies larger than this to avoid a memory-spike crash.
@@ -218,7 +221,8 @@ final class LlamaHTTPServer {
         inferenceQueue.async { [weak self] in
             guard let self = self else { return }
             do {
-                let prompt = self.inference.formatPrompt(messages: body.messages)
+                let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools)
+                let prompt = self.inference.formatPrompt(messages: msgs)
                 _ = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 temperature: temperature,
@@ -288,7 +292,8 @@ final class LlamaHTTPServer {
         var failure: Error?
         inferenceQueue.sync {
             do {
-                let prompt = inference.formatPrompt(messages: body.messages)
+                let msgs = injectToolDefs(messages: body.messages, tools: body.tools)
+                let prompt = inference.formatPrompt(messages: msgs)
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 temperature: temperature,
@@ -338,9 +343,42 @@ final class LlamaHTTPServer {
         guard let data = try? encoder.encode(encodable) else {
             return HTTPResponse(.internalServerError)
         }
-        let resp = HTTPResponse(status, headers: ["Content-Type": "application/json"], body: data)
-        resp.headers["Connection"] = "close"
+        let resp = HTTPResponse(status, headers: [
+            "Content-Type": "application/json",
+            "Content-Length": "\(data.count)"
+        ], body: data)
         return resp
+    }
+
+    /// Serializes tool definitions into the system message so the model knows
+    /// which tools are available and how to call them via <tool_call> tags.
+    private func injectToolDefs(messages: [ChatMessage], tools: [ToolDefinition]?) -> [ChatMessage] {
+        guard let tools = tools, !tools.isEmpty else { return messages }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let toolsData = try? encoder.encode(tools),
+              let toolsStr = String(data: toolsData, encoding: .utf8) else {
+            return messages
+        }
+
+        let instruction = """
+        You have access to the following tools. When you want to use a tool, respond with EXACTLY this format (no markdown, no extra text around it):
+
+        <tool_call>{"name": "tool_name", "arguments": {"arg1": "val1"}}</tool_call>
+
+        Available tools:
+        \(toolsStr)
+        """
+
+        var modified = messages
+        if let idx = modified.firstIndex(where: { $0.role == "system" }) {
+            let existing = modified[idx].content ?? ""
+            modified[idx] = ChatMessage(role: "system", content: instruction + "\n\n" + existing)
+        } else {
+            modified.insert(ChatMessage(role: "system", content: instruction), at: 0)
+        }
+        return modified
     }
 
     private func errorResponse(_ message: String, status: HTTPStatus) -> HTTPResponse {
