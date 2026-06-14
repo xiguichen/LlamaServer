@@ -106,8 +106,9 @@ final class LlamaHTTPServer {
             let path = request.uri.path.lowercased()
             guard path == "/v1/chat/completions" || path.hasSuffix("/v1/chat/completions") else { return false }
             guard request.body.count <= Self.maxRequestBytes,
-                  let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body),
-                  body.stream == true else { return false }
+                  let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else { return false }
+            FileLogger.shared.log("chat/completions body.stream=\(body.stream ?? false)")
+            guard body.stream == true else { return false }
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
         }
@@ -188,6 +189,7 @@ final class LlamaHTTPServer {
         header += "Connection: keep-alive\r\n"
         header += "\r\n"
         connection.send(data: header.data(using: .utf8)!, timeout: 10)
+        FileLogger.shared.log("streaming #\(requestCount): SSE headers sent, token count=\(body.messages.count)")
 
         // First chunk announces role
         if let roleData = try? JSONEncoder().encode(
@@ -240,6 +242,7 @@ final class LlamaHTTPServer {
                 }
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
+            FileLogger.shared.log("streaming #\(self.requestCount): [DONE] sent, closing connection")
             connection.close(immediately: false)
         }
     }
@@ -292,7 +295,7 @@ final class LlamaHTTPServer {
         // Breadcrumb after generation, before response assembly: lets us tell
         // whether a process death (jetsam SIGKILL leaves no crash report) happens
         // during generation vs. during response encoding/return.
-        FileLogger.shared.log("generation OK: \(result.text.count) chars, encoding response")
+        FileLogger.shared.log("generation OK: #\(requestCount) \(result.text.count) chars, encoding response")
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString)",
