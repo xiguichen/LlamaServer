@@ -103,8 +103,8 @@ final class LlamaHTTPServer {
         server.interceptHandler = { [weak self] request, connection in
             guard let self = self,
                   request.method == .POST else { return false }
-            let path = request.path.lowercased()
-            guard path == "v1/chat/completions" || path.hasSuffix("/v1/chat/completions") else { return false }
+            let path = request.uri.path.lowercased()
+            guard path == "/v1/chat/completions" || path.hasSuffix("/v1/chat/completions") else { return false }
             guard request.body.count <= Self.maxRequestBytes,
                   let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body),
                   body.stream == true else { return false }
