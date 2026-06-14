@@ -6,7 +6,7 @@ import Telegraph
 /// Subclass of Telegraph's `Server` that intercepts streaming SSE requests
 /// before they reach the synchronous route handler, giving us direct access
 /// to the underlying `HTTPConnection` for writing chunked data.
-private final class StreamableServer: Server {
+final class StreamableServer: Server {
     /// Return `true` to claim the request (no further processing).
     var interceptHandler: ((HTTPRequest, HTTPConnection) -> Bool)?
 
