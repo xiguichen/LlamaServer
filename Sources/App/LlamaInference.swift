@@ -283,6 +283,9 @@ final class LlamaInference {
     private var cachedTokenCount: Int = 0
     /// The text of the prompt from the last generate() call, for prefix matching.
     private var lastPromptText: String?
+    /// The actual token IDs from the last generate() call (prompt + completion),
+    /// stored for token-level prefix verification during cache reuse.
+    private var cachedTokenIds: [llama_token] = []
 
     /// Generates a completion for the given (already chat-formatted) prompt.
     /// `onToken` is called for each decoded piece; return `false` to stop early.
@@ -298,12 +301,24 @@ final class LlamaInference {
         // Reuse KV cache when the new prompt extends the previous one and has
         // at least as many tokens. This avoids re-decoding the conversation
         // prefix on every request — a big win for multi-turn dialogues.
-        let reuseCache = cachedTokenCount > 0
+        //
+        // Both string-level (hasPrefix) and token-level (cachedTokenIds)
+        // checks are required: the string check ensures the text matches at
+        // the application level, while the token check verifies that the old
+        // token IDs from the cache match the re-tokenized prefix. BPE is
+        // deterministic for the same byte sequence, so the token check should
+        // always pass when the string check does — but we verify anyway to
+        // guard against edge cases (e.g. lossy pieces, tokenizer quirks).
+        let prefixMatches = cachedTokenCount > 0
             && promptTokens.count >= cachedTokenCount
+            && cachedTokenIds.count >= cachedTokenCount
+            && cachedTokenIds.prefix(cachedTokenCount).elementsEqual(promptTokens.prefix(cachedTokenCount))
+        let reuseCache = prefixMatches
             && lastPromptText != nil && prompt.hasPrefix(lastPromptText!)
         if reuseCache {
             FileLogger.shared.log("KV cache reused (\(cachedTokenCount) cached, \(promptTokens.count) total prompt tokens)")
         } else {
+            cachedTokenIds = []
             if let memory = llama_get_memory(context) {
                 llama_memory_clear(memory, true)
                 FileLogger.shared.log("KV cache cleared\(cachedTokenCount > 0 ? " (last cached \(cachedTokenCount))" : "")")
@@ -311,6 +326,7 @@ final class LlamaInference {
                 FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared, invalidating tracking")
                 cachedTokenCount = 0
                 lastPromptText = nil
+                cachedTokenIds = []
             }
         }
         lastPromptText = prompt
@@ -341,6 +357,7 @@ final class LlamaInference {
                 }
                 cachedTokenCount = 0
                 lastPromptText = nil
+                cachedTokenIds = []
             }
         }
 
@@ -376,6 +393,7 @@ final class LlamaInference {
 
         var output = ""
         var generated = 0
+        var generatedTokenIds: [llama_token] = []
         var finishReason = "length"
         let limit = max(1, maxTokens)
 
@@ -394,6 +412,7 @@ final class LlamaInference {
                 break
             }
             llama_sampler_accept(sampler, newToken)
+            generatedTokenIds.append(newToken)
 
             let text = piece(for: newToken)
             if generated == 0 {
@@ -420,6 +439,7 @@ final class LlamaInference {
 
         // Update cache tracking. Next call can skip the cached prefix.
         cachedTokenCount = promptTokens.count + generated
+        cachedTokenIds = promptTokens + generatedTokenIds
 
         FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount))")
 
