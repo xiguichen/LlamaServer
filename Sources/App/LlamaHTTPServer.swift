@@ -201,28 +201,29 @@ final class LlamaHTTPServer {
         let modelName = body.model ?? inference.modelName
         let created = Int(Date().timeIntervalSince1970)
 
-        // Send raw HTTP response headers (Connection: keep-alive, no Content-Length)
-        var header = "HTTP/1.1 200 OK\r\n"
-        header += "Content-Type: text/event-stream\r\n"
-        header += "Cache-Control: no-cache\r\n"
-        header += "Connection: keep-alive\r\n"
-        header += "\r\n"
-        connection.send(data: header.data(using: .utf8)!, timeout: 10)
-        FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
-
-        // First chunk announces role
-        if let roleData = try? JSONEncoder().encode(
-            StreamingChunk(id: chatId, created: created, model: modelName,
-                           choices: [StreamingChoice(index: 0,
-                                                     delta: Delta(role: "assistant", content: nil),
-                                                     finish_reason: nil)])
-        ), let roleStr = String(data: roleData, encoding: .utf8) {
-            connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
-        }
-
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
             guard let self = self else { return }
+
+            // Send SSE headers only when we're about to start generating
+            var header = "HTTP/1.1 200 OK\r\n"
+            header += "Content-Type: text/event-stream\r\n"
+            header += "Cache-Control: no-cache\r\n"
+            header += "Connection: keep-alive\r\n"
+            header += "\r\n"
+            connection.send(data: header.data(using: .utf8)!, timeout: 10)
+            FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
+
+            // First chunk announces role
+            if let roleData = try? JSONEncoder().encode(
+                StreamingChunk(id: chatId, created: created, model: modelName,
+                               choices: [StreamingChoice(index: 0,
+                                                          delta: Delta(role: "assistant", content: nil),
+                                                          finish_reason: nil)])
+            ), let roleStr = String(data: roleData, encoding: .utf8) {
+                connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
+            }
+
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools)
                 let prompt = self.inference.formatPrompt(messages: msgs)
@@ -331,6 +332,15 @@ final class LlamaHTTPServer {
         // during generation vs. during response encoding/return.
         FileLogger.shared.log("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
 
+        let openAIReason: String
+        switch result.finishReason {
+        case "eog", "eog_immediate", "stopped":
+            openAIReason = "stop"
+        case "length", "context_full":
+            openAIReason = "length"
+        default:
+            openAIReason = "stop"
+        }
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString)",
             object: "chat.completion",
@@ -340,7 +350,7 @@ final class LlamaHTTPServer {
                 ChatCompletionChoice(
                     index: 0,
                     message: ChatMessage(role: "assistant", content: result.text),
-                    finish_reason: result.finishReason
+                    finish_reason: openAIReason
                 )
             ],
             usage: Usage(
