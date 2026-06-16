@@ -271,8 +271,21 @@ final class LlamaHTTPServer {
             FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
         }
 
+        // While waiting for the serial inference queue, send SSE keep-alive
+        // comments every 5 s so clients don't time out between the role chunk
+        // and the first generated token.
+        let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        keepAliveSource.schedule(deadline: .now() + 5, repeating: .seconds(5), leeway: .seconds(1))
+        keepAliveSource.setEventHandler { [weak connection] in
+            guard let conn = connection else { return }
+            conn.send(data: ": keepalive\n\n".data(using: .utf8)!, timeout: 5)
+        }
+        keepAliveSource.resume()
+        FileLogger.shared.log("streaming #\(currentRequest): keep-alive timer started")
+
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
+            keepAliveSource.cancel()
             guard let self = self else { return }
             FileLogger.shared.log("streaming #\(currentRequest): async block started (queue wait ended)")
 
