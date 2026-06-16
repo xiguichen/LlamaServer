@@ -179,7 +179,7 @@ enum ToolChoiceField: Codable {
         switch self {
         case .mode(let m): try c.encode(m)
         case .function(let n):
-            try c.encode(["type": "function", "function": ["name": n]])
+            try c.encode(AnyCodable(["type": "function", "function": ["name": n]]))
         }
     }
 }
