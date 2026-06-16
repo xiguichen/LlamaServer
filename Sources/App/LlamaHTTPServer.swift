@@ -62,14 +62,7 @@ final class LlamaHTTPServer {
             return _requestCount
         }
     }
-    /// Tracks the currently-active streaming request ID. When a new streaming
-    /// request arrives while an older one is still queued or in-flight, the old
-    /// one is superseded and stops generating early so the new request doesn't
-    /// wait behind it on the serial inference queue.
-    private var _activeStreamRequestId: Int?  // protected by requestCountLock
-    /// The connection for the currently-active streaming request. Used to force-
-    /// close the old connection when a newer request supersedes it.
-    private var _activeConnection: HTTPConnection?  // protected by requestCountLock
+
     private var heartbeatTimer: Timer?
     private var listenPort: UInt16 = 0
 
@@ -202,17 +195,6 @@ final class LlamaHTTPServer {
             return
         }
 
-        // If another streaming request is still in-flight, supersede it so this
-        // new request runs as soon as possible instead of waiting behind it.
-        requestCountLock.withLock {
-            if let oldId = _activeStreamRequestId {
-                FileLogger.shared.log("streaming #\(oldId) superseded by #\(currentRequest)")
-                _activeConnection?.close(immediately: true)
-            }
-            _activeStreamRequestId = currentRequest
-            _activeConnection = connection
-        }
-
         let temperature = Float(body.temperature ?? 0.8)
         let topP = Float(body.top_p ?? 0.95)
         let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
@@ -223,18 +205,6 @@ final class LlamaHTTPServer {
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
             guard let self = self else { return }
-
-            /// Returns `true` if this request has been superseded by a newer one.
-            func isSuperseded() -> Bool {
-                requestCountLock.withLock { _activeStreamRequestId != currentRequest }
-            }
-
-            // If we were superseded before the async block even started, bail
-            // without sending any response.
-            guard !isSuperseded() else {
-                FileLogger.shared.log("streaming #\(currentRequest): superseded before start, skipping")
-                return
-            }
 
             // Send SSE headers only when we're about to start generating
             var header = "HTTP/1.1 200 OK\r\n"
@@ -262,11 +232,6 @@ final class LlamaHTTPServer {
                                                 maxTokens: maxTokens,
                                                 temperature: temperature,
                                                 topP: topP) { text in
-                    // Stop early if a newer request superseded us
-                    guard !isSuperseded() else {
-                        FileLogger.shared.log("streaming #\(currentRequest): superseded mid-generation, stopping")
-                        return false
-                    }
                     if let chunkData = try? JSONEncoder().encode(
                         StreamingChunk(id: chatId, created: created, model: modelName,
                                        choices: [StreamingChoice(index: 0,
