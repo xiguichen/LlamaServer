@@ -248,31 +248,33 @@ final class LlamaHTTPServer {
         // tool_choice "none" suppresses tools entirely.
         let toolsActive = (body.tools?.isEmpty == false) && !(body.tool_choice?.disablesTools ?? false)
 
+        // Send SSE headers + role chunk immediately so the client gets an HTTP
+        // response even when the serial inference queue is busy with a prior
+        // request. The queue only guards the llama context, not socket writes.
+        var header = "HTTP/1.1 200 OK\r\n"
+        header += "Content-Type: text/event-stream\r\n"
+        header += "Cache-Control: no-cache\r\n"
+        header += "Connection: keep-alive\r\n"
+        header += "Access-Control-Allow-Origin: *\r\n"
+        header += "\r\n"
+        connection.send(data: header.data(using: .utf8)!, timeout: 10)
+        FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
+
+        // First chunk announces role
+        if let roleData = try? JSONEncoder().encode(
+            StreamingChunk(id: chatId, created: created, model: modelName,
+                           choices: [StreamingChoice(index: 0,
+                                                      delta: Delta(role: "assistant", content: nil),
+                                                      finish_reason: nil)])
+        ), let roleStr = String(data: roleData, encoding: .utf8) {
+            connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
+            FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
+        }
+
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
             guard let self = self else { return }
             FileLogger.shared.log("streaming #\(currentRequest): async block started (queue wait ended)")
-
-            // Send SSE headers only when we're about to start generating
-            var header = "HTTP/1.1 200 OK\r\n"
-            header += "Content-Type: text/event-stream\r\n"
-            header += "Cache-Control: no-cache\r\n"
-            header += "Connection: keep-alive\r\n"
-            header += "Access-Control-Allow-Origin: *\r\n"
-            header += "\r\n"
-            connection.send(data: header.data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
-
-            // First chunk announces role
-            if let roleData = try? JSONEncoder().encode(
-                StreamingChunk(id: chatId, created: created, model: modelName,
-                               choices: [StreamingChoice(index: 0,
-                                                          delta: Delta(role: "assistant", content: nil),
-                                                          finish_reason: nil)])
-            ), let roleStr = String(data: roleData, encoding: .utf8) {
-                connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
-                FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
-            }
 
             // When tools are active we must buffer the whole response so the
             // <tool_call> envelope can be parsed into structured tool_calls;
