@@ -83,9 +83,93 @@ struct ChatCompletionRequest: Codable {
     let messages: [ChatMessage]
     let temperature: Double?
     let top_p: Double?
+    let top_k: Int?
+    let min_p: Double?
+    let repeat_penalty: Double?
+    let repeat_last_n: Int?
+    let presence_penalty: Double?
+    let frequency_penalty: Double?
+    let seed: Int?
     let max_tokens: Int?
     let stream: Bool?
+    let stop: StopField?
     let tools: [ToolDefinition]?
+    let tool_choice: ToolChoiceField?
+    let stream_options: StreamOptions?
+}
+
+struct StreamOptions: Codable {
+    let include_usage: Bool?
+}
+
+/// OpenAI's `stop` may be a single string or an array of strings.
+enum StopField: Codable {
+    case one(String)
+    case many([String])
+
+    var values: [String] {
+        switch self {
+        case .one(let s): return [s]
+        case .many(let a): return a
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self) { self = .one(s) }
+        else { self = .many((try? c.decode([String].self)) ?? []) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .one(let s): try c.encode(s)
+        case .many(let a): try c.encode(a)
+        }
+    }
+}
+
+/// `tool_choice` may be "auto" / "none" / "required" or a specific function object.
+enum ToolChoiceField: Codable {
+    case mode(String)               // "auto" | "none" | "required"
+    case function(String)           // a named function
+
+    var disablesTools: Bool {
+        if case .mode(let m) = self { return m == "none" }
+        return false
+    }
+    var requiresTool: Bool {
+        switch self {
+        case .mode(let m): return m == "required"
+        case .function:    return true
+        }
+    }
+    var forcedFunctionName: String? {
+        if case .function(let n) = self { return n }
+        return nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self) {
+            self = .mode(s)
+        } else if let obj = try? c.decode([String: AnyCodable].self),
+                  let fn = obj["function"]?.value as? [String: AnyCodable],
+                  let name = fn["name"]?.value as? String {
+            self = .function(name)
+        } else {
+            self = .mode("auto")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .mode(let m): try c.encode(m)
+        case .function(let n):
+            try c.encode(["type": "function", "function": ["name": n]])
+        }
+    }
 }
 
 struct ChatCompletionChoice: Codable {
@@ -137,13 +221,15 @@ struct StreamingChunk: Codable {
     let created: Int
     let model: String
     let choices: [StreamingChoice]
+    let usage: Usage?
 
-    init(id: String, created: Int, model: String, choices: [StreamingChoice]) {
+    init(id: String, created: Int, model: String, choices: [StreamingChoice], usage: Usage? = nil) {
         self.id = id
         self.object = "chat.completion.chunk"
         self.created = created
         self.model = model
         self.choices = choices
+        self.usage = usage
     }
 }
 
@@ -156,4 +242,70 @@ struct StreamingChoice: Codable {
 struct Delta: Codable {
     let role: String?
     let content: String?
+    let tool_calls: [ToolCall]?
+
+    init(role: String?, content: String?, tool_calls: [ToolCall]? = nil) {
+        self.role = role
+        self.content = content
+        self.tool_calls = tool_calls
+    }
+}
+
+// MARK: - Legacy text-completion models (/v1/completions)
+
+struct CompletionRequest: Codable {
+    let model: String?
+    let prompt: PromptField
+    let temperature: Double?
+    let top_p: Double?
+    let top_k: Int?
+    let min_p: Double?
+    let repeat_penalty: Double?
+    let presence_penalty: Double?
+    let frequency_penalty: Double?
+    let seed: Int?
+    let max_tokens: Int?
+    let stop: StopField?
+}
+
+/// The legacy `prompt` field may be a string or an array of strings.
+enum PromptField: Codable {
+    case one(String)
+    case many([String])
+
+    var joined: String {
+        switch self {
+        case .one(let s): return s
+        case .many(let a): return a.joined(separator: "\n")
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self) { self = .one(s) }
+        else { self = .many((try? c.decode([String].self)) ?? []) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .one(let s): try c.encode(s)
+        case .many(let a): try c.encode(a)
+        }
+    }
+}
+
+struct CompletionChoice: Codable {
+    let index: Int
+    let text: String
+    let finish_reason: String
+}
+
+struct CompletionResponse: Codable {
+    let id: String
+    let object: String
+    let created: Int
+    let model: String
+    let choices: [CompletionChoice]
+    let usage: Usage
 }

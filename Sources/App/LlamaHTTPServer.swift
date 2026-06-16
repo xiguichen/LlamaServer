@@ -153,6 +153,10 @@ final class LlamaHTTPServer {
         server.route(.POST, "v1/chat/completions") { [weak self] request in
             self?.chatCompletionResponse(request: request) ?? HTTPResponse(.internalServerError)
         }
+
+        server.route(.POST, "v1/completions") { [weak self] request in
+            self?.completionResponse(request: request) ?? HTTPResponse(.internalServerError)
+        }
     }
 
     private func modelsResponse() -> HTTPResponse {
@@ -195,12 +199,14 @@ final class LlamaHTTPServer {
             return
         }
 
-        let temperature = Float(body.temperature ?? 0.8)
-        let topP = Float(body.top_p ?? 0.95)
         let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
         let chatId = "chatcmpl-\(UUID().uuidString)"
         let modelName = body.model ?? inference.modelName
         let created = Int(Date().timeIntervalSince1970)
+        let samplingParams = Self.samplingParams(from: body)
+        let includeUsage = body.stream_options?.include_usage ?? false
+        // tool_choice "none" suppresses tools entirely.
+        let toolsActive = (body.tools?.isEmpty == false) && !(body.tool_choice?.disablesTools ?? false)
 
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
@@ -225,21 +231,32 @@ final class LlamaHTTPServer {
                 connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
             }
 
+            // When tools are active we must buffer the whole response so the
+            // <tool_call> envelope can be parsed into structured tool_calls;
+            // token-by-token streaming can't reliably do that. Plain chats still
+            // stream incrementally for good UX.
+            func sendChunk(delta: Delta, finishReason: String?) {
+                if let data = try? JSONEncoder().encode(
+                    StreamingChunk(id: chatId, created: created, model: modelName,
+                                   choices: [StreamingChoice(index: 0, delta: delta,
+                                                             finish_reason: finishReason)])
+                ), let str = String(data: data, encoding: .utf8) {
+                    connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                }
+            }
+
             do {
-                let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools)
+                let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
+                                               toolChoice: body.tool_choice)
                 let prompt = self.inference.formatPrompt(messages: msgs)
-                _ = try self.inference.generate(prompt: prompt,
+                let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
-                                                temperature: temperature,
-                                                topP: topP) { text in
-                    if let chunkData = try? JSONEncoder().encode(
-                        StreamingChunk(id: chatId, created: created, model: modelName,
-                                       choices: [StreamingChoice(index: 0,
-                                                                  delta: Delta(role: nil, content: text),
-                                                                  finish_reason: nil)])
-                    ), let chunkStr = String(data: chunkData, encoding: .utf8) {
-                        connection.send(data: "data: \(chunkStr)\n\n".data(using: .utf8)!, timeout: 10)
-                    }
+                                                params: samplingParams) { text in
+                    // Buffer (don't stream) when a tool call may be forming.
+                    guard !toolsActive else { return true }
+                    let clean = ToolCallParser.stripANSI(text)
+                    guard !clean.isEmpty else { return true }
+                    sendChunk(delta: Delta(role: nil, content: clean), finishReason: nil)
                     return true
                 }
                 self.generationCount += 1
@@ -248,25 +265,49 @@ final class LlamaHTTPServer {
                     self.generationCount = 0
                 }
 
-                // Final chunk with usage
-                if let usageData = try? JSONEncoder().encode(
-                    StreamingChunk(id: chatId, created: created, model: modelName,
-                                   choices: [StreamingChoice(index: 0,
-                                                             delta: Delta(role: nil, content: nil),
-                                                             finish_reason: "stop")])
-                ), let usageStr = String(data: usageData, encoding: .utf8) {
-                    connection.send(data: "data: \(usageStr)\n\n".data(using: .utf8)!, timeout: 10)
+                // Map the engine's finish reason onto the OpenAI vocabulary.
+                var streamReason: String
+                switch genResult.finishReason {
+                case "length", "context_full": streamReason = "length"
+                default:                       streamReason = "stop"
+                }
+
+                if toolsActive {
+                    let parsed = ToolCallParser.parse(genResult.text)
+                    if !parsed.toolCalls.isEmpty {
+                        streamReason = "tool_calls"
+                        if !parsed.cleanedContent.isEmpty {
+                            sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
+                                      finishReason: nil)
+                        }
+                        sendChunk(delta: Delta(role: nil, content: nil,
+                                               tool_calls: parsed.toolCalls),
+                                  finishReason: nil)
+                    } else if !parsed.cleanedContent.isEmpty {
+                        // No tool call after all — flush the buffered content.
+                        sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
+                                  finishReason: nil)
+                    }
+                }
+
+                // Final chunk carries the finish reason.
+                sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
+
+                // Optional usage chunk (OpenAI: empty choices array, usage set).
+                if includeUsage {
+                    let usage = Usage(prompt_tokens: genResult.promptTokens,
+                                      completion_tokens: genResult.completionTokens,
+                                      total_tokens: genResult.promptTokens + genResult.completionTokens)
+                    if let data = try? JSONEncoder().encode(
+                        StreamingChunk(id: chatId, created: created, model: modelName,
+                                       choices: [], usage: usage)
+                    ), let str = String(data: data, encoding: .utf8) {
+                        connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                    }
                 }
             } catch {
                 FileLogger.shared.log("streaming generation error: \(error.localizedDescription)")
-                if let errData = try? JSONEncoder().encode(
-                    StreamingChunk(id: chatId, created: created, model: modelName,
-                                   choices: [StreamingChoice(index: 0,
-                                                             delta: Delta(role: nil, content: nil),
-                                                             finish_reason: "error")])
-                ), let errStr = String(data: errData, encoding: .utf8) {
-                    connection.send(data: "data: \(errStr)\n\n".data(using: .utf8)!, timeout: 10)
-                }
+                sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
             FileLogger.shared.log("streaming #\(currentRequest): [DONE] sent, closing connection")
@@ -292,9 +333,8 @@ final class LlamaHTTPServer {
         previousFootprint = mem
         FileLogger.shared.log("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
-        let temperature = Float(body.temperature ?? 0.8)
-        let topP = Float(body.top_p ?? 0.95)
         let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
+        let samplingParams = Self.samplingParams(from: body)
 
         // All llama API access (formatPrompt + generate) must be serialized —
         // the model/context is NOT thread-safe. Run both inside the serial queue.
@@ -302,12 +342,12 @@ final class LlamaHTTPServer {
         var failure: Error?
         inferenceQueue.sync {
             do {
-                let msgs = injectToolDefs(messages: body.messages, tools: body.tools)
+                let msgs = injectToolDefs(messages: body.messages, tools: body.tools,
+                                          toolChoice: body.tool_choice)
                 let prompt = inference.formatPrompt(messages: msgs)
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
-                                                temperature: temperature,
-                                                topP: topP)
+                                                params: samplingParams)
 
                 // Periodically recreate the context to flush accumulated
                 // GPU/allocator state that could otherwise cause Metal to hang.
@@ -333,7 +373,7 @@ final class LlamaHTTPServer {
         // during generation vs. during response encoding/return.
         FileLogger.shared.log("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
 
-        let openAIReason: String
+        var openAIReason: String
         switch result.finishReason {
         case "eog", "eog_immediate", "stopped":
             openAIReason = "stop"
@@ -342,6 +382,24 @@ final class LlamaHTTPServer {
         default:
             openAIReason = "stop"
         }
+
+        // Parse any <tool_call> envelopes back into structured tool calls and
+        // strip ANSI escapes from the human-visible content. When the model
+        // requested a tool, OpenAI clients expect `tool_calls` on the message
+        // and `finish_reason: "tool_calls"` (mirrors llama-server behavior).
+        let parsed = ToolCallParser.parse(result.text)
+        let assistantMessage: ChatMessage
+        if parsed.toolCalls.isEmpty {
+            assistantMessage = ChatMessage(role: "assistant", content: parsed.cleanedContent)
+        } else {
+            openAIReason = "tool_calls"
+            // OpenAI sends content: null alongside tool_calls; keep any
+            // surrounding prose only if the model emitted some.
+            let content = parsed.cleanedContent.isEmpty ? nil : parsed.cleanedContent
+            assistantMessage = ChatMessage(role: "assistant", content: content,
+                                           tool_calls: parsed.toolCalls)
+        }
+
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString)",
             object: "chat.completion",
@@ -350,7 +408,7 @@ final class LlamaHTTPServer {
             choices: [
                 ChatCompletionChoice(
                     index: 0,
-                    message: ChatMessage(role: "assistant", content: result.text),
+                    message: assistantMessage,
                     finish_reason: openAIReason
                 )
             ],
@@ -379,8 +437,13 @@ final class LlamaHTTPServer {
 
     /// Serializes tool definitions into the system message so the model knows
     /// which tools are available and how to call them via <tool_call> tags.
-    private func injectToolDefs(messages: [ChatMessage], tools: [ToolDefinition]?) -> [ChatMessage] {
+    /// Honors `tool_choice`: "none" skips injection entirely; "required" / a
+    /// named function strengthens the instruction so the model must emit a call.
+    private func injectToolDefs(messages: [ChatMessage],
+                               tools: [ToolDefinition]?,
+                               toolChoice: ToolChoiceField?) -> [ChatMessage] {
         guard let tools = tools, !tools.isEmpty else { return messages }
+        if toolChoice?.disablesTools == true { return messages }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
@@ -389,16 +452,21 @@ final class LlamaHTTPServer {
             return messages
         }
 
-        let instruction = """
+        var instruction = """
         You have access to the following tools. When you want to use a tool, respond with EXACTLY this format (no markdown, no extra text around it):
 
         <tool_call>{"name": "tool_name", "arguments": {"param1": "val1", "param2": "val2"}}</tool_call>
 
         IMPORTANT: The `arguments` object MUST include ALL required parameters listed in the tool's JSON schema. Never omit a required parameter.
-
-        Available tools:
-        \(toolsStr)
         """
+
+        if let forced = toolChoice?.forcedFunctionName {
+            instruction += "\n\nYou MUST call the function named \"\(forced)\" with a <tool_call> and nothing else."
+        } else if toolChoice?.requiresTool == true {
+            instruction += "\n\nYou MUST respond with a <tool_call> and nothing else."
+        }
+
+        instruction += "\n\nAvailable tools:\n\(toolsStr)"
 
         var modified = messages
         if let idx = modified.firstIndex(where: { $0.role == "system" }) {
@@ -408,6 +476,99 @@ final class LlamaHTTPServer {
             modified.insert(ChatMessage(role: "system", content: instruction), at: 0)
         }
         return modified
+    }
+
+    /// Builds the engine sampling parameters from an OpenAI chat request,
+    /// clamping to safe ranges. Unspecified fields fall back to llama.cpp's
+    /// defaults so behavior is unchanged unless a client opts in.
+    static func samplingParams(from body: ChatCompletionRequest) -> LlamaInference.SamplingParams {
+        var p = LlamaInference.SamplingParams()
+        if let t = body.temperature { p.temperature = Float(t) }
+        if let v = body.top_p { p.topP = Float(v) }
+        if let v = body.top_k { p.topK = Int32(v) }
+        if let v = body.min_p { p.minP = Float(v) }
+        if let v = body.repeat_penalty { p.repeatPenalty = Float(v) }
+        if let v = body.repeat_last_n { p.repeatLastN = Int32(v) }
+        if let v = body.presence_penalty { p.presencePenalty = Float(v) }
+        if let v = body.frequency_penalty { p.frequencyPenalty = Float(v) }
+        if let v = body.seed, v >= 0 { p.seed = UInt32(truncatingIfNeeded: v) }
+        if let stop = body.stop { p.stop = stop.values }
+        return p
+    }
+
+    static func samplingParams(from body: CompletionRequest) -> LlamaInference.SamplingParams {
+        var p = LlamaInference.SamplingParams()
+        if let t = body.temperature { p.temperature = Float(t) }
+        if let v = body.top_p { p.topP = Float(v) }
+        if let v = body.top_k { p.topK = Int32(v) }
+        if let v = body.min_p { p.minP = Float(v) }
+        if let v = body.repeat_penalty { p.repeatPenalty = Float(v) }
+        if let v = body.presence_penalty { p.presencePenalty = Float(v) }
+        if let v = body.frequency_penalty { p.frequencyPenalty = Float(v) }
+        if let v = body.seed, v >= 0 { p.seed = UInt32(truncatingIfNeeded: v) }
+        if let stop = body.stop { p.stop = stop.values }
+        return p
+    }
+
+    /// Legacy text-completion endpoint (/v1/completions). Feeds the raw prompt
+    /// to the model without a chat template — some clients still use this.
+    private func completionResponse(request: HTTPRequest) -> HTTPResponse {
+        guard request.body.count <= Self.maxRequestBytes else {
+            return errorResponse("Request body too large", status: .badRequest)
+        }
+        guard let body = try? JSONDecoder().decode(CompletionRequest.self, from: request.body) else {
+            return errorResponse("Invalid request body", status: .badRequest)
+        }
+        let prompt = body.prompt.joined
+        guard !prompt.isEmpty else {
+            return errorResponse("`prompt` must not be empty", status: .badRequest)
+        }
+
+        let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
+        let samplingParams = Self.samplingParams(from: body)
+
+        var result: LlamaInference.GenerationResult?
+        var failure: Error?
+        inferenceQueue.sync {
+            do {
+                result = try inference.generate(prompt: prompt,
+                                                maxTokens: maxTokens,
+                                                params: samplingParams)
+                generationCount += 1
+                if generationCount >= contextRecreateThreshold {
+                    try inference.recreateContext()
+                    generationCount = 0
+                }
+            } catch {
+                failure = error
+            }
+        }
+
+        if let failure = failure {
+            return errorResponse(failure.localizedDescription, status: .internalServerError)
+        }
+        guard let result = result else {
+            return errorResponse("Generation produced no result", status: .internalServerError)
+        }
+
+        let reason: String
+        switch result.finishReason {
+        case "length", "context_full": reason = "length"
+        default:                       reason = "stop"
+        }
+
+        let response = CompletionResponse(
+            id: "cmpl-\(UUID().uuidString)",
+            object: "text_completion",
+            created: Int(Date().timeIntervalSince1970),
+            model: body.model ?? inference.modelName,
+            choices: [CompletionChoice(index: 0,
+                                       text: ToolCallParser.stripANSI(result.text),
+                                       finish_reason: reason)],
+            usage: Usage(prompt_tokens: result.promptTokens,
+                         completion_tokens: result.completionTokens,
+                         total_tokens: result.promptTokens + result.completionTokens))
+        return json(encodable: response, status: .ok)
     }
 
     private func errorResponse(_ message: String, status: HTTPStatus) -> HTTPResponse {

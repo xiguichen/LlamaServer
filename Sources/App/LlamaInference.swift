@@ -196,7 +196,10 @@ final class LlamaInference {
                 return fallbackPrompt(messages: messages)
             }
             allocated.append(rolePtr)
-            guard let contentPtr = strdup(message.content) else {
+            // content may be nil (e.g. an assistant turn that only has
+            // tool_calls). strdup(nil) returns nil → never pass nil to the
+            // template engine; reconstruct text from tool_calls instead.
+            guard let contentPtr = strdup(effectiveContent(of: message)) else {
                 return fallbackPrompt(messages: messages)
             }
             allocated.append(contentPtr)
@@ -211,7 +214,7 @@ final class LlamaInference {
         // First call to size the buffer.
         var bufferSize = 0
         for message in messages {
-            let contentText = message.content ?? ""
+            let contentText = effectiveContent(of: message)
             bufferSize += message.role.utf8.count + contentText.utf8.count + 16
         }
         bufferSize = max(bufferSize * 2, 1024)
@@ -253,10 +256,26 @@ final class LlamaInference {
     private func fallbackPrompt(messages: [ChatMessage]) -> String {
         var out = ""
         for message in messages {
-            out += "<|im_start|>\(message.role)\n\(message.content ?? "")<|im_end|>\n"
+            out += "<|im_start|>\(message.role)\n\(effectiveContent(of: message))<|im_end|>\n"
         }
         out += "<|im_start|>assistant\n"
         return out
+    }
+
+    /// The text to feed the chat template for a message. Normally this is the
+    /// message content, but an assistant turn may carry only `tool_calls` with
+    /// `content: nil`; reconstruct the `<tool_call>` envelope so multi-turn tool
+    /// conversations present a consistent history to the model.
+    private func effectiveContent(of message: ChatMessage) -> String {
+        if let content = message.content, !content.isEmpty {
+            return content
+        }
+        guard let toolCalls = message.tool_calls, !toolCalls.isEmpty else {
+            return message.content ?? ""
+        }
+        return toolCalls.map { call in
+            "<tool_call>{\"name\": \"\(call.function.name)\", \"arguments\": \(call.function.arguments)}</tool_call>"
+        }.joined(separator: "\n")
     }
 
     // MARK: - Tokenization
@@ -279,22 +298,99 @@ final class LlamaInference {
         return Array(tokens.prefix(Int(count)))
     }
 
-    private func piece(for token: llama_token) -> String {
+    /// Returns the raw bytes for a token's piece. Multi-byte UTF-8 characters
+    /// can be split across two tokens, so callers must accumulate bytes and only
+    /// decode complete UTF-8 sequences (see `flushDecodableUTF8`). Decoding each
+    /// token's bytes individually drops any character whose bytes straddle a
+    /// token boundary — which silently corrupts CJK, emoji, and accented text.
+    private func pieceBytes(for token: llama_token) -> [UInt8] {
         var buffer = [CChar](repeating: 0, count: 256)
         let n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, true)
         if n < 0 {
             var bigger = [CChar](repeating: 0, count: Int(-n) + 1)
             let m = llama_token_to_piece(vocab, token, &bigger, Int32(bigger.count), 0, true)
-            guard m > 0 else { return "" }
-            let data = Data(bytes: bigger, count: Int(m))
-            return String(data: data, encoding: .utf8) ?? ""
+            guard m > 0 else { return [] }
+            return bigger.prefix(Int(m)).map { UInt8(bitPattern: $0) }
         }
-        guard n > 0 else { return "" }
-        let data = Data(bytes: buffer, count: Int(n))
-        return String(data: data, encoding: .utf8) ?? ""
+        guard n > 0 else { return [] }
+        return buffer.prefix(Int(n)).map { UInt8(bitPattern: $0) }
+    }
+
+    /// Pulls every complete UTF-8 character out of `pending`, returning the
+    /// decoded string and leaving any trailing incomplete sequence buffered.
+    /// A well-formed UTF-8 continuation is at most 4 bytes, so if the buffer
+    /// grows past that and still won't decode the leading bytes are genuine
+    /// garbage (not a split char) and are flushed lossily to avoid a stall.
+    private func flushDecodableUTF8(_ pending: inout [UInt8]) -> String {
+        guard !pending.isEmpty else { return "" }
+        var tryLen = pending.count
+        let minLen = max(0, pending.count - 3)
+        while tryLen > minLen {
+            if let s = String(bytes: pending[0..<tryLen], encoding: .utf8) {
+                pending.removeFirst(tryLen)
+                return s
+            }
+            tryLen -= 1
+        }
+        // Leading bytes are not the tail of an incomplete char — flush lossily.
+        if pending.count > 4 {
+            let s = String(decoding: pending, as: UTF8.self)
+            pending.removeAll(keepingCapacity: true)
+            return s
+        }
+        return ""
+    }
+
+    /// Returns the range of the earliest stop string found in `text`, if any.
+    private func firstStop(in text: String, stops: [String]) -> Range<String.Index>? {
+        var earliest: Range<String.Index>?
+        for s in stops {
+            if let r = text.range(of: s) {
+                if earliest == nil || r.lowerBound < earliest!.lowerBound {
+                    earliest = r
+                }
+            }
+        }
+        return earliest
+    }
+
+    /// Length (in characters) of the longest suffix of `text` that is a proper
+    /// prefix of some stop string. While streaming, this many trailing chars
+    /// must be withheld in case the next token completes a stop sequence.
+    private func partialStopSuffixLength(of text: String, stops: [String]) -> Int {
+        var maxLen = 0
+        for s in stops {
+            let upper = min(s.count - 1, text.count)
+            var k = upper
+            while k > 0 {
+                if s.hasPrefix(String(text.suffix(k))) {
+                    maxLen = max(maxLen, k)
+                    break
+                }
+                k -= 1
+            }
+        }
+        return maxLen
     }
 
     // MARK: - Generation
+
+    /// Full set of sampling controls honored by `generate`, mirroring the
+    /// subset of llama-server's parameters that matter on-device. Defaults match
+    /// llama.cpp's defaults so an unspecified field is a no-op.
+    struct SamplingParams {
+        var temperature: Float = 0.8
+        var topP: Float = 0.95
+        var topK: Int32 = 40
+        var minP: Float = 0.05
+        var repeatPenalty: Float = 1.0
+        var repeatLastN: Int32 = 64
+        var frequencyPenalty: Float = 0.0
+        var presencePenalty: Float = 0.0
+        var seed: UInt32 = 0xFFFFFFFF
+        /// Stop strings: generation halts (finish_reason "stop") when any appears.
+        var stop: [String] = []
+    }
 
     struct GenerationResult {
         let text: String
@@ -317,8 +413,7 @@ final class LlamaInference {
     /// `onToken` is called for each decoded piece; return `false` to stop early.
     func generate(prompt: String,
                   maxTokens: Int,
-                  temperature: Float,
-                  topP: Float,
+                  params: SamplingParams,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
 
         let promptTokens = try tokenize(prompt, addBOS: true)
@@ -357,18 +452,33 @@ final class LlamaInference {
         }
         lastPromptText = prompt
 
-        // Build the sampler chain: top-p -> temperature -> distribution sampling.
+        // Build the sampler chain. Order mirrors llama.cpp's default pipeline:
+        // penalties -> top_k -> top_p -> min_p -> temperature -> distribution.
         var samplerParams = llama_sampler_chain_default_params()
         samplerParams.no_perf = true
         let sampler = llama_sampler_chain_init(samplerParams)
         defer { llama_sampler_free(sampler) }
 
-        if temperature <= 0 {
+        // Repetition penalties apply regardless of temperature.
+        if params.repeatPenalty != 1.0 || params.frequencyPenalty != 0.0 || params.presencePenalty != 0.0 {
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
+                params.repeatLastN, params.repeatPenalty,
+                params.frequencyPenalty, params.presencePenalty))
+        }
+
+        if params.temperature <= 0 {
+            // Greedy: deterministic argmax, ignores top_k/top_p/min_p.
             llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
         } else {
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(topP, 1))
-            llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature))
-            llama_sampler_chain_add(sampler, llama_sampler_init_dist(0xFFFFFFFF)) // default seed
+            if params.topK > 0 {
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(params.topK))
+            }
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(params.topP, 1))
+            if params.minP > 0 {
+                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(params.minP, 1))
+            }
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(params.temperature))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(params.seed))
         }
 
         // Cache and error recovery: if anything below fails, the llama context's
@@ -418,10 +528,28 @@ final class LlamaInference {
         FileLogger.shared.log("prompt tail: …\(promptTail)")
 
         var output = ""
+        var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
+        var emittedCount = 0             // chars already handed to onToken
         var generated = 0
         var generatedTokenIds: [llama_token] = []
         var finishReason = "length"
         let limit = max(1, maxTokens)
+        let stops = params.stop.filter { !$0.isEmpty }
+        var earlyStop = false            // a stop string or client cancel ended it
+
+        // Emits any text that is safe to stream now — i.e. everything past the
+        // longest tail that could still be the start of a stop string.
+        func emitSafe() -> Bool {
+            guard let onToken = onToken else { emittedCount = output.count; return true }
+            let hold = stops.isEmpty ? 0 : partialStopSuffixLength(of: output, stops: stops)
+            let safeEnd = output.count - hold
+            guard safeEnd > emittedCount else { return true }
+            let lo = output.index(output.startIndex, offsetBy: emittedCount)
+            let hi = output.index(output.startIndex, offsetBy: safeEnd)
+            let slice = String(output[lo..<hi])
+            emittedCount = safeEnd
+            return onToken(slice)
+        }
 
         while generated < limit {
             let nCtxUsed = promptTokens.count + generated
@@ -434,24 +562,36 @@ final class LlamaInference {
                 break
             }
             if llama_vocab_is_eog(vocab, newToken) {
-                let piece = piece(for: newToken).replacingOccurrences(of: "\n", with: "\\n")
-                FileLogger.shared.log("eog token id=\(newToken) piece='\(piece)' after \(generated) generated tokens")
+                FileLogger.shared.log("eog token id=\(newToken) after \(generated) generated tokens")
                 finishReason = generated == 0 ? "eog_immediate" : "eog"
                 break
             }
             llama_sampler_accept(sampler, newToken)
             generatedTokenIds.append(newToken)
 
-            let text = piece(for: newToken)
-            if generated == 0 {
-                let snippet = text.replacingOccurrences(of: "\n", with: "\\n")
-                FileLogger.shared.log("first token id=\(newToken) piece='\(snippet)'")
-            }
-            output += text
+            // Accumulate bytes and decode only complete UTF-8 characters.
+            pending.append(contentsOf: pieceBytes(for: newToken))
+            let decoded = flushDecodableUTF8(&pending)
+            if !decoded.isEmpty { output += decoded }
             generated += 1
 
-            if let onToken = onToken, onToken(text) == false {
+            // Complete stop string? Truncate at it, emit the safe remainder, stop.
+            if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
+                let cut = output.distance(from: output.startIndex, to: r.lowerBound)
+                output = String(output[..<r.lowerBound])
+                finishReason = "stop"
+                earlyStop = true
+                if let onToken = onToken, emittedCount < cut {
+                    let lo = output.index(output.startIndex, offsetBy: emittedCount)
+                    _ = onToken(String(output[lo...]))
+                    emittedCount = cut
+                }
+                break
+            }
+
+            if emitSafe() == false {
                 finishReason = "stopped"
+                earlyStop = true
                 break
             }
 
@@ -461,6 +601,20 @@ final class LlamaInference {
                 return llama_decode(context, batch)
             }
             guard stepDecode == 0 else { throw InferenceError.decode }
+        }
+
+        // Flush any trailing bytes (lossy) and any held-back text, unless a stop
+        // string / client cancel already finalized the output.
+        if !earlyStop {
+            if !pending.isEmpty {
+                output += String(decoding: pending, as: UTF8.self)
+                pending.removeAll()
+            }
+            if let onToken = onToken, emittedCount < output.count {
+                let lo = output.index(output.startIndex, offsetBy: emittedCount)
+                _ = onToken(String(output[lo...]))
+                emittedCount = output.count
+            }
         }
 
         generationSucceeded = true
