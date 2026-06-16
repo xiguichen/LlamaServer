@@ -248,20 +248,20 @@ final class LlamaHTTPServer {
         // tool_choice "none" suppresses tools entirely.
         let toolsActive = (body.tools?.isEmpty == false) && !(body.tool_choice?.disablesTools ?? false)
 
-        // Send SSE headers immediately so the client gets an HTTP 200 response
-        // even when the serial inference queue is busy with a prior request.
-        var header = "HTTP/1.1 200 OK\r\n"
-        header += "Content-Type: text/event-stream\r\n"
-        header += "Cache-Control: no-cache\r\n"
-        header += "Connection: keep-alive\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
-        header += "\r\n"
-        connection.send(data: header.data(using: .utf8)!, timeout: 10)
-        FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
-
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
             guard let self = self else { return }
+            FileLogger.shared.log("streaming #\(currentRequest): async block started (queue wait ended)")
+
+            // Send SSE headers only when we're about to start generating
+            var header = "HTTP/1.1 200 OK\r\n"
+            header += "Content-Type: text/event-stream\r\n"
+            header += "Cache-Control: no-cache\r\n"
+            header += "Connection: keep-alive\r\n"
+            header += "Access-Control-Allow-Origin: *\r\n"
+            header += "\r\n"
+            connection.send(data: header.data(using: .utf8)!, timeout: 10)
+            FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
 
             // First chunk announces role
             if let roleData = try? JSONEncoder().encode(
@@ -271,6 +271,7 @@ final class LlamaHTTPServer {
                                                           finish_reason: nil)])
             ), let roleStr = String(data: roleData, encoding: .utf8) {
                 connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
+                FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
             }
 
             // When tools are active we must buffer the whole response so the
@@ -287,13 +288,23 @@ final class LlamaHTTPServer {
                 }
             }
 
+            var generatedTokens = 0
+            var lastTokenTime = CFAbsoluteTimeGetCurrent()
+
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
                                                toolChoice: body.tool_choice)
                 let prompt = self.inference.formatPrompt(messages: msgs)
+                FileLogger.shared.log("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams) { text in
+                    generatedTokens += 1
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - lastTokenTime >= 10 {
+                        FileLogger.shared.log("streaming #\(currentRequest): generated \(generatedTokens) tokens so far")
+                        lastTokenTime = now
+                    }
                     // Buffer (don't stream) when a tool call may be forming.
                     guard !toolsActive else { return true }
                     let clean = ToolCallParser.stripANSI(text)
@@ -301,8 +312,10 @@ final class LlamaHTTPServer {
                     sendChunk(delta: Delta(role: nil, content: clean), finishReason: nil)
                     return true
                 }
+                FileLogger.shared.log("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
                 self.generationCount += 1
                 if self.generationCount >= self.contextRecreateThreshold {
+                    FileLogger.shared.log("streaming #\(currentRequest): recreating context (threshold reached)")
                     try self.inference.recreateContext()
                     self.generationCount = 0
                 }
@@ -315,12 +328,15 @@ final class LlamaHTTPServer {
                 }
 
                 if toolsActive {
+                    FileLogger.shared.log("streaming #\(currentRequest): tools active, parsing tool calls")
                     let parsed = ToolCallParser.parse(genResult.text)
                     if !parsed.toolCalls.isEmpty {
                         streamReason = "tool_calls"
+                        FileLogger.shared.log("streaming #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
                         if !parsed.cleanedContent.isEmpty {
                             sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                       finishReason: nil)
+                            FileLogger.shared.log("streaming #\(currentRequest): sent cleaned content chunk")
                         }
                         let streamingCalls = parsed.toolCalls.enumerated().map {
                             StreamingToolCall(index: $0.offset, from: $0.element)
@@ -328,15 +344,20 @@ final class LlamaHTTPServer {
                         sendChunk(delta: Delta(role: nil, content: nil,
                                                tool_calls: streamingCalls),
                                   finishReason: nil)
+                        FileLogger.shared.log("streaming #\(currentRequest): sent tool_calls chunk")
                     } else if !parsed.cleanedContent.isEmpty {
                         // No tool call after all — flush the buffered content.
+                        FileLogger.shared.log("streaming #\(currentRequest): no tool calls, flushing content")
                         sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                   finishReason: nil)
+                    } else {
+                        FileLogger.shared.log("streaming #\(currentRequest): no tool calls and no content")
                     }
                 }
 
                 // Final chunk carries the finish reason.
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
+                FileLogger.shared.log("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
 
                 // Optional usage chunk (OpenAI: empty choices array, usage set).
                 if includeUsage {
@@ -348,10 +369,11 @@ final class LlamaHTTPServer {
                                        choices: [], usage: usage)
                     ), let str = String(data: data, encoding: .utf8) {
                         connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                        FileLogger.shared.log("streaming #\(currentRequest): usage chunk sent")
                     }
                 }
             } catch {
-                FileLogger.shared.log("streaming generation error: \(error.localizedDescription)")
+                FileLogger.shared.log("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
