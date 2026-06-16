@@ -3,6 +3,10 @@ import Foundation
 // Minimal OpenAI-compatible request/response shapes for /v1/chat/completions
 // and /v1/models. These are intentionally lenient on input.
 
+/// Build identifier echoed back in responses (OpenAI `system_fingerprint`).
+/// llama-server uses its build string here; clients only echo it for telemetry.
+let openAISystemFingerprint = "llamaserver"
+
 struct ToolCallFunction: Codable {
     let name: String
     let arguments: String
@@ -199,6 +203,19 @@ struct ChatCompletionResponse: Codable {
     let model: String
     let choices: [ChatCompletionChoice]
     let usage: Usage
+    let system_fingerprint: String
+
+    init(id: String, object: String, created: Int, model: String,
+         choices: [ChatCompletionChoice], usage: Usage,
+         system_fingerprint: String = openAISystemFingerprint) {
+        self.id = id
+        self.object = object
+        self.created = created
+        self.model = model
+        self.choices = choices
+        self.usage = usage
+        self.system_fingerprint = system_fingerprint
+    }
 }
 
 struct ModelInfo: Codable {
@@ -230,6 +247,7 @@ struct StreamingChunk: Codable {
     let model: String
     let choices: [StreamingChoice]
     let usage: Usage?
+    let system_fingerprint: String
 
     init(id: String, created: Int, model: String, choices: [StreamingChoice], usage: Usage? = nil) {
         self.id = id
@@ -238,6 +256,7 @@ struct StreamingChunk: Codable {
         self.model = model
         self.choices = choices
         self.usage = usage
+        self.system_fingerprint = openAISystemFingerprint
     }
 }
 
@@ -359,4 +378,17 @@ struct CompletionResponse: Codable {
     let model: String
     let choices: [CompletionChoice]
     let usage: Usage
+    let system_fingerprint: String
+
+    init(id: String, object: String, created: Int, model: String,
+         choices: [CompletionChoice], usage: Usage,
+         system_fingerprint: String = openAISystemFingerprint) {
+        self.id = id
+        self.object = object
+        self.created = created
+        self.model = model
+        self.choices = choices
+        self.usage = usage
+        self.system_fingerprint = system_fingerprint
+    }
 }
