@@ -91,11 +91,19 @@ struct ChatCompletionRequest: Codable {
     let frequency_penalty: Double?
     let seed: Int?
     let max_tokens: Int?
+    let max_completion_tokens: Int?
+    let n_predict: Int?
     let stream: Bool?
     let stop: StopField?
     let tools: [ToolDefinition]?
     let tool_choice: ToolChoiceField?
     let stream_options: StreamOptions?
+
+    /// Resolves the completion-length limit using llama-server's precedence:
+    /// `n_predict` > `max_completion_tokens` > `max_tokens`.
+    var resolvedMaxTokens: Int? {
+        n_predict ?? max_completion_tokens ?? max_tokens
+    }
 }
 
 struct StreamOptions: Codable {
@@ -237,17 +245,54 @@ struct StreamingChoice: Codable {
     let index: Int
     let delta: Delta
     let finish_reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index, delta, finish_reason
+    }
+
+    init(index: Int, delta: Delta, finish_reason: String?) {
+        self.index = index
+        self.delta = delta
+        self.finish_reason = finish_reason
+    }
+
+    // OpenAI / llama-server always include `finish_reason` in every chunk
+    // (null until the final one). Swift would otherwise omit a nil optional,
+    // so encode it explicitly as null to match the reference contract.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(index, forKey: .index)
+        try c.encode(delta, forKey: .delta)
+        try c.encode(finish_reason, forKey: .finish_reason)
+    }
 }
 
 struct Delta: Codable {
     let role: String?
     let content: String?
-    let tool_calls: [ToolCall]?
+    let tool_calls: [StreamingToolCall]?
 
-    init(role: String?, content: String?, tool_calls: [ToolCall]? = nil) {
+    init(role: String?, content: String?, tool_calls: [StreamingToolCall]? = nil) {
         self.role = role
         self.content = content
         self.tool_calls = tool_calls
+    }
+}
+
+/// Streaming tool-call delta. Unlike the non-streaming `ToolCall`, OpenAI's
+/// streaming format requires an `index` so clients can accumulate the call's
+/// fields across chunks (mirrors llama-server's `tool_call["index"]`).
+struct StreamingToolCall: Codable {
+    let index: Int
+    let id: String
+    let type: String
+    let function: ToolCallFunction
+
+    init(index: Int, from call: ToolCall) {
+        self.index = index
+        self.id = call.id
+        self.type = call.type
+        self.function = call.function
     }
 }
 
@@ -265,7 +310,13 @@ struct CompletionRequest: Codable {
     let frequency_penalty: Double?
     let seed: Int?
     let max_tokens: Int?
+    let n_predict: Int?
     let stop: StopField?
+
+    /// Resolves the completion-length limit: `n_predict` > `max_tokens`.
+    var resolvedMaxTokens: Int? {
+        n_predict ?? max_tokens
+    }
 }
 
 /// The legacy `prompt` field may be a string or an array of strings.

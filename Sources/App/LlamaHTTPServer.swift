@@ -119,10 +119,22 @@ final class LlamaHTTPServer {
     private func makeServer() -> StreamableServer {
         let server = StreamableServer()
         server.interceptHandler = { [weak self] request, connection in
-            guard let self = self,
-                  request.method == .POST else { return false }
+            guard let self = self else { return false }
+            // CORS preflight: answer any OPTIONS request directly so browser-
+            // based OpenAI clients can call the API (mirrors llama-server).
+            if request.method == .OPTIONS {
+                var header = "HTTP/1.1 204 No Content\r\n"
+                header += Self.corsHeaderLines
+                header += "Access-Control-Max-Age: 86400\r\n"
+                header += "Content-Length: 0\r\n"
+                header += "\r\n"
+                connection.send(data: header.data(using: .utf8)!, timeout: 10)
+                connection.close(immediately: false)
+                return true
+            }
+            guard request.method == .POST else { return false }
             let path = request.uri.path.lowercased()
-            guard path == "/v1/chat/completions" || path.hasSuffix("/v1/chat/completions") else { return false }
+            guard path == "/v1/chat/completions" || path.hasSuffix("/chat/completions") else { return false }
             guard request.body.count <= Self.maxRequestBytes,
                   let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else { return false }
             let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
@@ -138,25 +150,35 @@ final class LlamaHTTPServer {
     // MARK: - Routes
 
     private func configureRoutes(on server: Server) {
-        server.route(.GET, "health") { _ in
+        let health: (HTTPRequest) -> HTTPResponse = { _ in
             let body = Data(#"{"status":"ok"}"#.utf8)
             return HTTPResponse(.ok, headers: [
                 "Content-Type": "application/json",
-                "Content-Length": "\(body.count)"
+                "Content-Length": "\(body.count)",
+                "Access-Control-Allow-Origin": "*"
             ], body: body)
         }
+        // Register both the bare and /v1-prefixed paths, mirroring llama-server.
+        server.route(.GET, "health", health)
+        server.route(.GET, "v1/health", health)
 
-        server.route(.GET, "v1/models") { [weak self] _ in
+        let models: (HTTPRequest) -> HTTPResponse = { [weak self] _ in
             self?.modelsResponse() ?? HTTPResponse(.internalServerError)
         }
+        server.route(.GET, "models", models)
+        server.route(.GET, "v1/models", models)
 
-        server.route(.POST, "v1/chat/completions") { [weak self] request in
+        let chat: (HTTPRequest) -> HTTPResponse = { [weak self] request in
             self?.chatCompletionResponse(request: request) ?? HTTPResponse(.internalServerError)
         }
+        server.route(.POST, "chat/completions", chat)
+        server.route(.POST, "v1/chat/completions", chat)
 
-        server.route(.POST, "v1/completions") { [weak self] request in
+        let completions: (HTTPRequest) -> HTTPResponse = { [weak self] request in
             self?.completionResponse(request: request) ?? HTTPResponse(.internalServerError)
         }
+        server.route(.POST, "completions", completions)
+        server.route(.POST, "v1/completions", completions)
     }
 
     private func modelsResponse() -> HTTPResponse {
@@ -171,6 +193,13 @@ final class LlamaHTTPServer {
     private static let maxRequestBytes = 8 * 1024 * 1024
     /// Upper bound on client-requested completion length (a foot-gun otherwise).
     private static let maxCompletionTokens = 4096
+
+    /// CORS headers sent on the OPTIONS preflight. The API uses no cookies or
+    /// Authorization, so a wildcard origin is appropriate for an open LAN server.
+    private static let corsHeaderLines =
+        "Access-Control-Allow-Origin: *\r\n" +
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
+        "Access-Control-Allow-Headers: *\r\n"
 
     private var previousFootprint: UInt64 = 0
 
@@ -194,12 +223,23 @@ final class LlamaHTTPServer {
         FileLogger.shared.log("streaming chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
         guard !body.messages.isEmpty else {
-            connection.send(data: "data: {\"error\":\"messages must not be empty\"}\n\n".data(using: .utf8)!, timeout: 10)
+            // No SSE stream has started yet, so return a proper HTTP error
+            // response (status line + headers) rather than a bare `data:` line,
+            // which clients would reject as a malformed HTTP response.
+            let bodyJSON = Data(#"{"error":{"message":"`messages` must not be empty","type":"invalid_request_error"}}"#.utf8)
+            var header = "HTTP/1.1 400 Bad Request\r\n"
+            header += "Content-Type: application/json\r\n"
+            header += "Access-Control-Allow-Origin: *\r\n"
+            header += "Content-Length: \(bodyJSON.count)\r\n"
+            header += "\r\n"
+            var out = header.data(using: .utf8)!
+            out.append(bodyJSON)
+            connection.send(data: out, timeout: 10)
             connection.close(immediately: false)
             return
         }
 
-        let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
         let chatId = "chatcmpl-\(UUID().uuidString)"
         let modelName = body.model ?? inference.modelName
         let created = Int(Date().timeIntervalSince1970)
@@ -217,6 +257,7 @@ final class LlamaHTTPServer {
             header += "Content-Type: text/event-stream\r\n"
             header += "Cache-Control: no-cache\r\n"
             header += "Connection: keep-alive\r\n"
+            header += "Access-Control-Allow-Origin: *\r\n"
             header += "\r\n"
             connection.send(data: header.data(using: .utf8)!, timeout: 10)
             FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
@@ -280,8 +321,11 @@ final class LlamaHTTPServer {
                             sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                       finishReason: nil)
                         }
+                        let streamingCalls = parsed.toolCalls.enumerated().map {
+                            StreamingToolCall(index: $0.offset, from: $0.element)
+                        }
                         sendChunk(delta: Delta(role: nil, content: nil,
-                                               tool_calls: parsed.toolCalls),
+                                               tool_calls: streamingCalls),
                                   finishReason: nil)
                     } else if !parsed.cleanedContent.isEmpty {
                         // No tool call after all — flush the buffered content.
@@ -333,7 +377,7 @@ final class LlamaHTTPServer {
         previousFootprint = mem
         FileLogger.shared.log("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
-        let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
 
         // All llama API access (formatPrompt + generate) must be serialized —
@@ -430,7 +474,8 @@ final class LlamaHTTPServer {
         }
         let resp = HTTPResponse(status, headers: [
             "Content-Type": "application/json",
-            "Content-Length": "\(data.count)"
+            "Content-Length": "\(data.count)",
+            "Access-Control-Allow-Origin": "*"
         ], body: data)
         return resp
     }
@@ -524,7 +569,7 @@ final class LlamaHTTPServer {
             return errorResponse("`prompt` must not be empty", status: .badRequest)
         }
 
-        let maxTokens = min(max(1, body.max_tokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
 
         var result: LlamaInference.GenerationResult?
