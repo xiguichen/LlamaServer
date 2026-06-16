@@ -296,24 +296,6 @@ struct Delta: Codable {
         self.content = content
         self.tool_calls = tool_calls
     }
-
-    enum CodingKeys: String, CodingKey {
-        case role, content, tool_calls
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        if let role = role {
-            try c.encode(role, forKey: .role)
-        }
-        // OpenAI always includes content: null in the role chunk.
-        if let content = content {
-            try c.encode(content, forKey: .content)
-        } else if role != nil {
-            try c.encodeNil(forKey: .content)
-        }
-        try c.encodeIfPresent(tool_calls, forKey: .tool_calls)
-    }
 }
 
 /// Streaming tool-call delta. Unlike the non-streaming `ToolCall`, OpenAI's
