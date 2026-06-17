@@ -71,6 +71,11 @@ enum ToolCallParser {
     /// Builds a `ToolCall` from a `{"name": …, "arguments": {…}}` JSON object.
     /// OpenAI's `function.arguments` field is a JSON *string*, so the parsed
     /// arguments object is re-serialized to a compact string.
+    ///
+    /// Models are inconsistent about the key holding the call's parameters: the
+    /// OpenAI/Qwen convention is `arguments`, but some models (e.g. QwOpus) emit
+    /// `parameters` instead. Accept either so the arguments aren't silently lost
+    /// (which would surface as a tool call with an empty `{}` argument string).
     private static func makeToolCall(fromJSON jsonText: String) -> ToolCall? {
         guard let data = jsonText.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -79,7 +84,7 @@ enum ToolCallParser {
         }
 
         let argumentsString: String
-        if let args = obj["arguments"] {
+        if let args = obj["arguments"] ?? obj["parameters"] {
             if let argsString = args as? String {
                 // Model already gave a string — pass it through verbatim.
                 argumentsString = argsString

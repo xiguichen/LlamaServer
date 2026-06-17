@@ -271,13 +271,19 @@ final class LlamaHTTPServer {
             FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
         }
 
-        // While waiting for the serial inference queue, send SSE keep-alive
-        // comments every 5 s so clients don't time out between the role chunk
-        // and the first generated token.
+        // Send SSE keep-alive comments every 5 s so clients don't time out
+        // during ANY silent phase before the first real response bytes: the
+        // serial-queue wait, the prompt decode, and — for tool requests — the
+        // fully buffered generation (which emits nothing until parsed). The
+        // timer keeps running until `stopKeepAlive()` fires at the first real
+        // `data:` chunk; cancelling earlier (e.g. when the queue wait ends) left
+        // the long decode/buffer window uncovered, so clients saw no response.
+        let keepAliveActive = OSAllocatedUnfairLock(initialState: true)
         let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         keepAliveSource.schedule(deadline: .now() + 5, repeating: .seconds(5), leeway: .seconds(1))
         keepAliveSource.setEventHandler { [weak connection] in
             guard let conn = connection else { return }
+            guard keepAliveActive.withLock({ $0 }) else { return }
             conn.send(data: ": keepalive\n\n".data(using: .utf8)!, timeout: 5)
         }
         keepAliveSource.resume()
@@ -285,9 +291,16 @@ final class LlamaHTTPServer {
 
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
-            keepAliveSource.cancel()
-            guard let self = self else { return }
+            guard let self = self else { keepAliveSource.cancel(); return }
             FileLogger.shared.log("streaming #\(currentRequest): async block started (queue wait ended)")
+
+            // Stop the keep-alive comment stream the instant we begin writing
+            // real SSE data, so heartbeat comments never interleave with the
+            // response. Idempotent: safe to call repeatedly / from any token.
+            func stopKeepAlive() {
+                keepAliveActive.withLock { $0 = false }
+                keepAliveSource.cancel()
+            }
 
             // When tools are active we must buffer the whole response so the
             // <tool_call> envelope can be parsed into structured tool_calls;
@@ -324,10 +337,14 @@ final class LlamaHTTPServer {
                     guard !toolsActive else { return true }
                     let clean = ToolCallParser.stripANSI(text)
                     guard !clean.isEmpty else { return true }
+                    stopKeepAlive()
                     sendChunk(delta: Delta(role: nil, content: clean), finishReason: nil)
                     return true
                 }
                 FileLogger.shared.log("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
+                // Buffered tool requests stream nothing during generation; make
+                // sure the heartbeat is stopped before the first real chunk below.
+                stopKeepAlive()
                 self.generationCount += 1
                 if self.generationCount >= self.contextRecreateThreshold {
                     FileLogger.shared.log("streaming #\(currentRequest): recreating context (threshold reached)")
@@ -388,6 +405,7 @@ final class LlamaHTTPServer {
                     }
                 }
             } catch {
+                stopKeepAlive()
                 FileLogger.shared.log("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
