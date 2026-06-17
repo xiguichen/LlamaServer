@@ -20,13 +20,13 @@ struct ToolCall: Codable {
 
 struct ChatMessage: Codable {
     let role: String
-    let content: String?
+    let content: MessageContent?
     let tool_calls: [ToolCall]?
     let tool_call_id: String?
 
     init(role: String, content: String?, tool_calls: [ToolCall]? = nil, tool_call_id: String? = nil) {
         self.role = role
-        self.content = content
+        self.content = content.map { .text($0) }
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
     }
@@ -236,6 +236,48 @@ struct APIError: Codable {
         let type: String
     }
     let error: Detail
+}
+
+/// A single content part in a multi-part message body (OpenAI `content` array).
+/// Currently supports `text` parts; extensible for future types (`image_url`, etc.).
+struct ContentPart: Codable {
+    let type: String
+    let text: String?
+}
+
+/// OpenAI message `content` can be a plain string or an array of `ContentPart`.
+enum MessageContent: Codable {
+    case text(String)
+    case parts([ContentPart])
+
+    var textValue: String? {
+        switch self {
+        case .text(let s): return s
+        case .parts(let parts): return parts.compactMap(\.text).joined(separator: "\n")
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let string = try? container.decode(String.self) {
+            self = .text(string)
+        } else if let parts = try? container.decode([ContentPart].self) {
+            self = .parts(parts)
+        } else {
+            throw DecodingError.typeMismatch(
+                MessageContent.self,
+                DecodingError.Context(codingPath: container.codingPath,
+                                      debugDescription: "Expected string or array of content parts"))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let s): try container.encode(s)
+        case .parts(let parts): try container.encode(parts)
+        }
+    }
 }
 
 // MARK: - Streaming (SSE) models

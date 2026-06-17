@@ -571,7 +571,7 @@ final class LlamaHTTPServer {
 
         var modified = messages
         if let idx = modified.firstIndex(where: { $0.role == "system" }) {
-            let existing = modified[idx].content ?? ""
+            let existing = modified[idx].content?.textValue ?? ""
             modified[idx] = ChatMessage(role: "system", content: instruction + "\n\n" + existing)
         } else {
             modified.insert(ChatMessage(role: "system", content: instruction), at: 0)

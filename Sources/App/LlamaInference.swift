@@ -267,11 +267,11 @@ final class LlamaInference {
     /// `content: nil`; reconstruct the `<tool_call>` envelope so multi-turn tool
     /// conversations present a consistent history to the model.
     private func effectiveContent(of message: ChatMessage) -> String {
-        if let content = message.content, !content.isEmpty {
+        if let content = message.content?.textValue, !content.isEmpty {
             return content
         }
         guard let toolCalls = message.tool_calls, !toolCalls.isEmpty else {
-            return message.content ?? ""
+            return message.content?.textValue ?? ""
         }
         return toolCalls.map { call in
             "<tool_call>{\"name\": \"\(call.function.name)\", \"arguments\": \(call.function.arguments)}</tool_call>"
