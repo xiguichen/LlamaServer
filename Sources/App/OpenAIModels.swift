@@ -102,13 +102,32 @@ struct ChatCompletionRequest: Codable {
     let tools: [ToolDefinition]?
     let tool_choice: ToolChoiceField?
     let stream_options: StreamOptions?
+    /// Qwen3 "thinking" toggle. Clients (e.g. vLLM / llama.cpp style) send this
+    /// either at the top level or nested under `chat_template_kwargs`.
+    let enable_thinking: Bool?
+    let chat_template_kwargs: ChatTemplateKwargs?
 
     /// Resolves the completion-length limit using llama-server's precedence:
     /// `n_predict` > `max_completion_tokens` > `max_tokens`.
     var resolvedMaxTokens: Int? {
         n_predict ?? max_completion_tokens ?? max_tokens
     }
+
+    /// Whether the model should emit `<think>` reasoning. Defaults to OFF so
+    /// short utility calls ("reply with ONLY one word", "Return JSON only")
+    /// aren't polluted/truncated by reasoning; clients opt in per request via
+    /// `enable_thinking: true` (top level or in `chat_template_kwargs`).
+    var thinkingEnabled: Bool {
+        enable_thinking ?? chat_template_kwargs?.enable_thinking ?? false
+    }
 }
+
+/// Subset of the `chat_template_kwargs` object some clients send; we only read
+/// the Qwen3 thinking toggle.
+struct ChatTemplateKwargs: Codable {
+    let enable_thinking: Bool?
+}
+
 
 struct StreamOptions: Codable {
     let include_usage: Bool?

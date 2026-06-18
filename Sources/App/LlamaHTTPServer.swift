@@ -354,8 +354,10 @@ final class LlamaHTTPServer {
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
                                                toolChoice: body.tool_choice)
-                let prompt = self.inference.formatPrompt(messages: msgs)
+                let finalMsgs = self.applyThinkingSwitch(messages: msgs, enabled: body.thinkingEnabled)
+                let prompt = self.inference.formatPrompt(messages: finalMsgs)
                 FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
+                FileLogger.shared.debug("streaming #\(currentRequest): thinking=\(body.thinkingEnabled)")
                 FileLogger.shared.verbose("streaming #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
@@ -483,6 +485,7 @@ final class LlamaHTTPServer {
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
         FileLogger.shared.debug("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.debug("chat request #\(currentRequest): thinking=\(body.thinkingEnabled)")
         FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
 
         let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
@@ -496,7 +499,8 @@ final class LlamaHTTPServer {
             do {
                 let msgs = injectToolDefs(messages: body.messages, tools: body.tools,
                                           toolChoice: body.tool_choice)
-                let prompt = inference.formatPrompt(messages: msgs)
+                let finalMsgs = applyThinkingSwitch(messages: msgs, enabled: body.thinkingEnabled)
+                let prompt = inference.formatPrompt(messages: finalMsgs)
                 FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
@@ -641,9 +645,26 @@ final class LlamaHTTPServer {
         return modified
     }
 
-    /// Builds the engine sampling parameters from an OpenAI chat request,
-    /// clamping to safe ranges. Unspecified fields fall back to llama.cpp's
-    /// defaults so behavior is unchanged unless a client opts in.
+    /// Applies Qwen3's reasoning soft-switch. When thinking is disabled (the
+    /// default), append `/no_think` to the last user message so the model skips
+    /// the `<think>` block entirely — otherwise short "reply with ONLY ..." /
+    /// "Return JSON only" calls waste their whole token budget on reasoning and
+    /// get truncated (finish=length) before producing the real answer, which
+    /// breaks strict clients. When the client opts in (`enable_thinking: true`),
+    /// the messages are left untouched so the model reasons as normal.
+    private func applyThinkingSwitch(messages: [ChatMessage], enabled: Bool) -> [ChatMessage] {
+        guard !enabled else { return messages }
+        var modified = messages
+        guard let idx = modified.lastIndex(where: { $0.role == "user" }) else {
+            return modified
+        }
+        let existing = modified[idx].content?.textValue ?? ""
+        let updated = existing.isEmpty ? "/no_think" : existing + " /no_think"
+        modified[idx] = ChatMessage(role: "user", content: updated)
+        return modified
+    }
+
+
     static func samplingParams(from body: ChatCompletionRequest) -> LlamaInference.SamplingParams {
         var p = LlamaInference.SamplingParams()
         if let t = body.temperature { p.temperature = Float(t) }
