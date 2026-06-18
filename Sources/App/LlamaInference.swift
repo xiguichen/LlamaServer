@@ -165,7 +165,6 @@ final class LlamaInference {
         }
         context = ctx
         cachedTokenCount = 0
-        lastPromptText = nil
         cachedTokenIds = []
         FileLogger.shared.log("context recreated (\(contextSize) tokens)")
     }
@@ -403,10 +402,10 @@ final class LlamaInference {
     /// call (prompt + completion). Used to reuse cache when consecutive requests
     /// share a prefix (e.g. the same conversation history).
     private var cachedTokenCount: Int = 0
-    /// The text of the prompt from the last generate() call, for prefix matching.
-    private var lastPromptText: String?
-    /// The actual token IDs from the last generate() call (prompt + completion),
-    /// stored for token-level prefix verification during cache reuse.
+    /// The exact token IDs currently resident in the KV cache (prompt + the
+    /// generated tokens that were actually decoded). Used to compute the longest
+    /// shared prefix with the next prompt so only the divergent suffix is
+    /// re-decoded. Must mirror the cache precisely — see the end of `generate`.
     private var cachedTokenIds: [llama_token] = []
 
     /// Generates a completion for the given (already chat-formatted) prompt.
@@ -419,38 +418,50 @@ final class LlamaInference {
         let promptTokens = try tokenize(prompt, addBOS: true)
         guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
 
-        // Reuse KV cache when the new prompt extends the previous one and has
-        // at least as many tokens. This avoids re-decoding the conversation
-        // prefix on every request — a big win for multi-turn dialogues.
+        // --- KV cache prefix reuse --------------------------------------------
+        // Reuse the largest shared *token* prefix between this prompt and what is
+        // already in the KV cache, then re-decode only the divergent suffix. The
+        // KV cache is keyed by token position, so token IDs are authoritative —
+        // a text-prefix check is both weaker and forces all-or-nothing reuse.
         //
-        // Both string-level (hasPrefix) and token-level (cachedTokenIds)
-        // checks are required: the string check ensures the text matches at
-        // the application level, while the token check verifies that the old
-        // token IDs from the cache match the re-tokenized prefix. BPE is
-        // deterministic for the same byte sequence, so the token check should
-        // always pass when the string check does — but we verify anyway to
-        // guard against edge cases (e.g. lossy pieces, tokenizer quirks).
-        let prefixMatches = cachedTokenCount > 0
-            && promptTokens.count >= cachedTokenCount
-            && cachedTokenIds.count >= cachedTokenCount
-            && cachedTokenIds.prefix(cachedTokenCount).elementsEqual(promptTokens.prefix(cachedTokenCount))
-        let reuseCache = prefixMatches
-            && lastPromptText != nil && prompt.hasPrefix(lastPromptText!)
-        if reuseCache {
-            FileLogger.shared.log("KV cache reused (\(cachedTokenCount) cached, \(promptTokens.count) total prompt tokens)")
-        } else {
-            cachedTokenIds = []
-            if let memory = llama_get_memory(context) {
+        // For an agent loop (e.g. OpenCode) that resends a growing
+        // system+history prefix on every turn, this keeps the long shared prefix
+        // (often thousands of tokens) cached and only decodes the new tail —
+        // turning a multi-second prompt decode into a near-instant one. Upstream
+        // llama-server uses the same common-prefix + seq_rm strategy.
+        var reuseLen = 0
+        if let memory = llama_get_memory(context) {
+            if cachedTokenIds.isEmpty {
                 llama_memory_clear(memory, true)
-                FileLogger.shared.log("KV cache cleared\(cachedTokenCount > 0 ? " (last cached \(cachedTokenCount))" : "")")
             } else {
-                FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared, invalidating tracking")
-                cachedTokenCount = 0
-                lastPromptText = nil
-                cachedTokenIds = []
+                // Longest common prefix of the cached tokens and the new prompt.
+                let maxLCP = min(cachedTokenIds.count, promptTokens.count)
+                var lcp = 0
+                while lcp < maxLCP && cachedTokenIds[lcp] == promptTokens[lcp] { lcp += 1 }
+                // Always leave at least one prompt token to decode so the forward
+                // pass produces fresh logits to sample the first new token from.
+                if lcp >= promptTokens.count { lcp = promptTokens.count - 1 }
+
+                if lcp <= 0 {
+                    llama_memory_clear(memory, true)
+                    FileLogger.shared.log("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count))")
+                } else if lcp == cachedTokenIds.count {
+                    // The whole cache is a prefix of the new prompt — keep it all.
+                    reuseLen = lcp
+                    FileLogger.shared.log("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
+                } else if llama_memory_seq_rm(memory, 0, llama_pos(lcp), -1) {
+                    // Drop the diverging suffix [lcp, end); keep prefix [0, lcp).
+                    reuseLen = lcp
+                    FileLogger.shared.log("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tokens, prompt \(promptTokens.count))")
+                } else {
+                    // Partial removal unsupported by this cache type — start fresh.
+                    llama_memory_clear(memory, true)
+                    FileLogger.shared.log("KV cache partial-rm failed; cleared (last cached \(cachedTokenIds.count))")
+                }
             }
+        } else {
+            FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared")
         }
-        lastPromptText = prompt
 
         // Build the sampler chain. Order mirrors llama.cpp's default pipeline:
         // penalties -> top_k -> top_p -> min_p -> temperature -> distribution.
@@ -488,11 +499,10 @@ final class LlamaInference {
         var generationSucceeded = false
         defer {
             if !generationSucceeded {
-                if cachedTokenCount > 0 || lastPromptText != nil {
+                if cachedTokenCount > 0 || !cachedTokenIds.isEmpty {
                     FileLogger.shared.log("generation failed — cache tracking invalidated")
                 }
                 cachedTokenCount = 0
-                lastPromptText = nil
                 cachedTokenIds = []
             }
         }
@@ -510,7 +520,7 @@ final class LlamaInference {
         // decode must happen while the pointer is valid (inside the closure).
         var tokens = promptTokens
         let total = tokens.count
-        var offset = reuseCache ? min(cachedTokenCount, total) : 0
+        var offset = reuseLen
         while offset < total {
             let count = min(batchSize, total - offset)
             let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
@@ -531,6 +541,7 @@ final class LlamaInference {
         var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
         var emittedCount = 0             // chars already handed to onToken
         var generated = 0
+        var decodedGenerated = 0         // generated tokens actually fed to the KV cache
         var generatedTokenIds: [llama_token] = []
         var finishReason = "length"
         let limit = max(1, maxTokens)
@@ -601,6 +612,10 @@ final class LlamaInference {
                 return llama_decode(context, batch)
             }
             guard stepDecode == 0 else { throw InferenceError.decode }
+            // Token is now resident in the KV cache (positions stay consistent
+            // with `cachedTokenIds` below). Tokens that ended generation via an
+            // early break above were NOT decoded and must not be counted.
+            decodedGenerated = generated
         }
 
         // Flush any trailing bytes (lossy) and any held-back text, unless a stop
@@ -619,9 +634,12 @@ final class LlamaInference {
 
         generationSucceeded = true
 
-        // Update cache tracking. Next call can skip the cached prefix.
-        cachedTokenCount = promptTokens.count + generated
-        cachedTokenIds = promptTokens + generatedTokenIds
+        // Update cache tracking so the next call can reuse the shared prefix.
+        // Only tokens actually decoded into the KV cache are recorded —
+        // `decodedGenerated` excludes any final token from a stop-string or
+        // client-cancel break that was sampled but never fed back to the cache.
+        cachedTokenCount = promptTokens.count + decodedGenerated
+        cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
 
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
         FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")

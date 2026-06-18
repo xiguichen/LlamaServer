@@ -27,6 +27,26 @@ enum ToolCallParser {
         pattern: #"<tool_call>\s*(\{.*?\})\s*</tool_call>"#,
         options: [.dotMatchesLineSeparators])
 
+    /// Fallback for a `<tool_call>` whose closing `</tool_call>` is missing —
+    /// common when the model stops (EOG) right after emitting the JSON. Greedy
+    /// to the last brace so a complete nested object is captured. Only used when
+    /// the strict regex above finds nothing, so it never mis-handles closed tags.
+    private static let unclosedToolCallRegex = try! NSRegularExpression(
+        pattern: #"<tool_call>\s*(\{.*\})"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// A well-formed `<think> … </think>` reasoning block. Models like QwOpus
+    /// wrap their chain-of-thought in these tags; clients (e.g. OpenCode) expect
+    /// only the final answer as `content`, so the reasoning is stripped out.
+    private static let thinkBlockRegex = try! NSRegularExpression(
+        pattern: #"<think>.*?</think>"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// An unterminated `<think>` (generation cut off mid-reasoning) — strip to end.
+    private static let danglingThinkRegex = try! NSRegularExpression(
+        pattern: #"<think>.*$"#,
+        options: [.dotMatchesLineSeparators])
+
     /// ANSI SGR escape sequences (e.g. 24-bit color codes) some models emit.
     private static let ansiRegex = try! NSRegularExpression(
         pattern: "\u{1B}\\[[0-9;]*m",
@@ -40,7 +60,12 @@ enum ToolCallParser {
         let matches = toolCallRegex.matches(in: stripped, options: [], range: fullRange)
 
         guard !matches.isEmpty else {
-            return ParseResult(cleanedContent: stripped, toolCalls: [])
+            // No closed envelope — try to recover a tool call whose closing tag
+            // the model omitted before falling back to plain (reasoning-free) text.
+            if let recovered = recoverUnclosedToolCall(in: stripped) {
+                return recovered
+            }
+            return ParseResult(cleanedContent: stripReasoning(stripped), toolCalls: [])
         }
 
         var toolCalls: [ToolCall] = []
@@ -53,12 +78,41 @@ enum ToolCallParser {
             }
         }
 
-        // Remove the envelopes from the human-visible content.
+        // Remove the envelopes and any <think> reasoning from visible content.
         let cleaned = toolCallRegex.stringByReplacingMatches(
             in: stripped, options: [], range: fullRange, withTemplate: "")
-        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
 
         return ParseResult(cleanedContent: trimmed, toolCalls: toolCalls)
+    }
+
+    /// Removes `<think> … </think>` reasoning blocks (and any unterminated
+    /// trailing `<think>`) from text destined for the client's `content` field.
+    static func stripReasoning(_ text: String) -> String {
+        var s = text
+        var range = NSRange(s.startIndex..<s.endIndex, in: s)
+        s = thinkBlockRegex.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+        range = NSRange(s.startIndex..<s.endIndex, in: s)
+        s = danglingThinkRegex.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+        return s
+    }
+
+    /// Recovers a single tool call from an opening `<tool_call>` that has no
+    /// closing tag. Returns nil if no recoverable JSON object is present.
+    private static func recoverUnclosedToolCall(in text: String) -> ParseResult? {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = unclosedToolCallRegex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges >= 2,
+              let jsonRange = Range(match.range(at: 1), in: text),
+              let call = makeToolCall(fromJSON: String(text[jsonRange])) else {
+            return nil
+        }
+        var cleaned = text
+        if let fullMatch = Range(match.range, in: text) {
+            cleaned.removeSubrange(fullMatch)
+        }
+        let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+        return ParseResult(cleanedContent: trimmed, toolCalls: [call])
     }
 
     /// Removes ANSI escape sequences from arbitrary model output.
@@ -103,5 +157,79 @@ enum ToolCallParser {
             id: "call_\(UUID().uuidString.prefix(24))",
             type: "function",
             function: ToolCallFunction(name: name, arguments: argumentsString))
+    }
+}
+
+/// Stateful filter that strips `<think> … </think>` reasoning from a *streamed*
+/// token sequence, where the tags may be split across token-chunk boundaries.
+///
+/// The buffered/non-streaming paths use `ToolCallParser.stripReasoning` on the
+/// whole text, but a streaming response (e.g. OpenCode's conversation-title
+/// request) emits content token-by-token, so without this filter the raw
+/// chain-of-thought (and the literal `<think>` tags) would be streamed to the
+/// client as visible content. Feed each decoded piece through `feed`; emit only
+/// what it returns, then emit `flush()` once generation ends.
+final class ReasoningStreamFilter {
+    private static let openTag = "<think>"
+    private static let closeTag = "</think>"
+
+    private var inThink = false
+    /// Holds text that might contain a partial tag straddling the next chunk.
+    private var buffer = ""
+
+    /// Consumes a streamed piece, returning the text safe to emit now.
+    func feed(_ text: String) -> String {
+        buffer += text
+        var output = ""
+        while true {
+            if inThink {
+                // Drop everything up to and including the closing tag.
+                if let r = buffer.range(of: Self.closeTag) {
+                    buffer.removeSubrange(buffer.startIndex..<r.upperBound)
+                    inThink = false
+                    continue
+                }
+                // Still inside reasoning — drop all but a tail that could be the
+                // start of a split `</think>`.
+                buffer = String(buffer.suffix(Self.closeTag.count - 1))
+                break
+            } else {
+                if let r = buffer.range(of: Self.openTag) {
+                    output += buffer[buffer.startIndex..<r.lowerBound]
+                    buffer.removeSubrange(buffer.startIndex..<r.upperBound)
+                    inThink = true
+                    continue
+                }
+                // Emit everything except a possible partial `<think>` at the end.
+                let hold = Self.partialTagSuffixLength(of: buffer, tag: Self.openTag)
+                let emitCount = buffer.count - hold
+                if emitCount > 0 {
+                    let idx = buffer.index(buffer.startIndex, offsetBy: emitCount)
+                    output += buffer[buffer.startIndex..<idx]
+                    buffer.removeSubrange(buffer.startIndex..<idx)
+                }
+                break
+            }
+        }
+        return output
+    }
+
+    /// Emits any remaining buffered text at end of generation. Anything still
+    /// inside an unterminated `<think>` is discarded.
+    func flush() -> String {
+        guard !inThink else { buffer = ""; return "" }
+        let out = buffer
+        buffer = ""
+        return out
+    }
+
+    /// Length of the longest suffix of `s` that is a proper prefix of `tag`.
+    private static func partialTagSuffixLength(of s: String, tag: String) -> Int {
+        var k = min(tag.count - 1, s.count)
+        while k > 0 {
+            if tag.hasPrefix(String(s.suffix(k))) { return k }
+            k -= 1
+        }
+        return 0
     }
 }

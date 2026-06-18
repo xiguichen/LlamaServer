@@ -345,6 +345,9 @@ final class LlamaHTTPServer {
 
             var generatedTokens = 0
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
+            // Strips <think> reasoning from the streamed (non-tool) content so
+            // clients receive only the final answer, not the chain-of-thought.
+            let thinkFilter = ReasoningStreamFilter()
 
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
@@ -362,16 +365,23 @@ final class LlamaHTTPServer {
                     }
                     // Buffer (don't stream) when a tool call may be forming.
                     guard !toolsActive else { return true }
-                    let clean = ToolCallParser.stripANSI(text)
-                    guard !clean.isEmpty else { return true }
+                    let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
+                    guard !visible.isEmpty else { return true }
                     stopKeepAlive()
-                    sendChunk(delta: Delta(role: nil, content: clean), finishReason: nil)
+                    sendChunk(delta: Delta(role: nil, content: visible), finishReason: nil)
                     return true
                 }
                 FileLogger.shared.log("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
                 // Buffered tool requests stream nothing during generation; make
                 // sure the heartbeat is stopped before the first real chunk below.
                 stopKeepAlive()
+                // Flush any content the reasoning filter held back (non-tool path).
+                if !toolsActive {
+                    let tail = thinkFilter.flush()
+                    if !tail.isEmpty {
+                        sendChunk(delta: Delta(role: nil, content: tail), finishReason: nil)
+                    }
+                }
                 self.generationCount += 1
                 if self.generationCount >= self.contextRecreateThreshold {
                     FileLogger.shared.log("streaming #\(currentRequest): recreating context (threshold reached)")
