@@ -1,6 +1,7 @@
 import Foundation
 import Telegraph
 import os
+import UIKit
 
 // MARK: - StreamableServer
 
@@ -65,9 +66,22 @@ final class LlamaHTTPServer {
 
     private var heartbeatTimer: Timer?
     private var listenPort: UInt16 = 0
+    private let connectionCountLock = OSAllocatedUnfairLock()
+    private var _activeConnections = 0
+    private var activeConnections: Int {
+        get { connectionCountLock.withLock { _activeConnections } }
+        set { connectionCountLock.withLock { _activeConnections = newValue } }
+    }
 
     init(inference: LlamaInference) {
         self.inference = inference
+        // Log iOS memory pressure events so we can correlate them with crashes.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main) { _ in
+                let mem = self.memoryMB
+                FileLogger.shared.log("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
+            }
     }
 
     var isRunning: Bool { server?.isRunning ?? false }
@@ -135,11 +149,19 @@ final class LlamaHTTPServer {
             guard request.method == .POST else { return false }
             let path = request.uri.path.lowercased()
             guard path == "/v1/chat/completions" || path.hasSuffix("/chat/completions") else { return false }
-            guard request.body.count <= Self.maxRequestBytes,
-                  let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else { return false }
+            guard request.body.count <= Self.maxRequestBytes else {
+                FileLogger.shared.log("intercept: request body too large (\(request.body.count) bytes, max \(Self.maxRequestBytes))")
+                return false
+            }
+            let bodyPreview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
+            guard let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else {
+                FileLogger.shared.log("intercept: JSON decode FAILED for POST \(path). body preview=\(bodyPreview)")
+                return false
+            }
             let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
             FileLogger.shared.log("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
             guard body.stream == true else { return false }
+            FileLogger.shared.log("intercept: claiming streaming request #\(self.nextRequestNumber())")
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
         }
@@ -217,6 +239,8 @@ final class LlamaHTTPServer {
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
         let currentRequest = nextRequestNumber()
+        activeConnections += 1
+        FileLogger.shared.log("streaming #\(currentRequest): connection OPENED (total active: \(activeConnections))")
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
@@ -307,13 +331,16 @@ final class LlamaHTTPServer {
             // token-by-token streaming can't reliably do that. Plain chats still
             // stream incrementally for good UX.
             func sendChunk(delta: Delta, finishReason: String?) {
-                if let data = try? JSONEncoder().encode(
+                guard let data = try? JSONEncoder().encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
                                    choices: [StreamingChoice(index: 0, delta: delta,
                                                              finish_reason: finishReason)])
-                ), let str = String(data: data, encoding: .utf8) {
-                    connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                ), let str = String(data: data, encoding: .utf8),
+                      let chunkData = "data: \(str)\n\n".data(using: .utf8) else {
+                    FileLogger.shared.log("streaming #\(currentRequest): sendChunk ENCODE FAILED")
+                    return
                 }
+                connection.send(data: chunkData, timeout: 10)
             }
 
             var generatedTokens = 0
@@ -410,17 +437,22 @@ final class LlamaHTTPServer {
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.log("streaming #\(currentRequest): [DONE] sent, closing connection")
+            FileLogger.shared.log("streaming #\(currentRequest): [DONE] sent")
             connection.close(immediately: false)
+            self.activeConnections -= 1
+            FileLogger.shared.log("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
         }
     }
 
     private func chatCompletionResponse(request: HTTPRequest) -> HTTPResponse {
         guard request.body.count <= Self.maxRequestBytes else {
+            FileLogger.shared.log("chat response: body too large (\(request.body.count) bytes)")
             return errorResponse("Request body too large", status: .badRequest)
         }
         let decoder = JSONDecoder()
         guard let body = try? decoder.decode(ChatCompletionRequest.self, from: request.body) else {
+            let preview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
+            FileLogger.shared.log("chat response: JSON decode FAILED. body preview=\(preview)")
             return errorResponse("Invalid request body", status: .badRequest)
         }
         guard !body.messages.isEmpty else {
@@ -518,7 +550,11 @@ final class LlamaHTTPServer {
                 total_tokens: result.promptTokens + result.completionTokens
             )
         )
-        return json(encodable: response, status: .ok)
+        let httpResponse = json(encodable: response, status: .ok)
+        let responseSize = httpResponse.body?.count ?? 0
+        let preview = String(data: httpResponse.body?.prefix(200) ?? Data(), encoding: .utf8) ?? ""
+        FileLogger.shared.log("chat response #\(currentRequest): \(responseSize) bytes, finish=\(openAIReason), preview=\(preview.prefix(120))")
+        return httpResponse
     }
 
     // MARK: - Helpers
@@ -615,9 +651,12 @@ final class LlamaHTTPServer {
     /// to the model without a chat template — some clients still use this.
     private func completionResponse(request: HTTPRequest) -> HTTPResponse {
         guard request.body.count <= Self.maxRequestBytes else {
+            FileLogger.shared.log("completion: body too large (\(request.body.count) bytes)")
             return errorResponse("Request body too large", status: .badRequest)
         }
         guard let body = try? JSONDecoder().decode(CompletionRequest.self, from: request.body) else {
+            let preview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
+            FileLogger.shared.log("completion: JSON decode FAILED. body preview=\(preview)")
             return errorResponse("Invalid request body", status: .badRequest)
         }
         let prompt = body.prompt.joined
@@ -664,12 +703,14 @@ final class LlamaHTTPServer {
             created: Int(Date().timeIntervalSince1970),
             model: body.model ?? inference.modelName,
             choices: [CompletionChoice(index: 0,
-                                       text: ToolCallParser.stripANSI(result.text),
-                                       finish_reason: reason)],
+                                        text: ToolCallParser.stripANSI(result.text),
+                                        finish_reason: reason)],
             usage: Usage(prompt_tokens: result.promptTokens,
                          completion_tokens: result.completionTokens,
                          total_tokens: result.promptTokens + result.completionTokens))
-        return json(encodable: response, status: .ok)
+        let httpResponse = json(encodable: response, status: .ok)
+        FileLogger.shared.log("completion response #\(currentRequest): \(httpResponse.body?.count ?? 0) bytes, finish=\(reason)")
+        return httpResponse
     }
 
     private func errorResponse(_ message: String, status: HTTPStatus) -> HTTPResponse {
