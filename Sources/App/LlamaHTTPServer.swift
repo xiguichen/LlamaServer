@@ -354,8 +354,8 @@ final class LlamaHTTPServer {
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
                                                toolChoice: body.tool_choice)
-                let finalMsgs = self.applyThinkingSwitch(messages: msgs, enabled: body.thinkingEnabled)
-                let prompt = self.inference.formatPrompt(messages: finalMsgs)
+                let basePrompt = self.inference.formatPrompt(messages: msgs)
+                let prompt = self.applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
                 FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
                 FileLogger.shared.debug("streaming #\(currentRequest): thinking=\(body.thinkingEnabled)")
                 FileLogger.shared.verbose("streaming #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
@@ -499,8 +499,8 @@ final class LlamaHTTPServer {
             do {
                 let msgs = injectToolDefs(messages: body.messages, tools: body.tools,
                                           toolChoice: body.tool_choice)
-                let finalMsgs = applyThinkingSwitch(messages: msgs, enabled: body.thinkingEnabled)
-                let prompt = inference.formatPrompt(messages: finalMsgs)
+                let basePrompt = inference.formatPrompt(messages: msgs)
+                let prompt = applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
                 FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
@@ -645,23 +645,19 @@ final class LlamaHTTPServer {
         return modified
     }
 
-    /// Applies Qwen3's reasoning soft-switch. When thinking is disabled (the
-    /// default), append `/no_think` to the last user message so the model skips
-    /// the `<think>` block entirely — otherwise short "reply with ONLY ..." /
-    /// "Return JSON only" calls waste their whole token budget on reasoning and
-    /// get truncated (finish=length) before producing the real answer, which
-    /// breaks strict clients. When the client opts in (`enable_thinking: true`),
-    /// the messages are left untouched so the model reasons as normal.
-    private func applyThinkingSwitch(messages: [ChatMessage], enabled: Bool) -> [ChatMessage] {
-        guard !enabled else { return messages }
-        var modified = messages
-        guard let idx = modified.lastIndex(where: { $0.role == "user" }) else {
-            return modified
-        }
-        let existing = modified[idx].content?.textValue ?? ""
-        let updated = existing.isEmpty ? "/no_think" : existing + " /no_think"
-        modified[idx] = ChatMessage(role: "user", content: updated)
-        return modified
+    /// Suppresses reasoning by PREFILLING an already-closed, empty think block
+    /// onto the assistant turn, so the model resumes generation *after* the
+    /// `</think>` and emits only the final answer. This is structural — it does
+    /// not depend on the model obeying a `/no_think` text directive (this merge
+    /// ignores it) and it does NOT pollute the user's message content (injecting
+    /// `/no_think` into the text made the model treat it as content to review).
+    /// The format matches what the model emits itself (`<think>\n\n</think>\n\n`).
+    /// Without this, short "reply with ONLY ..." / "Return JSON only" calls spend
+    /// their whole token budget on reasoning and get truncated (finish=length)
+    /// before producing the answer, which breaks strict clients. When the client
+    /// opts in (`enable_thinking: true`) the prompt is returned unchanged.
+    private func applyThinkingSwitch(prompt: String, enabled: Bool) -> String {
+        enabled ? prompt : prompt + "<think>\n\n</think>\n\n"
     }
 
 
