@@ -577,8 +577,8 @@ final class LlamaHTTPServer {
             )
         )
         let httpResponse = json(encodable: response, status: .ok)
-        let responseSize = httpResponse.body?.count ?? 0
-        let preview = String(data: httpResponse.body?.prefix(200) ?? Data(), encoding: .utf8) ?? ""
+        let responseSize = httpResponse.body.count
+        let preview = String(data: httpResponse.body.prefix(200), encoding: .utf8) ?? ""
         FileLogger.shared.info("chat response #\(currentRequest): \(responseSize) bytes, finish=\(openAIReason), preview=\(preview.prefix(120))")
         return httpResponse
     }
@@ -740,7 +740,7 @@ final class LlamaHTTPServer {
                          completion_tokens: result.completionTokens,
                          total_tokens: result.promptTokens + result.completionTokens))
         let httpResponse = json(encodable: response, status: .ok)
-        FileLogger.shared.info("completion response #\(currentRequest): \(httpResponse.body?.count ?? 0) bytes, finish=\(reason)")
+        FileLogger.shared.info("completion response #\(currentRequest): \(httpResponse.body.count) bytes, finish=\(reason)")
         return httpResponse
     }
 
