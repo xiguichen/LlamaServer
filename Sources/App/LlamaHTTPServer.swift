@@ -80,7 +80,7 @@ final class LlamaHTTPServer {
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil, queue: .main) { _ in
                 let mem = self.memoryMB
-                FileLogger.shared.log("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
+                FileLogger.shared.warn("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
             }
     }
 
@@ -98,10 +98,10 @@ final class LlamaHTTPServer {
             self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 if let srv = self.server, !srv.isRunning {
-                    FileLogger.shared.log("[heartbeat] listener down — restarting")
+                    FileLogger.shared.warn("[heartbeat] listener down — restarting")
                     self.restartListener()
                 }
-                FileLogger.shared.log("[heartbeat] alive")
+                FileLogger.shared.debug("[heartbeat] alive")
             }
         }
     }
@@ -123,9 +123,9 @@ final class LlamaHTTPServer {
             try newServer.start(port: Int(listenPort))
             oldServer?.stop()
             self.server = newServer
-            FileLogger.shared.log("listener restarted on port \(listenPort)")
+            FileLogger.shared.info("listener restarted on port \(listenPort)")
         } catch {
-            FileLogger.shared.log("listener restart failed: \(error.localizedDescription)")
+            FileLogger.shared.error("listener restart failed: \(error.localizedDescription)")
             self.server = oldServer
         }
     }
@@ -150,18 +150,19 @@ final class LlamaHTTPServer {
             let path = request.uri.path.lowercased()
             guard path == "/v1/chat/completions" || path.hasSuffix("/chat/completions") else { return false }
             guard request.body.count <= Self.maxRequestBytes else {
-                FileLogger.shared.log("intercept: request body too large (\(request.body.count) bytes, max \(Self.maxRequestBytes))")
+                FileLogger.shared.warn("intercept: request body too large (\(request.body.count) bytes, max \(Self.maxRequestBytes))")
                 return false
             }
             let bodyPreview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
             guard let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else {
-                FileLogger.shared.log("intercept: JSON decode FAILED for POST \(path). body preview=\(bodyPreview)")
+                FileLogger.shared.error("intercept: JSON decode FAILED for POST \(path). body preview=\(bodyPreview)")
+                FileLogger.shared.verbose("intercept: FAILED RAW BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
                 return false
             }
             let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
-            FileLogger.shared.log("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
+            FileLogger.shared.info("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
             guard body.stream == true else { return false }
-            FileLogger.shared.log("intercept: claiming streaming request #\(self.nextRequestNumber())")
+            FileLogger.shared.debug("intercept: claiming streaming request #\(self.nextRequestNumber())")
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
         }
@@ -240,11 +241,12 @@ final class LlamaHTTPServer {
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
         let currentRequest = nextRequestNumber()
         activeConnections += 1
-        FileLogger.shared.log("streaming #\(currentRequest): connection OPENED (total active: \(activeConnections))")
+        FileLogger.shared.debug("streaming #\(currentRequest): connection OPENED (total active: \(activeConnections))")
+        FileLogger.shared.verbose("streaming #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
-        FileLogger.shared.log("streaming chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.debug("streaming chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
 
         guard !body.messages.isEmpty else {
             // No SSE stream has started yet, so return a proper HTTP error
@@ -282,7 +284,7 @@ final class LlamaHTTPServer {
         header += "Access-Control-Allow-Origin: *\r\n"
         header += "\r\n"
         connection.send(data: header.data(using: .utf8)!, timeout: 10)
-        FileLogger.shared.log("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
+        FileLogger.shared.debug("streaming #\(currentRequest): SSE headers sent, token count=\(body.messages.count)")
 
         // First chunk announces role
         if let roleData = try? JSONEncoder().encode(
@@ -292,7 +294,7 @@ final class LlamaHTTPServer {
                                                       finish_reason: nil)])
         ), let roleStr = String(data: roleData, encoding: .utf8) {
             connection.send(data: "data: \(roleStr)\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.log("streaming #\(currentRequest): role chunk sent")
+            FileLogger.shared.debug("streaming #\(currentRequest): role chunk sent")
         }
 
         // Send SSE keep-alive comments every 5 s so clients don't time out
@@ -311,12 +313,12 @@ final class LlamaHTTPServer {
             conn.send(data: ": keepalive\n\n".data(using: .utf8)!, timeout: 5)
         }
         keepAliveSource.resume()
-        FileLogger.shared.log("streaming #\(currentRequest): keep-alive timer started")
+        FileLogger.shared.debug("streaming #\(currentRequest): keep-alive timer started")
 
         // Run generation on the serial queue. Each token is flushed as an SSE event.
         inferenceQueue.async { [weak self] in
             guard let self = self else { keepAliveSource.cancel(); return }
-            FileLogger.shared.log("streaming #\(currentRequest): async block started (queue wait ended)")
+            FileLogger.shared.debug("streaming #\(currentRequest): async block started (queue wait ended)")
 
             // Stop the keep-alive comment stream the instant we begin writing
             // real SSE data, so heartbeat comments never interleave with the
@@ -337,7 +339,7 @@ final class LlamaHTTPServer {
                                                              finish_reason: finishReason)])
                 ), let str = String(data: data, encoding: .utf8),
                       let chunkData = "data: \(str)\n\n".data(using: .utf8) else {
-                    FileLogger.shared.log("streaming #\(currentRequest): sendChunk ENCODE FAILED")
+                    FileLogger.shared.error("streaming #\(currentRequest): sendChunk ENCODE FAILED")
                     return
                 }
                 connection.send(data: chunkData, timeout: 10)
@@ -353,14 +355,15 @@ final class LlamaHTTPServer {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
                                                toolChoice: body.tool_choice)
                 let prompt = self.inference.formatPrompt(messages: msgs)
-                FileLogger.shared.log("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
+                FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
+                FileLogger.shared.verbose("streaming #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams) { text in
                     generatedTokens += 1
                     let now = CFAbsoluteTimeGetCurrent()
                     if now - lastTokenTime >= 10 {
-                        FileLogger.shared.log("streaming #\(currentRequest): generated \(generatedTokens) tokens so far")
+                        FileLogger.shared.debug("streaming #\(currentRequest): generated \(generatedTokens) tokens so far")
                         lastTokenTime = now
                     }
                     // Buffer (don't stream) when a tool call may be forming.
@@ -368,10 +371,12 @@ final class LlamaHTTPServer {
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
                     guard !visible.isEmpty else { return true }
                     stopKeepAlive()
+                    FileLogger.shared.verbose("streaming #\(currentRequest): chunk >>>\(visible)<<<")
                     sendChunk(delta: Delta(role: nil, content: visible), finishReason: nil)
                     return true
                 }
-                FileLogger.shared.log("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
+                FileLogger.shared.info("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
+                FileLogger.shared.verbose("streaming #\(currentRequest): FULL RAW OUTPUT >>>\n\(genResult.text)\n<<<")
                 // Buffered tool requests stream nothing during generation; make
                 // sure the heartbeat is stopped before the first real chunk below.
                 stopKeepAlive()
@@ -384,7 +389,7 @@ final class LlamaHTTPServer {
                 }
                 self.generationCount += 1
                 if self.generationCount >= self.contextRecreateThreshold {
-                    FileLogger.shared.log("streaming #\(currentRequest): recreating context (threshold reached)")
+                    FileLogger.shared.info("streaming #\(currentRequest): recreating context (threshold reached)")
                     try self.inference.recreateContext()
                     self.generationCount = 0
                 }
@@ -397,15 +402,18 @@ final class LlamaHTTPServer {
                 }
 
                 if toolsActive {
-                    FileLogger.shared.log("streaming #\(currentRequest): tools active, parsing tool calls")
+                    FileLogger.shared.debug("streaming #\(currentRequest): tools active, parsing tool calls")
                     let parsed = ToolCallParser.parse(genResult.text)
                     if !parsed.toolCalls.isEmpty {
                         streamReason = "tool_calls"
-                        FileLogger.shared.log("streaming #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
+                        FileLogger.shared.info("streaming #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
+                        for call in parsed.toolCalls {
+                            FileLogger.shared.verbose("streaming #\(currentRequest): tool_call name=\(call.function.name) args=\(call.function.arguments)")
+                        }
                         if !parsed.cleanedContent.isEmpty {
                             sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                       finishReason: nil)
-                            FileLogger.shared.log("streaming #\(currentRequest): sent cleaned content chunk")
+                            FileLogger.shared.debug("streaming #\(currentRequest): sent cleaned content chunk")
                         }
                         let streamingCalls = parsed.toolCalls.enumerated().map {
                             StreamingToolCall(index: $0.offset, from: $0.element)
@@ -413,20 +421,20 @@ final class LlamaHTTPServer {
                         sendChunk(delta: Delta(role: nil, content: nil,
                                                tool_calls: streamingCalls),
                                   finishReason: nil)
-                        FileLogger.shared.log("streaming #\(currentRequest): sent tool_calls chunk")
+                        FileLogger.shared.debug("streaming #\(currentRequest): sent tool_calls chunk")
                     } else if !parsed.cleanedContent.isEmpty {
                         // No tool call after all — flush the buffered content.
-                        FileLogger.shared.log("streaming #\(currentRequest): no tool calls, flushing content")
+                        FileLogger.shared.debug("streaming #\(currentRequest): no tool calls, flushing content")
                         sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                   finishReason: nil)
                     } else {
-                        FileLogger.shared.log("streaming #\(currentRequest): no tool calls and no content")
+                        FileLogger.shared.warn("streaming #\(currentRequest): no tool calls and no content")
                     }
                 }
 
                 // Final chunk carries the finish reason.
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
-                FileLogger.shared.log("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
+                FileLogger.shared.debug("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
 
                 // Optional usage chunk (OpenAI: empty choices array, usage set).
                 if includeUsage {
@@ -438,31 +446,32 @@ final class LlamaHTTPServer {
                                        choices: [], usage: usage)
                     ), let str = String(data: data, encoding: .utf8) {
                         connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
-                        FileLogger.shared.log("streaming #\(currentRequest): usage chunk sent")
+                        FileLogger.shared.debug("streaming #\(currentRequest): usage chunk sent")
                     }
                 }
             } catch {
                 stopKeepAlive()
-                FileLogger.shared.log("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
+                FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.log("streaming #\(currentRequest): [DONE] sent")
+            FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
             connection.close(immediately: false)
             self.activeConnections -= 1
-            FileLogger.shared.log("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
+            FileLogger.shared.debug("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
         }
     }
 
     private func chatCompletionResponse(request: HTTPRequest) -> HTTPResponse {
         guard request.body.count <= Self.maxRequestBytes else {
-            FileLogger.shared.log("chat response: body too large (\(request.body.count) bytes)")
+            FileLogger.shared.warn("chat response: body too large (\(request.body.count) bytes)")
             return errorResponse("Request body too large", status: .badRequest)
         }
         let decoder = JSONDecoder()
         guard let body = try? decoder.decode(ChatCompletionRequest.self, from: request.body) else {
             let preview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
-            FileLogger.shared.log("chat response: JSON decode FAILED. body preview=\(preview)")
+            FileLogger.shared.error("chat response: JSON decode FAILED. body preview=\(preview)")
+            FileLogger.shared.verbose("chat response: FAILED RAW BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
             return errorResponse("Invalid request body", status: .badRequest)
         }
         guard !body.messages.isEmpty else {
@@ -473,7 +482,8 @@ final class LlamaHTTPServer {
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
-        FileLogger.shared.log("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.debug("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
 
         let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
@@ -487,6 +497,7 @@ final class LlamaHTTPServer {
                 let msgs = injectToolDefs(messages: body.messages, tools: body.tools,
                                           toolChoice: body.tool_choice)
                 let prompt = inference.formatPrompt(messages: msgs)
+                FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams)
@@ -513,7 +524,8 @@ final class LlamaHTTPServer {
         // Breadcrumb after generation, before response assembly: lets us tell
         // whether a process death (jetsam SIGKILL leaves no crash report) happens
         // during generation vs. during response encoding/return.
-        FileLogger.shared.log("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
+        FileLogger.shared.info("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
+        FileLogger.shared.verbose("chat request #\(currentRequest): FULL RAW OUTPUT >>>\n\(result.text)\n<<<")
 
         var openAIReason: String
         switch result.finishReason {
@@ -540,6 +552,10 @@ final class LlamaHTTPServer {
             let content = parsed.cleanedContent.isEmpty ? nil : parsed.cleanedContent
             assistantMessage = ChatMessage(role: "assistant", content: content,
                                            tool_calls: parsed.toolCalls)
+            FileLogger.shared.info("chat request #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
+            for call in parsed.toolCalls {
+                FileLogger.shared.verbose("chat request #\(currentRequest): tool_call name=\(call.function.name) args=\(call.function.arguments)")
+            }
         }
 
         let response = ChatCompletionResponse(
@@ -563,7 +579,7 @@ final class LlamaHTTPServer {
         let httpResponse = json(encodable: response, status: .ok)
         let responseSize = httpResponse.body?.count ?? 0
         let preview = String(data: httpResponse.body?.prefix(200) ?? Data(), encoding: .utf8) ?? ""
-        FileLogger.shared.log("chat response #\(currentRequest): \(responseSize) bytes, finish=\(openAIReason), preview=\(preview.prefix(120))")
+        FileLogger.shared.info("chat response #\(currentRequest): \(responseSize) bytes, finish=\(openAIReason), preview=\(preview.prefix(120))")
         return httpResponse
     }
 
@@ -661,18 +677,23 @@ final class LlamaHTTPServer {
     /// to the model without a chat template — some clients still use this.
     private func completionResponse(request: HTTPRequest) -> HTTPResponse {
         guard request.body.count <= Self.maxRequestBytes else {
-            FileLogger.shared.log("completion: body too large (\(request.body.count) bytes)")
+            FileLogger.shared.warn("completion: body too large (\(request.body.count) bytes)")
             return errorResponse("Request body too large", status: .badRequest)
         }
         guard let body = try? JSONDecoder().decode(CompletionRequest.self, from: request.body) else {
             let preview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
-            FileLogger.shared.log("completion: JSON decode FAILED. body preview=\(preview)")
+            FileLogger.shared.error("completion: JSON decode FAILED. body preview=\(preview)")
+            FileLogger.shared.verbose("completion: FAILED RAW BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
             return errorResponse("Invalid request body", status: .badRequest)
         }
         let prompt = body.prompt.joined
         guard !prompt.isEmpty else {
             return errorResponse("`prompt` must not be empty", status: .badRequest)
         }
+
+        let currentRequest = nextRequestNumber()
+        FileLogger.shared.info("completion request #\(currentRequest): \(prompt.count) prompt chars")
+        FileLogger.shared.verbose("completion request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
 
         let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
@@ -719,7 +740,7 @@ final class LlamaHTTPServer {
                          completion_tokens: result.completionTokens,
                          total_tokens: result.promptTokens + result.completionTokens))
         let httpResponse = json(encodable: response, status: .ok)
-        FileLogger.shared.log("completion response #\(currentRequest): \(httpResponse.body?.count ?? 0) bytes, finish=\(reason)")
+        FileLogger.shared.info("completion response #\(currentRequest): \(httpResponse.body?.count ?? 0) bytes, finish=\(reason)")
         return httpResponse
     }
 

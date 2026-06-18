@@ -85,13 +85,13 @@ final class LlamaInference {
         // (GGML_ABORT/SIGABRT) on an unsupported architecture or OOMs during
         // load, this line survives the crash in llamaserver.log — so a crash is
         // never "without any log", and it's readable on-device (no Mac needed).
-        FileLogger.shared.log("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
+        FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
 
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
-            FileLogger.shared.log("model load returned NULL for '\(self.modelName)'")
+            FileLogger.shared.error("model load returned NULL for '\(self.modelName)'")
             throw InferenceError.modelLoad(modelPath)
         }
-        FileLogger.shared.log("model loaded OK: '\(self.modelName)'")
+        FileLogger.shared.info("model loaded OK: '\(self.modelName)'")
         self.model = loadedModel
 
         guard let loadedVocab = llama_model_get_vocab(loadedModel) else {
@@ -138,14 +138,14 @@ final class LlamaInference {
         ctxParams.n_threads_batch = useThreads
         self.threadCount = useThreads
 
-        FileLogger.shared.log("creating context (\(effective) tokens) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
-            FileLogger.shared.log("context creation returned NULL")
+            FileLogger.shared.error("context creation returned NULL")
             llama_model_free(loadedModel)
             throw InferenceError.contextInit
         }
         self.context = ctx
-        FileLogger.shared.log("context ready (\(effective) tokens)")
+        FileLogger.shared.info("context ready (\(effective) tokens)")
     }
 
     /// Frees the old llama_context and creates a fresh one. This is called after
@@ -166,7 +166,7 @@ final class LlamaInference {
         context = ctx
         cachedTokenCount = 0
         cachedTokenIds = []
-        FileLogger.shared.log("context recreated (\(contextSize) tokens)")
+        FileLogger.shared.info("context recreated (\(contextSize) tokens)")
     }
 
     deinit {
@@ -444,23 +444,23 @@ final class LlamaInference {
 
                 if lcp <= 0 {
                     llama_memory_clear(memory, true)
-                    FileLogger.shared.log("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count))")
+                    FileLogger.shared.debug("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count))")
                 } else if lcp == cachedTokenIds.count {
                     // The whole cache is a prefix of the new prompt — keep it all.
                     reuseLen = lcp
-                    FileLogger.shared.log("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
+                    FileLogger.shared.debug("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
                 } else if llama_memory_seq_rm(memory, 0, llama_pos(lcp), -1) {
                     // Drop the diverging suffix [lcp, end); keep prefix [0, lcp).
                     reuseLen = lcp
-                    FileLogger.shared.log("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tokens, prompt \(promptTokens.count))")
+                    FileLogger.shared.debug("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tokens, prompt \(promptTokens.count))")
                 } else {
                     // Partial removal unsupported by this cache type — start fresh.
                     llama_memory_clear(memory, true)
-                    FileLogger.shared.log("KV cache partial-rm failed; cleared (last cached \(cachedTokenIds.count))")
+                    FileLogger.shared.warn("KV cache partial-rm failed; cleared (last cached \(cachedTokenIds.count))")
                 }
             }
         } else {
-            FileLogger.shared.log("llama_get_memory returned nil — KV cache NOT cleared")
+            FileLogger.shared.warn("llama_get_memory returned nil — KV cache NOT cleared")
         }
 
         // Build the sampler chain. Order mirrors llama.cpp's default pipeline:
@@ -500,7 +500,7 @@ final class LlamaInference {
         defer {
             if !generationSucceeded {
                 if cachedTokenCount > 0 || !cachedTokenIds.isEmpty {
-                    FileLogger.shared.log("generation failed — cache tracking invalidated")
+                    FileLogger.shared.error("generation failed — cache tracking invalidated")
                 }
                 cachedTokenCount = 0
                 cachedTokenIds = []
@@ -509,7 +509,7 @@ final class LlamaInference {
 
         // Decode the prompt. Breadcrumb first: a too-long prompt or a native
         // abort here would otherwise kill the process with no trace.
-        FileLogger.shared.log("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
+        FileLogger.shared.debug("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
         if promptTokens.count >= contextSize {
             throw InferenceError.decode
         }
@@ -535,7 +535,7 @@ final class LlamaInference {
         // Diagnostic: how does the formatted prompt end? It should include the
         // assistant generation header (e.g. "<|im_start|>assistant").
         let promptTail = String(prompt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
-        FileLogger.shared.log("prompt tail: …\(promptTail)")
+        FileLogger.shared.verbose("prompt tail: …\(promptTail)")
 
         var output = ""
         var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
@@ -569,11 +569,11 @@ final class LlamaInference {
             let newToken = llama_sampler_sample(sampler, context, -1)
             guard newToken != -1 else {
                 finishReason = "sampler_error"
-                FileLogger.shared.log("llama_sampler_sample returned -1 (invalid token)")
+                FileLogger.shared.error("llama_sampler_sample returned -1 (invalid token)")
                 break
             }
             if llama_vocab_is_eog(vocab, newToken) {
-                FileLogger.shared.log("eog token id=\(newToken) after \(generated) generated tokens")
+                FileLogger.shared.debug("eog token id=\(newToken) after \(generated) generated tokens")
                 finishReason = generated == 0 ? "eog_immediate" : "eog"
                 break
             }
@@ -642,7 +642,7 @@ final class LlamaInference {
         cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
 
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
-        FileLogger.shared.log("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
+        FileLogger.shared.info("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,

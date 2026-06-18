@@ -176,6 +176,15 @@ struct ContentView: View {
 
     private var logSection: some View {
         Section {
+            Picker("Detail level", selection: $viewModel.logLevel) {
+                ForEach(LogLevel.allCases) { level in
+                    Text(level.label).tag(level)
+                }
+            }
+            Text(viewModel.logLevel.detail)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             if viewModel.logs.isEmpty {
                 Text("No activity yet.").foregroundColor(.secondary)
             } else {
@@ -206,7 +215,7 @@ struct ContentView: View {
                 }
             }
         } footer: {
-            Text("Logs persist to llamaserver.log and survive a crash. Read them on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload — the last line shows the step that crashed.")
+            Text("Logs persist to llamaserver.log and survive a crash. Read them on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload — the last line shows the step that crashed. Set the level to Verbose to capture full request and response payloads for troubleshooting.")
         }
     }
 

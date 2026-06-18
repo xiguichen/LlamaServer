@@ -30,6 +30,13 @@ final class ServerViewModel: ObservableObject {
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
+    /// Controls how much the server records. `.verbose` captures full request and
+    /// response payloads so issues can be diagnosed from the server log alone.
+    /// Persisted by `FileLogger` across launches.
+    @Published var logLevel: LogLevel = FileLogger.shared.minimumLevel {
+        didSet { FileLogger.shared.minimumLevel = logLevel }
+    }
+
     // Model library
     @Published private(set) var models: [ModelFile] = []
     @Published var selectedModel: ModelFile?
@@ -48,7 +55,12 @@ final class ServerViewModel: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         // Show persisted history (incl. breadcrumbs from before any prior crash).
-        logs = FileLogger.shared.tail(maxLines: 200)
+        logs = FileLogger.shared.tail(maxLines: 500)
+        // Mirror EVERY line the server writes (not just UI events) into the panel,
+        // so the in-app log matches the on-disk log at the selected level.
+        FileLogger.shared.onLine = { [weak self] line in
+            Task { @MainActor in self?.appendLine(line) }
+        }
         refreshModels()
     }
 
@@ -56,7 +68,7 @@ final class ServerViewModel: ObservableObject {
     var logFileURL: URL { FileLogger.shared.fileURL }
 
     /// Reload the persisted log into the panel (e.g. after a crash + relaunch).
-    func reloadLogs() { logs = FileLogger.shared.tail(maxLines: 200) }
+    func reloadLogs() { logs = FileLogger.shared.tail(maxLines: 500) }
 
     func clearLogs() {
         FileLogger.shared.clear()
@@ -221,17 +233,16 @@ final class ServerViewModel: ObservableObject {
 
     // MARK: - Logging
 
+    /// UI-originated events log at `.info`. The `onLine` mirror appends the
+    /// formatted line to the panel, so this does NOT append directly (avoids
+    /// duplicates and keeps the panel identical to the on-disk log).
     func log(_ message: String) {
-        let timestamp = Self.formatter.string(from: Date())
-        logs.append("[\(timestamp)] \(message)")
-        if logs.count > 200 { logs.removeFirst(logs.count - 200) }
-        // Persist to disk (crash-survivable; readable via Files app / Share).
-        FileLogger.shared.log(message)
+        FileLogger.shared.info(message)
     }
 
-    private static let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
+    /// Called on the main thread by `FileLogger.onLine` for every emitted line.
+    private func appendLine(_ line: String) {
+        logs.append(line)
+        if logs.count > 500 { logs.removeFirst(logs.count - 500) }
+    }
 }
