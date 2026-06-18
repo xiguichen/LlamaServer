@@ -137,8 +137,15 @@ final class LlamaInference {
         ctxParams.n_threads = useThreads
         ctxParams.n_threads_batch = useThreads
         self.threadCount = useThreads
+        // Sliding-window-attention (SWA) models otherwise keep only a partial KV
+        // cache, which makes `llama_memory_seq_rm` fail on any prefix that reaches
+        // before the window — defeating all prefix reuse. Keeping the full SWA
+        // cache lets seq_rm trim a divergent suffix so the shared prefix is reused.
+        // The cost is the full per-token KV our memory budget already assumes.
+        ctxParams.swa_full = true
 
-        FileLogger.shared.info("creating context (\(effective) tokens) for '\(self.modelName)'")
+        let nSwa = Int(llama_model_n_swa(loadedModel))
+        FileLogger.shared.info("creating context (\(effective) tokens, swa_window \(nSwa), swa_full on) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL")
             llama_model_free(loadedModel)
@@ -159,6 +166,8 @@ final class LlamaInference {
         ctxParams.n_batch = UInt32(batchSize)
         ctxParams.n_threads = threadCount
         ctxParams.n_threads_batch = threadCount
+        // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
+        ctxParams.swa_full = true
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             throw InferenceError.contextInit
