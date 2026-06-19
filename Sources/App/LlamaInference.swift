@@ -184,11 +184,34 @@ final class LlamaInference {
         FileLogger.shared.info("context recreated (\(contextSize) tokens)")
     }
 
-    deinit {
+    /// Tracks whether the native model/context have already been freed so we
+    /// never double-free (which would crash). Set by `unload()`.
+    private var isUnloaded = false
+
+    /// Deterministically frees the llama context and model RIGHT NOW, releasing
+    /// the (often multi-GB) Metal/CPU allocation instead of waiting for ARC to
+    /// run `deinit`. Call this before discarding the instance so a subsequent
+    /// model load starts with a clean memory budget — otherwise the old model is
+    /// still resident when the next one loads, the real allocation fails, and
+    /// `llama_model_load_from_file` returns NULL (surfaced as a misleading
+    /// "architecture may be unsupported" error). Idempotent.
+    ///
+    /// The caller MUST ensure no generation is in flight on the inference queue
+    /// before calling this (the HTTP server drains its queue in `stop()`).
+    func unload() {
+        guard !isUnloaded else { return }
+        isUnloaded = true
         llama_free(context)
         llama_model_free(model)
-        // Intentionally do NOT call llama_backend_free() here: other instances
-        // in the same process may still need the backend. It is freed on exit.
+        FileLogger.shared.info("inference unloaded (model + context freed)")
+    }
+
+    deinit {
+        // Free deterministically if the owner already called `unload()`; the
+        // guard makes this a no-op in that case. We intentionally do NOT call
+        // llama_backend_free() here: other instances in the same process may
+        // still need the backend. It is freed on process exit.
+        unload()
     }
 
     // MARK: - Prompt formatting (chat template)

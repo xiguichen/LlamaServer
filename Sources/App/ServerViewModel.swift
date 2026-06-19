@@ -184,6 +184,16 @@ final class ServerViewModel: ObservableObject {
         let ctxSize = Int(contextSize) ?? 4096
         let modelPath = model.url.path
 
+        // Defensively release any lingering engine from a prior run (e.g. one
+        // that ended in an error state) so we never load a new model while an
+        // old one is still resident in the memory budget.
+        if let old = inference {
+            httpServer?.stop()
+            httpServer = nil
+            old.unload()
+            inference = nil
+        }
+
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
         log("Starting… loading \(model.name) into memory")
@@ -221,7 +231,13 @@ final class ServerViewModel: ObservableObject {
     func stop() {
         httpServer?.stop()
         httpServer = nil
-        inference = nil       // deinit frees the llama context/model
+        // Free the model/context NOW rather than waiting for ARC. Without this,
+        // the old model can still be resident when the next `start()` loads a new
+        // one, exhausting the memory budget so the load fails ("architecture may
+        // be unsupported"). `httpServer.stop()` above drained the inference queue,
+        // so the context is no longer in use.
+        inference?.unload()
+        inference = nil       // deinit is now a guarded no-op
         status = .stopped
         UIApplication.shared.isIdleTimerDisabled = false
         log("Server stopped and model unloaded.")

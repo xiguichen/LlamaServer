@@ -136,6 +136,11 @@ final class LlamaHTTPServer {
         // making a subsequent `start()` fail with EADDRINUSE.
         server?.stop(immediately: true)
         server = nil
+        // Wait for any in-flight generation to finish so the llama context is no
+        // longer in use. This makes it safe for the owner to call
+        // `inference.unload()` immediately after, freeing the model before the
+        // next `start()` loads a new one. When idle, this returns instantly.
+        inferenceQueue.sync { }
     }
 
     /// Re-bind the TCP listener without unloading the model (keeps the inference
