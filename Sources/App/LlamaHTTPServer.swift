@@ -44,6 +44,9 @@ final class LlamaHTTPServer {
 
     private let inference: LlamaInference
     private var server: StreamableServer?
+    /// Keeps the app alive in the background (via a silent audio session) so the
+    /// HTTP server keeps serving requests instead of being suspended by iOS.
+    private let keepAlive = BackgroundKeepAlive()
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
     /// Counter of successful generations. Used to periodically recreate the
@@ -82,6 +85,17 @@ final class LlamaHTTPServer {
                 let mem = self.memoryMB
                 FileLogger.shared.warn("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
             }
+        // iOS closes the listening socket while the app is suspended, so a server
+        // that was "running" before backgrounding can come back with a dead
+        // listener (the heartbeat Timer is also paused while suspended). Rebind
+        // on foreground so the server is reachable again without a manual restart.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                guard let self, self.listenPort > 0, self.server?.isRunning != true else { return }
+                FileLogger.shared.info("foreground: listener down — rebinding")
+                self.restartListener()
+            }
     }
 
     var isRunning: Bool { server?.isRunning ?? false }
@@ -94,10 +108,15 @@ final class LlamaHTTPServer {
         let server = makeServer()
         try server.start(port: Int(port))
         self.server = server
+        // Hold the app awake in the background so requests aren't suspended.
+        keepAlive.start()
         DispatchQueue.main.async {
             self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
                 guard let self else { return }
-                if let srv = self.server, !srv.isRunning {
+                // `isRunning != true` also covers the case where a prior restart
+                // attempt failed and left `server` nil, so the heartbeat keeps
+                // retrying until the listener is back up.
+                if self.server?.isRunning != true {
                     FileLogger.shared.warn("[heartbeat] listener down — restarting")
                     self.restartListener()
                 }
@@ -109,7 +128,13 @@ final class LlamaHTTPServer {
     func stop() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
-        server?.stop()
+        // Release the background audio session — we no longer need to stay awake.
+        keepAlive.stop()
+        // Force-close the listener AND any lingering keep-alive connections
+        // (clients such as undici hold sockets open in a pool) so the TCP port
+        // is released immediately. A graceful stop can leave the port bound,
+        // making a subsequent `start()` fail with EADDRINUSE.
+        server?.stop(immediately: true)
         server = nil
     }
 
@@ -117,16 +142,19 @@ final class LlamaHTTPServer {
     /// context live). Called when iOS closes the listener socket during suspension.
     func restartListener() {
         guard listenPort > 0 else { return }
-        let oldServer = server
+        // Tear the old listener down FIRST so the port is free. Starting a new
+        // server on the same port while the old one is still bound fails with
+        // EADDRINUSE — the original bug that left us stuck on a dead listener.
+        server?.stop(immediately: true)
+        server = nil
         let newServer = makeServer()
         do {
             try newServer.start(port: Int(listenPort))
-            oldServer?.stop()
             self.server = newServer
             FileLogger.shared.info("listener restarted on port \(listenPort)")
         } catch {
+            // Leave `server` nil so the heartbeat retries on its next tick.
             FileLogger.shared.error("listener restart failed: \(error.localizedDescription)")
-            self.server = oldServer
         }
     }
 

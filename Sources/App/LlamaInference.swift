@@ -152,7 +152,13 @@ final class LlamaInference {
             throw InferenceError.contextInit
         }
         self.context = ctx
-        FileLogger.shared.info("context ready (\(effective) tokens)")
+        // One-time ground-truth diagnostic for the persistent `seq_rm` failure.
+        // swa_full proved ineffective (swa_window 0), so log the cache traits that
+        // actually decide whether a partial suffix removal is supported.
+        let isRecurrent = llama_model_is_recurrent(loadedModel)
+        let isHybrid = llama_model_is_hybrid(loadedModel)
+        let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
+        FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
     }
 
     /// Frees the old llama_context and creates a fresh one. This is called after
@@ -464,8 +470,13 @@ final class LlamaInference {
                     FileLogger.shared.debug("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tokens, prompt \(promptTokens.count))")
                 } else {
                     // Partial removal unsupported by this cache type — start fresh.
+                    // Log the sequence bounds first: seq_pos_min > 0 means the cache
+                    // already evicted the prefix we tried to keep (SWA/recurrent),
+                    // which is the only documented reason seq_rm returns false here.
+                    let posMin = Int(llama_memory_seq_pos_min(memory, 0))
+                    let posMax = Int(llama_memory_seq_pos_max(memory, 0))
                     llama_memory_clear(memory, true)
-                    FileLogger.shared.warn("KV cache partial-rm failed; cleared (last cached \(cachedTokenIds.count))")
+                    FileLogger.shared.warn("KV cache partial-rm failed at lcp \(lcp) [seq_pos_min \(posMin), seq_pos_max \(posMax)]; cleared (last cached \(cachedTokenIds.count))")
                 }
             }
         } else {
