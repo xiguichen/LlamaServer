@@ -433,11 +433,21 @@ final class LlamaHTTPServer {
                         sendChunk(delta: Delta(role: nil, content: tail), finishReason: nil)
                     }
                 }
-                self.generationCount += 1
-                if self.generationCount >= self.contextRecreateThreshold {
-                    FileLogger.shared.info("streaming #\(currentRequest): recreating context (threshold reached)")
-                    try self.inference.recreateContext()
-                    self.generationCount = 0
+                // Periodic context flush. Isolate its own do/catch: the
+                // generation already SUCCEEDED and its content was streamed, so a
+                // recreate failure must NOT turn this into a `finish_reason:
+                // "error"`. If it fails the engine marks itself unusable and the
+                // NEXT request surfaces the error cleanly.
+                if self.generationCount + 1 >= self.contextRecreateThreshold {
+                    do {
+                        FileLogger.shared.info("streaming #\(currentRequest): recreating context (threshold reached)")
+                        try self.inference.recreateContext()
+                        self.generationCount = 0
+                    } catch {
+                        FileLogger.shared.error("streaming #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
+                    }
+                } else {
+                    self.generationCount += 1
                 }
 
                 // Map the engine's finish reason onto the OpenAI vocabulary.
@@ -549,16 +559,25 @@ final class LlamaHTTPServer {
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams)
-
-                // Periodically recreate the context to flush accumulated
-                // GPU/allocator state that could otherwise cause Metal to hang.
-                generationCount += 1
-                if generationCount >= contextRecreateThreshold {
-                    try inference.recreateContext()
-                    generationCount = 0
-                }
             } catch {
                 failure = error
+            }
+
+            // Periodically recreate the context to flush accumulated
+            // GPU/allocator state that could otherwise cause Metal to hang.
+            // Kept OUT of the generate do/catch above so a flush failure can
+            // never discard a successful `result` (turning a 200 into a 500).
+            if failure == nil {
+                if generationCount + 1 >= contextRecreateThreshold {
+                    do {
+                        try inference.recreateContext()
+                        generationCount = 0
+                    } catch {
+                        FileLogger.shared.error("chat request #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
+                    }
+                } else {
+                    generationCount += 1
+                }
             }
         }
 
@@ -766,13 +785,22 @@ final class LlamaHTTPServer {
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams)
-                generationCount += 1
-                if generationCount >= contextRecreateThreshold {
-                    try inference.recreateContext()
-                    generationCount = 0
-                }
             } catch {
                 failure = error
+            }
+            // Periodic context flush, isolated so a flush failure can't discard
+            // a successful `result` (see chatCompletionResponse for rationale).
+            if failure == nil {
+                if generationCount + 1 >= contextRecreateThreshold {
+                    do {
+                        try inference.recreateContext()
+                        generationCount = 0
+                    } catch {
+                        FileLogger.shared.error("completion request #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
+                    }
+                } else {
+                    generationCount += 1
+                }
             }
         }
 

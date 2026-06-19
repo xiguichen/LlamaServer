@@ -188,6 +188,9 @@ final class LlamaInference {
     /// cause Metal to hang on `llama_sampler_sample`.
     func recreateContext() throws {
         llama_free(context)
+        // The old context is now gone; until the new one is created the pointer
+        // is dangling. Mark it invalid so a failure below can't be used.
+        contextValid = false
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
@@ -198,9 +201,14 @@ final class LlamaInference {
         ctxParams.swa_full = true
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
+            // `context` still holds the freed pointer; leave `contextValid` false
+            // so generate()/unload() never touch it. The engine is now unusable
+            // and the next request will surface a clear error.
+            FileLogger.shared.error("recreateContext: llama_init_from_model returned NULL — engine unusable")
             throw InferenceError.contextInit
         }
         context = ctx
+        contextValid = true
         cachedTokenCount = 0
         cachedTokenIds = []
         FileLogger.shared.info("context recreated (\(contextSize) tokens)")
@@ -225,6 +233,13 @@ final class LlamaInference {
     /// Tracks whether the native model/context have already been freed so we
     /// never double-free (which would crash). Set by `unload()`.
     private var isUnloaded = false
+    /// Whether `context` currently points at a live llama_context. Set false the
+    /// instant `recreateContext()` frees the old context, and back to true only
+    /// after a new one is successfully created. If re-creation fails, this stays
+    /// false so `generate()` fails fast (instead of using a dangling pointer —
+    /// use-after-free) and `unload()` skips the free (instead of double-freeing).
+    private var contextValid = true
+
     /// Deterministically frees the llama context and model RIGHT NOW, releasing
     /// the (often multi-GB) Metal/CPU allocation instead of waiting for ARC to
     /// run `deinit`. Call this before discarding the instance so a subsequent
@@ -238,7 +253,10 @@ final class LlamaInference {
     func unload() {
         guard !isUnloaded else { return }
         isUnloaded = true
-        llama_free(context)
+        // Only free the context if it's still live: a failed recreateContext()
+        // may have already freed it (contextValid == false), and freeing again
+        // would be a double-free.
+        if contextValid { llama_free(context) }
         llama_model_free(model)
         FileLogger.shared.info("inference unloaded (model + context freed)")
     }
@@ -489,6 +507,13 @@ final class LlamaInference {
                   maxTokens: Int,
                   params: SamplingParams,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
+
+        // A prior recreateContext() may have failed and left no live context.
+        // Fail fast with a clear error instead of decoding into a freed pointer.
+        guard contextValid else {
+            FileLogger.shared.error("generate called with no valid context (recreate previously failed)")
+            throw InferenceError.contextInit
+        }
 
         let promptTokens = try tokenize(prompt, addBOS: true)
         guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
