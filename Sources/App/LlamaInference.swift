@@ -41,6 +41,13 @@ final class LlamaInference {
     private let vocab: OpaquePointer
     private let threadCount: Int32
 
+    /// Whether this model's KV cache supports partial suffix removal
+    /// (`llama_memory_seq_rm`). Hybrid attention/SSM and recurrent models keep a
+    /// recurrent state that cannot be partially trimmed, so seq_rm always fails
+    /// for them — we must clear the whole cache instead of attempting (and
+    /// logging a warning for) a removal that can never succeed.
+    private var supportsPartialCacheReuse = true
+
     /// The effective context size actually used (may be smaller than requested
     /// after clamping to the device's memory budget and the model's train window).
     let contextSize: Int
@@ -56,6 +63,18 @@ final class LlamaInference {
     init(modelPath: String, contextSize requestedContext: Int = 4096, threads: Int32 = 0) throws {
         // Backend init is idempotent across instances within a process.
         llama_backend_init()
+
+        // Route llama.cpp's own internal log (including the real reason a
+        // `llama_decode` fails) into our file log. Without this we only see the
+        // non-zero return code, never the native explanation. The closure
+        // captures nothing (FileLogger.shared is a global), so it converts to a
+        // C function pointer. Routed at debug level since model load is verbose.
+        llama_log_set({ _, text, _ in
+            guard let text else { return }
+            let msg = String(cString: text).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !msg.isEmpty else { return }
+            FileLogger.shared.debug("[llama] \(msg)")
+        }, nil)
 
         self.modelName = (modelPath as NSString).lastPathComponent
 
@@ -159,6 +178,9 @@ final class LlamaInference {
         let isHybrid = llama_model_is_hybrid(loadedModel)
         let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
         FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
+        // Hybrid/recurrent caches can't partially drop a suffix, so don't even
+        // try seq_rm for them (it always fails) — clear and re-decode instead.
+        self.supportsPartialCacheReuse = !isRecurrent && !isHybrid
     }
 
     /// Frees the old llama_context and creates a fresh one. This is called after
@@ -184,10 +206,25 @@ final class LlamaInference {
         FileLogger.shared.info("context recreated (\(contextSize) tokens)")
     }
 
+    /// Recovers after a `llama_decode` returns non-zero. On hybrid attention/SSM
+    /// and recurrent models (can_shift == false) a single failed decode leaves
+    /// the context's recurrent state permanently wedged, so EVERY later decode
+    /// also fails — misleadingly reported as "context may be full" even though
+    /// the context is nearly empty. Recreating the context discards that broken
+    /// state so the next request can succeed. Best-effort: logs if recreation
+    /// itself fails (a genuinely unrecoverable condition).
+    private func recoverFromDecodeFailure() {
+        FileLogger.shared.error("llama_decode failed — recreating context to recover")
+        do {
+            try recreateContext()
+        } catch {
+            FileLogger.shared.error("context recreation after decode failure FAILED: \(error.localizedDescription)")
+        }
+    }
+
     /// Tracks whether the native model/context have already been freed so we
     /// never double-free (which would crash). Set by `unload()`.
     private var isUnloaded = false
-
     /// Deterministically frees the llama context and model RIGHT NOW, releasing
     /// the (often multi-GB) Metal/CPU allocation instead of waiting for ARC to
     /// run `deinit`. Call this before discarding the instance so a subsequent
@@ -487,6 +524,12 @@ final class LlamaInference {
                     // The whole cache is a prefix of the new prompt — keep it all.
                     reuseLen = lcp
                     FileLogger.shared.debug("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
+                } else if !supportsPartialCacheReuse {
+                    // Hybrid/recurrent model: partial suffix removal is impossible,
+                    // so don't attempt seq_rm (it would fail every time). Clear the
+                    // whole cache and re-decode the prompt from scratch.
+                    llama_memory_clear(memory, true)
+                    FileLogger.shared.debug("KV cache cleared (model has no partial-reuse; last cached \(cachedTokenIds.count))")
                 } else if llama_memory_seq_rm(memory, 0, llama_pos(lcp), -1) {
                     // Drop the diverging suffix [lcp, end); keep prefix [0, lcp).
                     reuseLen = lcp
@@ -571,7 +614,10 @@ final class LlamaInference {
                 let batch = llama_batch_get_one(chunk, Int32(count))
                 return llama_decode(context, batch)
             }
-            guard status == 0 else { throw InferenceError.decode }
+            guard status == 0 else {
+                recoverFromDecodeFailure()
+                throw InferenceError.decode
+            }
             offset += count
         }
 
@@ -654,7 +700,10 @@ final class LlamaInference {
                 let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
                 return llama_decode(context, batch)
             }
-            guard stepDecode == 0 else { throw InferenceError.decode }
+            guard stepDecode == 0 else {
+                recoverFromDecodeFailure()
+                throw InferenceError.decode
+            }
             // Token is now resident in the KV cache (positions stay consistent
             // with `cachedTokenIds` below). Tokens that ended generation via an
             // early break above were NOT decoded and must not be counted.

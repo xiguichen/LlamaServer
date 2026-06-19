@@ -69,6 +69,11 @@ final class LlamaHTTPServer {
 
     private var heartbeatTimer: Timer?
     private var listenPort: UInt16 = 0
+    /// Tokens for the NotificationCenter observers so we can remove them in
+    /// `deinit`. Without this the closures (and the captured `self`) leak, which
+    /// keeps every server — and the `LlamaInference` engine it owns — alive for
+    /// the lifetime of the process.
+    private var observerTokens: [NSObjectProtocol] = []
     private let connectionCountLock = OSAllocatedUnfairLock()
     private var _activeConnections = 0
     private var activeConnections: Int {
@@ -79,23 +84,29 @@ final class LlamaHTTPServer {
     init(inference: LlamaInference) {
         self.inference = inference
         // Log iOS memory pressure events so we can correlate them with crashes.
-        NotificationCenter.default.addObserver(
+        observerTokens.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil, queue: .main) { _ in
+            object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
                 let mem = self.memoryMB
                 FileLogger.shared.warn("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
-            }
+            })
         // iOS closes the listening socket while the app is suspended, so a server
         // that was "running" before backgrounding can come back with a dead
         // listener (the heartbeat Timer is also paused while suspended). Rebind
         // on foreground so the server is reachable again without a manual restart.
-        NotificationCenter.default.addObserver(
+        observerTokens.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main) { [weak self] _ in
                 guard let self, self.listenPort > 0, self.server?.isRunning != true else { return }
                 FileLogger.shared.info("foreground: listener down — rebinding")
                 self.restartListener()
-            }
+            })
+    }
+
+    deinit {
+        observerTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        observerTokens.removeAll()
     }
 
     var isRunning: Bool { server?.isRunning ?? false }

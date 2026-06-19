@@ -47,6 +47,12 @@ final class ServerViewModel: ObservableObject {
 
     private var inference: LlamaInference?
     private var httpServer: LlamaHTTPServer?
+    /// Identifies the model+context currently loaded into `inference` so a
+    /// stop→start of the *same* model can reuse the loaded engine instead of
+    /// freeing and reloading it. Reloading the model in the same process is what
+    /// intermittently fails with "model load returned NULL" (a llama.cpp/Metal
+    /// reload race), so we avoid it entirely for the common restart case.
+    private var loadedModelKey: String?
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -102,6 +108,12 @@ final class ServerViewModel: ObservableObject {
 
     func selectModel(_ model: ModelFile) {
         guard !isRunning, !isBusy else { return }
+        // If a different model is still resident from a previous run, free it so
+        // it doesn't keep occupying memory once the user has moved on.
+        if let key = loadedModelKey, !key.hasPrefix("\(model.url.path)|") {
+            unloadEngine()
+            log("Unloaded previous model from memory.")
+        }
         selectedModel = model
         log("Selected model: \(model.name)")
     }
@@ -131,6 +143,10 @@ final class ServerViewModel: ObservableObject {
             do {
                 try ModelStore.shared.delete(model.url)
                 log("Deleted \(model.name)")
+                // Free the resident engine if we just deleted the loaded model.
+                if let key = loadedModelKey, key.hasPrefix("\(model.url.path)|") {
+                    unloadEngine()
+                }
                 if selectedModel == model { selectedModel = nil }
             } catch {
                 log("Delete failed: \(error.localizedDescription)")
@@ -183,19 +199,51 @@ final class ServerViewModel: ObservableObject {
         }
         let ctxSize = Int(contextSize) ?? 4096
         let modelPath = model.url.path
+        let modelKey = "\(modelPath)|\(ctxSize)"
 
-        // Defensively release any lingering engine from a prior run (e.g. one
-        // that ended in an error state) so we never load a new model while an
-        // old one is still resident in the memory budget.
+        status = .loadingModel
+        ipAddress = NetworkInfo.wifiIPv4Address()
+
+        // Fast path: the same model+context is already loaded (e.g. the user
+        // stopped and is starting again). Reuse the live engine and just bring a
+        // fresh HTTP server up — no model reload, so the "model load returned
+        // NULL" reload race cannot happen.
+        if let engine = inference, loadedModelKey == modelKey {
+            log("Restarting server (model already loaded)…")
+            let portValue2 = portValue
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self else { return }
+                do {
+                    let server = LlamaHTTPServer(inference: engine)
+                    try server.start(port: portValue2)
+                    await MainActor.run {
+                        self.httpServer = server
+                        self.status = .running
+                        UIApplication.shared.isIdleTimerDisabled = true
+                        self.log("HTTP server listening on port \(portValue2).")
+                        if let url = self.serverURL { self.log("Reachable at \(url)") }
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.status = .error(error.localizedDescription)
+                        self.log("Failed to start server: \(error.localizedDescription)")
+                        self.httpServer = nil
+                    }
+                }
+            }
+            return
+        }
+
+        // A different model (or none) is loaded: free the old engine first so the
+        // new one loads into a clean memory budget, then load.
         if let old = inference {
             httpServer?.stop()
             httpServer = nil
             old.unload()
             inference = nil
+            loadedModelKey = nil
         }
 
-        status = .loadingModel
-        ipAddress = NetworkInfo.wifiIPv4Address()
         log("Starting… loading \(model.name) into memory")
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -209,6 +257,7 @@ final class ServerViewModel: ObservableObject {
                 await MainActor.run {
                     self.inference = engine
                     self.httpServer = server
+                    self.loadedModelKey = modelKey
                     self.status = .running
                     UIApplication.shared.isIdleTimerDisabled = true
                     if effectiveCtx < ctxSize {
@@ -221,8 +270,10 @@ final class ServerViewModel: ObservableObject {
                 await MainActor.run {
                     self.status = .error(error.localizedDescription)
                     self.log("Failed to start: \(error.localizedDescription)")
+                    self.inference?.unload()
                     self.inference = nil
                     self.httpServer = nil
+                    self.loadedModelKey = nil
                 }
             }
         }
@@ -231,16 +282,22 @@ final class ServerViewModel: ObservableObject {
     func stop() {
         httpServer?.stop()
         httpServer = nil
-        // Free the model/context NOW rather than waiting for ARC. Without this,
-        // the old model can still be resident when the next `start()` loads a new
-        // one, exhausting the memory budget so the load fails ("architecture may
-        // be unsupported"). `httpServer.stop()` above drained the inference queue,
-        // so the context is no longer in use.
-        inference?.unload()
-        inference = nil       // deinit is now a guarded no-op
+        // Keep the model resident so a restart is instant and reliable (reloading
+        // in-process can fail with "model load returned NULL"). The engine is
+        // freed when a different model is selected/deleted via `unloadEngine()`.
         status = .stopped
         UIApplication.shared.isIdleTimerDisabled = false
-        log("Server stopped and model unloaded.")
+        log("Server stopped (model kept in memory for fast restart).")
+    }
+
+    /// Frees the resident engine and its model memory. Call when switching away
+    /// from the loaded model so it doesn't keep occupying the memory budget.
+    private func unloadEngine() {
+        httpServer?.stop()
+        httpServer = nil
+        inference?.unload()
+        inference = nil
+        loadedModelKey = nil
     }
 
     func toggle() {
