@@ -278,6 +278,12 @@ final class LlamaInference {
         // would be a double-free.
         if contextValid { llama_free(context) }
         llama_model_free(model)
+        // Drop the on-disk prompt-state snapshot (if any) so tmp doesn't accrue
+        // stale multi-MB state files across model reloads.
+        if hasSnapshot {
+            try? FileManager.default.removeItem(atPath: snapshotPath)
+            hasSnapshot = false
+        }
         FileLogger.shared.info("inference unloaded (model + context freed)")
     }
 
@@ -521,6 +527,85 @@ final class LlamaInference {
     /// re-decoded. Must mirror the cache precisely — see the end of `generate`.
     private var cachedTokenIds: [llama_token] = []
 
+    // --- Hybrid/recurrent prompt-state snapshot ----------------------------
+    // Hybrid attention/SSM and recurrent models cannot trim a KV suffix
+    // (`llama_memory_seq_rm` fails), so the prefix-reuse path above is unusable
+    // for them and every turn would otherwise re-decode the entire prompt. The
+    // only available reuse mechanism is to serialize the sequence state of the
+    // prompt to a file and reload it on the next turn when the new prompt is a
+    // strict extension of it. This trades a (large) re-decode for a disk write +
+    // read, which is far cheaper for the multi-thousand-token agent prompts.
+    /// On-disk path for the serialized prompt sequence state. Unique per
+    /// instance so concurrent model loads never collide.
+    private lazy var snapshotPath: String = {
+        let name = "llama_seqstate_\(UInt(bitPattern: ObjectIdentifier(self).hashValue)).bin"
+        return (NSTemporaryDirectory() as NSString).appendingPathComponent(name)
+    }()
+    /// The exact prompt token IDs captured in the snapshot file (the previous
+    /// turn's prompt). Cheap to hold in RAM (4 bytes/token) and used to test
+    /// whether the next prompt extends it.
+    private var snapshotTokens: [llama_token] = []
+    /// Whether `snapshotPath` currently holds a valid, loadable snapshot.
+    private var hasSnapshot = false
+
+    /// Serializes the current sequence-0 state (which must equal `promptTokens`)
+    /// to `snapshotPath` so a later turn can restore this prompt prefix without
+    /// re-decoding. Best-effort; a failure just disables reuse next turn.
+    private func savePromptSnapshot(_ promptTokens: [llama_token]) {
+        let n = promptTokens.count
+        let written = promptTokens.withUnsafeBufferPointer { buf in
+            llama_state_seq_save_file(context, snapshotPath, 0, buf.baseAddress, n)
+        }
+        if written > 0 {
+            snapshotTokens = promptTokens
+            hasSnapshot = true
+            FileLogger.shared.debug("KV prompt-state snapshot saved (\(n) tokens, \(written) bytes)")
+        } else {
+            hasSnapshot = false
+            FileLogger.shared.warn("KV prompt-state snapshot save failed")
+        }
+    }
+
+    /// Restores the prompt-state snapshot when `promptTokens` is a strict
+    /// extension of the snapshotted prompt, returning the number of leading
+    /// tokens now resident in the cache (so the caller decodes only the suffix).
+    /// Returns 0 (after clearing the cache) when the snapshot can't be applied.
+    /// Only valid for hybrid/recurrent models, which have no seq_rm trim.
+    private func restorePromptSnapshot(for promptTokens: [llama_token],
+                                       memory: OpaquePointer) -> Int {
+        guard hasSnapshot, !snapshotTokens.isEmpty else {
+            llama_memory_clear(memory, true)
+            return 0
+        }
+        // Longest common token prefix of the snapshot and the new prompt.
+        let maxLCP = min(snapshotTokens.count, promptTokens.count)
+        var lcp = 0
+        while lcp < maxLCP && snapshotTokens[lcp] == promptTokens[lcp] { lcp += 1 }
+        // The snapshot is one indivisible state blob at position
+        // `snapshotTokens.count`; it can only be restored whole. Require the new
+        // prompt to contain it entirely AND leave >= 1 token to decode for fresh
+        // logits. Anything less can't use the snapshot — re-decode from scratch.
+        guard lcp == snapshotTokens.count, snapshotTokens.count < promptTokens.count else {
+            llama_memory_clear(memory, true)
+            FileLogger.shared.debug("KV snapshot unusable (lcp \(lcp)/\(snapshotTokens.count), prompt \(promptTokens.count)); full decode")
+            return 0
+        }
+        // Start from a clean cache, then load the saved prompt state into seq 0.
+        llama_memory_clear(memory, true)
+        var loaded = [llama_token](repeating: 0, count: snapshotTokens.count)
+        var nOut = 0
+        let nread = llama_state_seq_load_file(context, snapshotPath, 0,
+                                              &loaded, snapshotTokens.count, &nOut)
+        guard nread > 0, nOut == snapshotTokens.count else {
+            FileLogger.shared.warn("KV snapshot load failed (nread \(nread), nOut \(nOut)); full decode")
+            llama_memory_clear(memory, true)
+            hasSnapshot = false
+            return 0
+        }
+        FileLogger.shared.debug("KV snapshot restored (\(snapshotTokens.count) tokens, prompt \(promptTokens.count)); decoding \(promptTokens.count - snapshotTokens.count) new")
+        return snapshotTokens.count
+    }
+
     /// Generates a completion for the given (already chat-formatted) prompt.
     /// `onToken` is called for each decoded piece; return `false` to stop early.
     func generate(prompt: String,
@@ -551,7 +636,13 @@ final class LlamaInference {
         // llama-server uses the same common-prefix + seq_rm strategy.
         var reuseLen = 0
         if let memory = llama_get_memory(context) {
-            if cachedTokenIds.isEmpty {
+            if !supportsPartialCacheReuse {
+                // Hybrid/recurrent model: a KV suffix can't be trimmed, so prefix
+                // reuse via seq_rm is impossible. Reuse the previous prompt's
+                // sequence state from a saved snapshot when the new prompt extends
+                // it; otherwise fall back to a full clear + re-decode.
+                reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
+            } else if cachedTokenIds.isEmpty {
                 llama_memory_clear(memory, true)
             } else {
                 // Longest common prefix of the cached tokens and the new prompt.
@@ -664,6 +755,15 @@ final class LlamaInference {
                 throw InferenceError.decode
             }
             offset += count
+        }
+
+        // The sequence state now equals exactly `promptTokens`. For hybrid/
+        // recurrent models (no seq_rm), snapshot it here — BEFORE generation
+        // advances the state — so the next turn can restore this prompt prefix
+        // instead of re-decoding it. Best-effort: a save failure simply means a
+        // full decode next time.
+        if !supportsPartialCacheReuse {
+            savePromptSnapshot(promptTokens)
         }
 
         // Diagnostic: how does the formatted prompt end? It should include the
