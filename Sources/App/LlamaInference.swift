@@ -146,11 +146,30 @@ final class LlamaInference {
         let maxCtxByMemory = (kvBudget / kvBytesPerToken / 256) * 256   // round down to 256
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
-        self.batchSize = min(effective, 512)
+
+        // Physical micro-batch (n_ubatch) drives prefill GPU parallelism. The
+        // default 512 leaves a large prompt (opencode injects 10k+ tokens)
+        // decoding at ~170 tok/s, i.e. a ~70 s time-to-first-token. Doubling to
+        // 1024 roughly halves prefill time. The cost is a larger Metal compute
+        // buffer, so only enable it when the KV budget clearly absorbs the extra
+        // cost (>= 200 MB of slack beyond the chosen context); otherwise fall
+        // back to 512 so a speedup can never become an OOM. As a final guard, if
+        // the larger buffer still won't fit, llama_init_from_model returns NULL
+        // and we fail gracefully below rather than crashing.
+        let baseUBatch = 512
+        let fastUBatch = 1024
+        let kvSlack = kvBudget - kvBytesPerToken * effective
+        let extraUBatchReserve = 200 * 1024 * 1024
+        let fastPrefill = kvSlack > extraUBatchReserve
+        self.batchSize = min(effective, fastPrefill ? fastUBatch : baseUBatch)
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(effective)
         ctxParams.n_batch = UInt32(batchSize)
+        // n_ubatch is the physical sub-batch llama.cpp actually decodes on the
+        // GPU; match it to our logical batch so a full chunk is prefilled in one
+        // pass. n_batch must be >= n_ubatch, which holds since both equal batchSize.
+        ctxParams.n_ubatch = UInt32(batchSize)
         let hwThreads = Int32(ProcessInfo.processInfo.activeProcessorCount)
         let useThreads = threads > 0 ? threads : max(1, hwThreads)
         ctxParams.n_threads = useThreads
@@ -164,7 +183,7 @@ final class LlamaInference {
         ctxParams.swa_full = true
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, swa_window \(nSwa), swa_full on) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL")
             llama_model_free(loadedModel)
@@ -195,6 +214,7 @@ final class LlamaInference {
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
         ctxParams.n_batch = UInt32(batchSize)
+        ctxParams.n_ubatch = UInt32(batchSize)
         ctxParams.n_threads = threadCount
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
