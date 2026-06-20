@@ -131,7 +131,13 @@ enum ToolCallParser {
     /// `parameters` instead. Accept either so the arguments aren't silently lost
     /// (which would surface as a tool call with an empty `{}` argument string).
     private static func makeToolCall(fromJSON jsonText: String) -> ToolCall? {
-        guard let data = jsonText.data(using: .utf8),
+        // The model sometimes appends trailing junk after a complete object
+        // (e.g. extra `]}]}` closers) and/or omits the `</tool_call>` tag, so the
+        // greedy recovery regex hands us "{…valid…}]}]}". JSONSerialization
+        // rejects any trailing content, which would silently drop the tool call.
+        // Reduce the text to the first brace-balanced object before parsing.
+        let balanced = firstBalancedJSONObject(in: jsonText) ?? jsonText
+        guard let data = balanced.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let name = obj["name"] as? String, !name.isEmpty else {
             return nil
@@ -157,6 +163,45 @@ enum ToolCallParser {
             id: "call_\(UUID().uuidString.prefix(24))",
             type: "function",
             function: ToolCallFunction(name: name, arguments: argumentsString))
+    }
+
+    /// Returns the substring of the first complete brace-balanced JSON object in
+    /// `text` (from the first `{` to its matching `}`), ignoring any trailing
+    /// content. Brace counting respects string literals and `\` escapes so
+    /// braces inside string values (e.g. a `write` tool's file content) don't
+    /// throw off the balance. Returns nil if no balanced object is found.
+    private static func firstBalancedJSONObject(in text: String) -> String? {
+        let chars = Array(text)
+        guard let start = chars.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var i = start
+        while i < chars.count {
+            let c = chars[i]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if c == "\\" {
+                    escaped = true
+                } else if c == "\"" {
+                    inString = false
+                }
+            } else {
+                switch c {
+                case "\"": inString = true
+                case "{": depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 {
+                        return String(chars[start...i])
+                    }
+                default: break
+                }
+            }
+            i += 1
+        }
+        return nil
     }
 }
 

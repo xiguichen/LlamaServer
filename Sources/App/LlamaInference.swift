@@ -606,6 +606,28 @@ final class LlamaInference {
         return snapshotTokens.count
     }
 
+    /// Token length of the prompt's "stable prefix" — everything up to (but not
+    /// including) the final assistant generation primer the chat template
+    /// appends. Excluding the primer from the hybrid/recurrent snapshot is what
+    /// makes that snapshot a strict prefix of the next turn's prompt (the primer
+    /// is replaced by the real assistant message next turn). Returns the full
+    /// length when no primer boundary is found (snapshot then falls back to the
+    /// whole prompt). Re-tokenizes the prefix and takes the common-prefix length
+    /// with `promptTokens` to stay robust against BPE boundary drift.
+    private func stablePrefixLength(prompt: String, promptTokens: [llama_token]) -> Int {
+        guard let r = prompt.range(of: "<|im_start|>assistant", options: .backwards) else {
+            return promptTokens.count
+        }
+        let prefixStr = String(prompt[prompt.startIndex..<r.lowerBound])
+        guard let prefixTokens = try? tokenize(prefixStr, addBOS: true), !prefixTokens.isEmpty else {
+            return promptTokens.count
+        }
+        let maxN = min(prefixTokens.count, promptTokens.count)
+        var n = 0
+        while n < maxN && prefixTokens[n] == promptTokens[n] { n += 1 }
+        return n
+    }
+
     /// Generates a completion for the given (already chat-formatted) prompt.
     /// `onToken` is called for each decoded piece; return `false` to stop early.
     func generate(prompt: String,
@@ -742,28 +764,49 @@ final class LlamaInference {
         // decode must happen while the pointer is valid (inside the closure).
         var tokens = promptTokens
         let total = tokens.count
-        var offset = reuseLen
-        while offset < total {
-            let count = min(batchSize, total - offset)
-            let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
-                let chunk = buf.baseAddress!.advanced(by: offset)
-                let batch = llama_batch_get_one(chunk, Int32(count))
-                return llama_decode(context, batch)
+
+        // Decodes the token range [lo, hi) in n_batch-sized chunks. Throws (after
+        // recovery) on a decode failure. Generation always decodes through to
+        // `total`, so this is split into two phases only to land a snapshot
+        // boundary at `stableLen` — never affecting what the model finally sees.
+        func decodeRange(_ lo: Int, _ hi: Int) throws {
+            var off = lo
+            while off < hi {
+                let count = min(batchSize, hi - off)
+                let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
+                    let chunk = buf.baseAddress!.advanced(by: off)
+                    let batch = llama_batch_get_one(chunk, Int32(count))
+                    return llama_decode(context, batch)
+                }
+                guard status == 0 else {
+                    recoverFromDecodeFailure()
+                    throw InferenceError.decode
+                }
+                off += count
             }
-            guard status == 0 else {
-                recoverFromDecodeFailure()
-                throw InferenceError.decode
-            }
-            offset += count
         }
 
-        // The sequence state now equals exactly `promptTokens`. For hybrid/
-        // recurrent models (no seq_rm), snapshot it here — BEFORE generation
-        // advances the state — so the next turn can restore this prompt prefix
-        // instead of re-decoding it. Best-effort: a save failure simply means a
-        // full decode next time.
         if !supportsPartialCacheReuse {
-            savePromptSnapshot(promptTokens)
+            // Hybrid/recurrent model: the snapshot can only be restored whole, so
+            // it must EXCLUDE the trailing generation primer (the assistant turn
+            // the chat template appends, e.g. "<|im_start|>assistant\n<think>…").
+            // The next turn replaces that primer with the real assistant message,
+            // so a snapshot that includes it is never a prefix of the next prompt
+            // (its last few tokens always diverge) and is thus useless. Snapshot
+            // the stable prefix instead, BEFORE generation advances the state.
+            let stableLen = max(reuseLen, min(total, stablePrefixLength(prompt: prompt, promptTokens: promptTokens)))
+            try decodeRange(reuseLen, stableLen)
+            if stableLen > 0 && stableLen < total {
+                savePromptSnapshot(Array(promptTokens[0..<stableLen]))
+            }
+            try decodeRange(stableLen, total)
+            if stableLen >= total {
+                // No primer boundary found — fall back to snapshotting the whole
+                // prompt (behaviour as before; may simply be unusable next turn).
+                savePromptSnapshot(promptTokens)
+            }
+        } else {
+            try decodeRange(reuseLen, total)
         }
 
         // Diagnostic: how does the formatted prompt end? It should include the
