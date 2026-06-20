@@ -259,7 +259,12 @@ final class LlamaHTTPServer {
     /// Reject request bodies larger than this to avoid a memory-spike crash.
     private static let maxRequestBytes = 8 * 1024 * 1024
     /// Upper bound on client-requested completion length (a foot-gun otherwise).
-    private static let maxCompletionTokens = 4096
+    /// Also the default when a client omits `max_tokens`: OpenAI semantics treat
+    /// an omitted limit as "generate until EOG or context full", and a large
+    /// tool call (e.g. a `write` with sizable file content) needs the headroom —
+    /// a low default truncates the JSON mid-stream and the tool call fails to
+    /// parse. `generate()` still stops cleanly on EOG / context-full.
+    private static let maxCompletionTokens = 8192
 
     /// CORS headers sent on the OPTIONS preflight. The API uses no cookies or
     /// Authorization, so a wildcard origin is appropriate for an open LAN server.
@@ -309,7 +314,7 @@ final class LlamaHTTPServer {
             return
         }
 
-        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? Self.maxCompletionTokens), Self.maxCompletionTokens)
         let chatId = "chatcmpl-\(UUID().uuidString)"
         let modelName = body.model ?? inference.modelName
         let created = Int(Date().timeIntervalSince1970)
@@ -542,7 +547,7 @@ final class LlamaHTTPServer {
         FileLogger.shared.debug("chat request #\(currentRequest): thinking=\(body.thinkingEnabled)")
         FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
 
-        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? Self.maxCompletionTokens), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
 
         // All llama API access (formatPrompt + generate) must be serialized —
@@ -775,7 +780,7 @@ final class LlamaHTTPServer {
         FileLogger.shared.info("completion request #\(currentRequest): \(prompt.count) prompt chars")
         FileLogger.shared.verbose("completion request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
 
-        let maxTokens = min(max(1, body.resolvedMaxTokens ?? 512), Self.maxCompletionTokens)
+        let maxTokens = min(max(1, body.resolvedMaxTokens ?? Self.maxCompletionTokens), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
 
         var result: LlamaInference.GenerationResult?
