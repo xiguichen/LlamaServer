@@ -167,38 +167,53 @@ final class LlamaHTTPServer {
     func stop() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
-        // Release the background audio session — we no longer need to stay awake.
         keepAlive.stop()
-        // Force-close the listener AND any lingering keep-alive connections
-        // (clients such as undici hold sockets open in a pool) so the TCP port
-        // is released immediately. A graceful stop can leave the port bound,
-        // making a subsequent `start()` fail with EADDRINUSE.
+        // Drain the inference queue FIRST so in-flight streaming requests can
+        // finish (send finish_reason + [DONE]) before connections are closed.
+        // Previously the force-close ran before draining, which cut active
+        // streams mid-response, causing "Stream ended without finish_reason".
+        inferenceQueue.sync { }
         server?.stop(immediately: true)
         server = nil
-        // Wait for any in-flight generation to finish so the llama context is no
-        // longer in use. This makes it safe for the owner to call
-        // `inference.unload()` immediately after, freeing the model before the
-        // next `start()` loads a new one. When idle, this returns instantly.
-        inferenceQueue.sync { }
     }
+
+    /// Guards against re-entrant calls to `restartListener()` (e.g. heartbeat
+    /// fires while a background restart is already in progress).
+    private let restartLock = OSAllocatedUnfairLock(initialState: false)
 
     /// Re-bind the TCP listener without unloading the model (keeps the inference
     /// context live). Called when iOS closes the listener socket during suspension.
+    /// Runs the actual stop/start off the main thread so we can drain the
+    /// inference queue without blocking the UI / heartbeat.
     func restartListener() {
         guard listenPort > 0 else { return }
-        // Tear the old listener down FIRST so the port is free. Starting a new
-        // server on the same port while the old one is still bound fails with
-        // EADDRINUSE — the original bug that left us stuck on a dead listener.
-        server?.stop(immediately: true)
-        server = nil
-        let newServer = makeServer()
-        do {
-            try newServer.start(port: Int(listenPort))
-            self.server = newServer
-            FileLogger.shared.info("listener restarted on port \(listenPort)")
-        } catch {
-            // Leave `server` nil so the heartbeat retries on its next tick.
-            FileLogger.shared.error("listener restart failed: \(error.localizedDescription)")
+        guard !restartLock.withLock({
+            if $0 { return true }
+            $0 = true
+            return false
+        }) else {
+            FileLogger.shared.debug("restartListener: already in progress, skipping")
+            return
+        }
+        DispatchQueue.global().async { [weak self] in
+            guard let self = self else { return }
+            // Allow in-flight streaming requests to finish before tearing down
+            // the listener. Without this, force-closing connections mid-stream
+            // causes "Stream ended without finish_reason" errors on the client.
+            self.inferenceQueue.sync { }
+            DispatchQueue.main.async {
+                self.server?.stop(immediately: true)
+                self.server = nil
+                let newServer = self.makeServer()
+                do {
+                    try newServer.start(port: Int(self.listenPort))
+                    self.server = newServer
+                    FileLogger.shared.info("listener restarted on port \(self.listenPort)")
+                } catch {
+                    FileLogger.shared.error("listener restart failed: \(error.localizedDescription)")
+                }
+                self.restartLock.withLock { $0 = false }
+            }
         }
     }
 
@@ -412,6 +427,7 @@ final class LlamaHTTPServer {
             // token-by-token streaming can't reliably do that. Plain chats still
             // stream incrementally for good UX.
             func sendChunk(delta: Delta, finishReason: String?) {
+                guard !disconnectWatcher.didDisconnect else { return }
                 guard let data = try? JSONEncoder().encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
                                    choices: [StreamingChoice(index: 0, delta: delta,
@@ -553,8 +569,12 @@ final class LlamaHTTPServer {
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             stopKeepAlive()
-            connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
+            if !disconnectWatcher.didDisconnect {
+                connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
+                FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
+            } else {
+                FileLogger.shared.debug("streaming #\(currentRequest): skipping [DONE] (client disconnected)")
+            }
             connection.close(immediately: false)
             self.activeConnections -= 1
             FileLogger.shared.debug("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
