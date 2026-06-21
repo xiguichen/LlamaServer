@@ -108,6 +108,11 @@ final class LlamaHTTPServer {
         get { connectionCountLock.withLock { _activeConnections } }
         set { connectionCountLock.withLock { _activeConnections = newValue } }
     }
+    /// Set true by `stop()` so in-flight streaming callbacks can finish at the
+    /// next token boundary instead of blocking the caller (main thread) for the
+    /// entire generation. Checked inside the token callback alongside
+    /// `disconnectWatcher.didDisconnect`.
+    private let _stopping = OSAllocatedUnfairLock(initialState: false)
 
     init(inference: LlamaInference) {
         self.inference = inference
@@ -168,10 +173,12 @@ final class LlamaHTTPServer {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         keepAlive.stop()
-        // Drain the inference queue FIRST so in-flight streaming requests can
-        // finish (send finish_reason + [DONE]) before connections are closed.
-        // Previously the force-close ran before draining, which cut active
-        // streams mid-response, causing "Stream ended without finish_reason".
+        // Signal in-flight generations to finish at the next token boundary
+        // so the drain below completes quickly instead of blocking the caller
+        // (main thread / UI) for potentially minutes.
+        _stopping.withLock { $0 = true }
+        // Drain the inference queue so in-flight streaming requests can send
+        // finish_reason + [DONE] before connections are closed.
         inferenceQueue.sync { }
         server?.stop(immediately: true)
         server = nil
@@ -473,8 +480,9 @@ final class LlamaHTTPServer {
                         FileLogger.shared.debug("streaming #\(currentRequest): generated \(generatedTokens) tokens so far")
                         lastTokenTime = now
                     }
-                    // Stop generation early if the client disconnected.
-                    if disconnectWatcher.didDisconnect { return false }
+                    // Stop generation early if the client disconnected or the
+                    // server is being shut down (prevents blocking the caller).
+                    if disconnectWatcher.didDisconnect || self._stopping.withLock({ $0 }) { return false }
                     // Buffer (don't stream) when a tool call may be forming.
                     guard !toolsActive else { return true }
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
