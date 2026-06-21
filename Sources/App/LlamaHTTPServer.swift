@@ -3,6 +3,34 @@ import Telegraph
 import os
 import UIKit
 
+/// Proxies `HTTPConnectionDelegate` to detect client disconnect mid-stream.
+/// Captures the `didCloseWithError` callback and exposes a thread-safe flag
+/// so the generation loop can cancel early instead of writing into a dead
+/// connection and wasting inference resources.
+final class DisconnectWatcher: HTTPConnectionDelegate {
+    weak var server: HTTPConnectionDelegate?
+    private let _didDisconnect = OSAllocatedUnfairLock(initialState: false)
+
+    var didDisconnect: Bool { _didDisconnect.withLock { $0 } }
+
+    func connection(_ httpConnection: HTTPConnection, didCloseWithError error: Error?) {
+        _didDisconnect.withLock { $0 = true }
+        server?.connection(httpConnection, didCloseWithError: error)
+    }
+
+    func connection(_ httpConnection: HTTPConnection, handleIncomingRequest request: HTTPRequest, error: Error?) {
+        server?.connection(httpConnection, handleIncomingRequest: request, error: error)
+    }
+
+    func connection(_ httpConnection: HTTPConnection, handleIncomingResponse response: HTTPResponse, error: Error?) {
+        server?.connection(httpConnection, handleIncomingResponse: response, error: error)
+    }
+
+    func connection(_ httpConnection: HTTPConnection, handleUpgradeByRequest request: HTTPRequest) {
+        server?.connection(httpConnection, handleUpgradeByRequest: request)
+    }
+}
+
 // MARK: - StreamableServer
 
 /// Subclass of Telegraph's `Server` that intercepts streaming SSE requests
@@ -323,6 +351,12 @@ final class LlamaHTTPServer {
         // tool_choice "none" suppresses tools entirely.
         let toolsActive = (body.tools?.isEmpty == false) && !(body.tool_choice?.disablesTools ?? false)
 
+        // Swap in a delegate proxy so we detect when the client disconnects
+        // mid-stream and can cancel generation early.
+        let disconnectWatcher = DisconnectWatcher()
+        disconnectWatcher.server = connection.delegate as? HTTPConnectionDelegate
+        connection.delegate = disconnectWatcher
+
         // Send SSE headers + role chunk immediately so the client gets an HTTP
         // response even when the serial inference queue is busy with a prior
         // request. The queue only guards the llama context, not socket writes.
@@ -347,12 +381,10 @@ final class LlamaHTTPServer {
         }
 
         // Send SSE keep-alive comments every 5 s so clients don't time out
-        // during ANY silent phase before the first real response bytes: the
-        // serial-queue wait, the prompt decode, and — for tool requests — the
-        // fully buffered generation (which emits nothing until parsed). The
-        // timer keeps running until `stopKeepAlive()` fires at the first real
-        // `data:` chunk; cancelling earlier (e.g. when the queue wait ends) left
-        // the long decode/buffer window uncovered, so clients saw no response.
+        // during any silent phase: the serial-queue wait, the prompt decode,
+        // the fully buffered tool generation, AND long text generations that
+        // exceed the client's idle timeout. The timer runs until generation
+        // is fully complete and `[DONE]` has been sent.
         let keepAliveActive = OSAllocatedUnfairLock(initialState: true)
         let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         keepAliveSource.schedule(deadline: .now() + 5, repeating: .seconds(5), leeway: .seconds(1))
@@ -365,13 +397,11 @@ final class LlamaHTTPServer {
         FileLogger.shared.debug("streaming #\(currentRequest): keep-alive timer started")
 
         // Run generation on the serial queue. Each token is flushed as an SSE event.
-        inferenceQueue.async { [weak self] in
+        inferenceQueue.async { [weak self, disconnectWatcher] in
             guard let self = self else { keepAliveSource.cancel(); return }
             FileLogger.shared.debug("streaming #\(currentRequest): async block started (queue wait ended)")
 
-            // Stop the keep-alive comment stream the instant we begin writing
-            // real SSE data, so heartbeat comments never interleave with the
-            // response. Idempotent: safe to call repeatedly / from any token.
+            // Idempotent: safe to call repeatedly / from any token.
             func stopKeepAlive() {
                 keepAliveActive.withLock { $0 = false }
                 keepAliveSource.cancel()
@@ -392,6 +422,16 @@ final class LlamaHTTPServer {
                     return
                 }
                 connection.send(data: chunkData, timeout: 10)
+            }
+
+            // Bail early if the client disconnected while we were waiting
+            // in the serial queue behind a prior generation.
+            guard !disconnectWatcher.didDisconnect else {
+                stopKeepAlive()
+                FileLogger.shared.log("streaming #\(currentRequest): client disconnected during queue wait")
+                connection.close(immediately: false)
+                self.activeConnections -= 1
+                return
             }
 
             var generatedTokens = 0
@@ -417,20 +457,18 @@ final class LlamaHTTPServer {
                         FileLogger.shared.debug("streaming #\(currentRequest): generated \(generatedTokens) tokens so far")
                         lastTokenTime = now
                     }
+                    // Stop generation early if the client disconnected.
+                    if disconnectWatcher.didDisconnect { return false }
                     // Buffer (don't stream) when a tool call may be forming.
                     guard !toolsActive else { return true }
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
                     guard !visible.isEmpty else { return true }
-                    stopKeepAlive()
                     FileLogger.shared.verbose("streaming #\(currentRequest): chunk >>>\(visible)<<<")
                     sendChunk(delta: Delta(role: nil, content: visible), finishReason: nil)
                     return true
                 }
                 FileLogger.shared.info("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
                 FileLogger.shared.verbose("streaming #\(currentRequest): FULL RAW OUTPUT >>>\n\(genResult.text)\n<<<")
-                // Buffered tool requests stream nothing during generation; make
-                // sure the heartbeat is stopped before the first real chunk below.
-                stopKeepAlive()
                 // Flush any content the reasoning filter held back (non-tool path).
                 if !toolsActive {
                     let tail = thinkFilter.flush()
@@ -511,10 +549,10 @@ final class LlamaHTTPServer {
                     }
                 }
             } catch {
-                stopKeepAlive()
                 FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
+            stopKeepAlive()
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
             FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
             connection.close(immediately: false)
