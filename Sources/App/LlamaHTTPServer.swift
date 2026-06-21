@@ -569,12 +569,13 @@ final class LlamaHTTPServer {
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
             }
             stopKeepAlive()
-            if !disconnectWatcher.didDisconnect {
-                connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-                FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
-            } else {
-                FileLogger.shared.debug("streaming #\(currentRequest): skipping [DONE] (client disconnected)")
-            }
+            // Always attempt [DONE] — Telegraph's send silently drops on a
+            // dead connection, but skipping it breaks SSE clients (Pi, OpenAI
+            // libraries) that require the terminator. The finish_reason and
+            // usage chunks are protected by sendChunk's didDisconnect guard
+            // above, so those are also skipped if the client goes away early.
+            connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
+            FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
             connection.close(immediately: false)
             self.activeConnections -= 1
             FileLogger.shared.debug("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
