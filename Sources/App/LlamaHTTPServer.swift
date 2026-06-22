@@ -407,18 +407,31 @@ final class LlamaHTTPServer {
             FileLogger.shared.debug("streaming #\(currentRequest): role chunk sent")
         }
 
-        // Send SSE keep-alive comments every 5 s so clients don't time out
-        // during any silent phase: the serial-queue wait, the prompt decode,
-        // the fully buffered tool generation, AND long text generations that
-        // exceed the client's idle timeout. The timer runs until generation
-        // is fully complete and `[DONE]` has been sent.
+        // Send SSE keep-alive data events every 5 s so clients (including the
+        // OpenAI SDK) don't time out during any silent phase: the serial-queue
+        // wait, the prompt decode, fully buffered tool generation, AND long
+        // text generations that exceed the client's idle timeout.
+        // NOTE: SSE comments (`: keepalive`) are ignored by the OpenAI SDK's
+        // SSE parser, so we send real data: lines that trigger onBody in
+        // undici and yield chunks through the SSE decoder, resetting *both*
+        // the HTTP-level body timeout AND the SDK-level stream timeout.
         let keepAliveActive = OSAllocatedUnfairLock(initialState: true)
         let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         keepAliveSource.schedule(deadline: .now() + 5, repeating: .seconds(5), leeway: .seconds(1))
         keepAliveSource.setEventHandler { [weak connection] in
             guard let conn = connection else { return }
             guard keepAliveActive.withLock({ $0 }) else { return }
-            conn.send(data: ": keepalive\n\n".data(using: .utf8)!, timeout: 5)
+            // Send a real data event with empty content (not an SSE comment)
+            // so the OpenAI SDK's stream parser yields a chunk and resets
+            // both undici's bodyTimeout and the SDK's internal timeouts.
+            if let data = try? JSONEncoder().encode(
+                StreamingChunk(id: chatId, created: created, model: modelName,
+                               choices: [StreamingChoice(index: 0,
+                                                          delta: Delta(role: nil, content: ""),
+                                                          finish_reason: nil)])
+            ), let str = String(data: data, encoding: .utf8) {
+                conn.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 5)
+            }
         }
         keepAliveSource.resume()
         FileLogger.shared.debug("streaming #\(currentRequest): keep-alive timer started")
@@ -434,10 +447,20 @@ final class LlamaHTTPServer {
                 keepAliveSource.cancel()
             }
 
-            // When tools are active we must buffer the whole response so the
-            // <tool_call> envelope can be parsed into structured tool_calls;
-            // token-by-token streaming can't reliably do that. Plain chats still
-            // stream incrementally for good UX.
+            // Tool-call streaming state: text before the first <tool_call> is
+            // streamed incrementally; text inside <tool_call>…</tool_call> is
+            // buffered; text after a complete tool call resumes streaming.
+            // This keeps the client's SSE parser alive during long generations
+            // while still allowing reliable tool call envelope parsing.
+            enum ToolStreamState: Equatable {
+                case idle
+                case inToolCall
+                case afterToolCall
+            }
+            var toolStreamState: ToolStreamState = .idle
+            var toolStreamBuffer = ""
+            var didStreamContentDuringToolGen = false
+
             func sendChunk(delta: Delta, finishReason: String?) {
                 guard !disconnectWatcher.didDisconnect else {
                     if finishReason != nil {
@@ -501,8 +524,54 @@ final class LlamaHTTPServer {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — server stopping")
                         return false
                     }
-                    // Buffer (don't stream) when a tool call may be forming.
-                    guard !toolsActive else { return true }
+                    // Stream text content during tool generation (up to the first
+                    // <tool_call> envelope), then buffer the envelope, then
+                    // resume streaming after </tool_call>. This keeps the
+                    // client's SSE connection alive during long generations.
+                    guard !toolsActive else {
+                        let token = ToolCallParser.stripANSI(text)
+                        toolStreamBuffer += token
+                        switch toolStreamState {
+                        case .idle:
+                            if let range = toolStreamBuffer.range(of: "<tool_call>") {
+                                toolStreamState = .inToolCall
+                                let textBefore = String(toolStreamBuffer[..<range.lowerBound])
+                                if !textBefore.isEmpty {
+                                    didStreamContentDuringToolGen = true
+                                    FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(textBefore)<<<")
+                                    sendChunk(delta: Delta(role: nil, content: textBefore), finishReason: nil)
+                                }
+                                toolStreamBuffer = String(toolStreamBuffer[range.lowerBound...])
+                            } else {
+                                didStreamContentDuringToolGen = true
+                                FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(toolStreamBuffer)<<<")
+                                sendChunk(delta: Delta(role: nil, content: toolStreamBuffer), finishReason: nil)
+                                toolStreamBuffer = ""
+                            }
+                        case .inToolCall:
+                            if toolStreamBuffer.range(of: "</tool_call>") != nil {
+                                toolStreamState = .afterToolCall
+                                toolStreamBuffer = ""
+                            }
+                        case .afterToolCall:
+                            if let range = toolStreamBuffer.range(of: "<tool_call>") {
+                                toolStreamState = .inToolCall
+                                let textBefore = String(toolStreamBuffer[..<range.lowerBound])
+                                if !textBefore.isEmpty {
+                                    didStreamContentDuringToolGen = true
+                                    FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(textBefore)<<<")
+                                    sendChunk(delta: Delta(role: nil, content: textBefore), finishReason: nil)
+                                }
+                                toolStreamBuffer = String(toolStreamBuffer[range.lowerBound...])
+                            } else {
+                                didStreamContentDuringToolGen = true
+                                FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(toolStreamBuffer)<<<")
+                                sendChunk(delta: Delta(role: nil, content: toolStreamBuffer), finishReason: nil)
+                                toolStreamBuffer = ""
+                            }
+                        }
+                        return true
+                    }
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
                     guard !visible.isEmpty else { return true }
                     FileLogger.shared.verbose("streaming #\(currentRequest): chunk >>>\(visible)<<<")
@@ -551,10 +620,14 @@ final class LlamaHTTPServer {
                         for call in parsed.toolCalls {
                             FileLogger.shared.verbose("streaming #\(currentRequest): tool_call name=\(call.function.name) args=\(call.function.arguments)")
                         }
-                        if !parsed.cleanedContent.isEmpty {
+                        // Only send cleaned content if it wasn't already streamed
+                        // incrementally during generation.
+                        if !parsed.cleanedContent.isEmpty && !didStreamContentDuringToolGen {
                             sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                       finishReason: nil)
                             FileLogger.shared.debug("streaming #\(currentRequest): sent cleaned content chunk")
+                        } else if !parsed.cleanedContent.isEmpty {
+                            FileLogger.shared.debug("streaming #\(currentRequest): cleaned content already streamed, skipping")
                         }
                         let streamingCalls = parsed.toolCalls.enumerated().map {
                             StreamingToolCall(index: $0.offset, from: $0.element)
@@ -565,9 +638,13 @@ final class LlamaHTTPServer {
                         FileLogger.shared.debug("streaming #\(currentRequest): sent tool_calls chunk")
                     } else if !parsed.cleanedContent.isEmpty {
                         // No tool call after all — flush the buffered content.
-                        FileLogger.shared.debug("streaming #\(currentRequest): no tool calls, flushing content")
-                        sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
-                                  finishReason: nil)
+                        if !didStreamContentDuringToolGen {
+                            FileLogger.shared.debug("streaming #\(currentRequest): no tool calls, flushing content")
+                            sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
+                                      finishReason: nil)
+                        } else {
+                            FileLogger.shared.debug("streaming #\(currentRequest): content already streamed during generation")
+                        }
                     } else {
                         FileLogger.shared.warn("streaming #\(currentRequest): no tool calls and no content")
                     }
