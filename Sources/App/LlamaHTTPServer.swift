@@ -173,6 +173,7 @@ final class LlamaHTTPServer {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         keepAlive.stop()
+        FileLogger.shared.debug("stop: active connections=\(activeConnections)")
         // Signal in-flight generations to finish at the next token boundary
         // so the drain below completes quickly instead of blocking the caller
         // (main thread / UI) for potentially minutes.
@@ -204,6 +205,10 @@ final class LlamaHTTPServer {
         }
         DispatchQueue.global().async { [weak self] in
             guard let self = self else { return }
+            let conns = self.activeConnections
+            if conns > 0 {
+                FileLogger.shared.debug("restartListener: draining \(conns) active connection(s)")
+            }
             // Allow in-flight streaming requests to finish before tearing down
             // the listener. Without this, force-closing connections mid-stream
             // causes "Stream ended without finish_reason" errors on the client.
@@ -434,7 +439,12 @@ final class LlamaHTTPServer {
             // token-by-token streaming can't reliably do that. Plain chats still
             // stream incrementally for good UX.
             func sendChunk(delta: Delta, finishReason: String?) {
-                guard !disconnectWatcher.didDisconnect else { return }
+                guard !disconnectWatcher.didDisconnect else {
+                    if finishReason != nil {
+                        FileLogger.shared.warn("streaming #\(currentRequest): finish_reason dropped — client disconnected")
+                    }
+                    return
+                }
                 guard let data = try? JSONEncoder().encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
                                    choices: [StreamingChoice(index: 0, delta: delta,
@@ -462,6 +472,7 @@ final class LlamaHTTPServer {
             // Strips <think> reasoning from the streamed (non-tool) content so
             // clients receive only the final answer, not the chain-of-thought.
             let thinkFilter = ReasoningStreamFilter()
+            var finishReasonSent = false
 
             do {
                 let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
@@ -482,7 +493,14 @@ final class LlamaHTTPServer {
                     }
                     // Stop generation early if the client disconnected or the
                     // server is being shut down (prevents blocking the caller).
-                    if disconnectWatcher.didDisconnect || self._stopping.withLock({ $0 }) { return false }
+                    if disconnectWatcher.didDisconnect {
+                        FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — client disconnected")
+                        return false
+                    }
+                    if self._stopping.withLock({ $0 }) {
+                        FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — server stopping")
+                        return false
+                    }
                     // Buffer (don't stream) when a tool call may be forming.
                     guard !toolsActive else { return true }
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
@@ -557,6 +575,7 @@ final class LlamaHTTPServer {
 
                 // Final chunk carries the finish reason.
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
+                finishReasonSent = true
                 FileLogger.shared.debug("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
 
                 // Optional usage chunk (OpenAI: empty choices array, usage set).
@@ -575,8 +594,11 @@ final class LlamaHTTPServer {
             } catch {
                 FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
+                finishReasonSent = true
             }
             stopKeepAlive()
+            let didDisconnect = disconnectWatcher.didDisconnect
+            FileLogger.shared.debug("streaming #\(currentRequest): stream summary — finish_reason_sent=\(finishReasonSent) didDisconnect=\(didDisconnect) genTokens=\(generatedTokens)")
             // Always attempt [DONE] — Telegraph's send silently drops on a
             // dead connection, but skipping it breaks SSE clients (Pi, OpenAI
             // libraries) that require the terminator. The finish_reason and
