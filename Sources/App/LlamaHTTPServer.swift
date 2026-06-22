@@ -606,9 +606,13 @@ final class LlamaHTTPServer {
             // above, so those are also skipped if the client goes away early.
             connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
             FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
-            connection.close(immediately: false)
+            // Don't call close() — it races with the async send buffer and can
+            // truncate the stream before the kernel transmits [DONE] (or the
+            // finish_reason chunk). The [DONE] event is the SSE termination
+            // signal; the client closes after receiving it. Telegraph cleans up
+            // the HTTPConnection on client disconnect.
             self.activeConnections -= 1
-            FileLogger.shared.debug("streaming #\(currentRequest): connection CLOSED (total active: \(self.activeConnections), genCount: \(self.generationCount))")
+            FileLogger.shared.debug("streaming #\(currentRequest): stream ended (total active: \(self.activeConnections), genCount: \(self.generationCount))")
         }
     }
 
