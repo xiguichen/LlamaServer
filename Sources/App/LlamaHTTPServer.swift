@@ -341,7 +341,7 @@ final class LlamaHTTPServer {
 
     /// Human-readable system memory snapshot: total, free, and this process's RSS.
     /// Uses Mach `vm_statistics64` for system-wide page counts (entitlement-gated
-    /// on iOS), falling back to sysctl `vm.page_free_count` / `vm.page_active_count`.
+    /// on iOS), falling back to `os_proc_available_memory()` (iOS 17+ public API).
     private var systemMemoryLog: String {
         let total = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
         let pageSize = UInt64(vm_page_size)
@@ -363,28 +363,10 @@ final class LlamaHTTPServer {
             return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB"
         }
 
-        // Fallback: sysctl vm.page_free_count / vm.page_active_count
-        // (typically works on iOS without entitlements).
-        var freePages: UInt64 = 0
-        var freeSize = MemoryLayout<UInt64>.size
-        if sysctlbyname("vm.page_free_count", &freePages, &freeSize, nil, 0) == 0 {
-            let free = freePages * pageSize / (1024 * 1024)
-            var activePages: UInt64 = 0
-            var activeSize = MemoryLayout<UInt64>.size
-            if sysctlbyname("vm.page_active_count", &activePages, &activeSize, nil, 0) == 0 {
-                let active = activePages * pageSize / (1024 * 1024)
-                var wiredPages: UInt64 = 0
-                var wiredSize = MemoryLayout<UInt64>.size
-                if sysctlbyname("vm.page_wire_count", &wiredPages, &wiredSize, nil, 0) == 0 {
-                    let wired = wiredPages * pageSize / (1024 * 1024)
-                    return "total=\(total)MB active=\(active)MB wired=\(wired)MB free=\(free)MB rss=\(rss)MB"
-                }
-                return "total=\(total)MB active=\(active)MB free=\(free)MB rss=\(rss)MB"
-            }
-            return "total=\(total)MB free=\(free)MB rss=\(rss)MB"
-        }
-
-        return "total=\(total)MB rss=\(rss)MB (sysinfo failed)"
+        // Fallback: os_proc_available_memory() (iOS 17+, no entitlement needed).
+        // Returns bytes available to the calling process (memory before jetsam).
+        let available = os_proc_available_memory() / (1024 * 1024)
+        return "total=\(total)MB available=\(available)MB rss=\(rss)MB"
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
@@ -547,7 +529,6 @@ final class LlamaHTTPServer {
 
             var generatedTokens = 0
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
-            let generationStartTime = CFAbsoluteTimeGetCurrent()
             // Strips <think> reasoning from the streamed (non-tool) content so
             // clients receive only the final answer, not the chain-of-thought.
             let thinkFilter = ReasoningStreamFilter()
@@ -576,17 +557,6 @@ final class LlamaHTTPServer {
                     // server is being shut down (prevents blocking the caller).
                     if disconnectWatcher.didDisconnect {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — client disconnected")
-                        return false
-                    }
-                    // Stop at 55 s to leave time for finish_reason + [DONE] to
-                    // flush through the TCP stack before the 60 s router-level
-                    // NAT timeout kills the connection (empirically observed on
-                    // certain WiFi routers). Without this cutoff the final data
-                    // is queued to CocoaAsyncSocket's async buffer but never
-                    // transmitted, causing pi's "Stream ended without
-                    // finish_reason" error.
-                    if CFAbsoluteTimeGetCurrent() - generationStartTime >= 55 {
-                        FileLogger.shared.debug("streaming #\(currentRequest): token callback — generation cut off at 55 s to beat network timeout")
                         return false
                     }
                     if self._stopping.withLock({ $0 }) {
