@@ -87,6 +87,8 @@ final class FileLogger {
 
     private static let levelDefaultsKey = "FileLogger.minimumLevel"
     private let levelLock = OSAllocatedUnfairLock<LogLevel>(initialState: .info)
+    private static let promptKey = "FileLogger.logPromptContent"
+    private let promptLock = OSAllocatedUnfairLock(initialState: false)
 
     /// The most verbose level that will be written. Persisted across launches.
     var minimumLevel: LogLevel {
@@ -94,6 +96,17 @@ final class FileLogger {
         set {
             levelLock.withLock { $0 = newValue }
             UserDefaults.standard.set(newValue.rawValue, forKey: Self.levelDefaultsKey)
+        }
+    }
+
+    /// Whether to log full prompt/response payloads. Separate from `minimumLevel`
+    /// so a user can keep `.verbose` logging for other diagnostics without leaking
+    /// sensitive or bulky prompt content. Persisted across launches.
+    var logPromptContent: Bool {
+        get { promptLock.withLock { $0 } }
+        set {
+            promptLock.withLock { $0 = newValue }
+            UserDefaults.standard.set(newValue, forKey: Self.promptKey)
         }
     }
 
@@ -109,6 +122,7 @@ final class FileLogger {
            let level = LogLevel(rawValue: stored) {
             levelLock.withLock { $0 = level }
         }
+        promptLock.withLock { $0 = UserDefaults.standard.bool(forKey: Self.promptKey) }
 
         rotateIfNeeded()
     }

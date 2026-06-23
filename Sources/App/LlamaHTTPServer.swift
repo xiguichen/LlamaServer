@@ -346,7 +346,9 @@ final class LlamaHTTPServer {
         let currentRequest = nextRequestNumber()
         activeConnections += 1
         FileLogger.shared.debug("streaming #\(currentRequest): connection OPENED (total active: \(activeConnections))")
-        FileLogger.shared.verbose("streaming #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        if FileLogger.shared.logPromptContent {
+            FileLogger.shared.verbose("streaming #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        }
         let mem = memoryMB
         let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
         previousFootprint = mem
@@ -504,7 +506,9 @@ final class LlamaHTTPServer {
                 let prompt = self.applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
                 FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
                 FileLogger.shared.debug("streaming #\(currentRequest): thinking=\(body.thinkingEnabled)")
-                FileLogger.shared.verbose("streaming #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
+                if FileLogger.shared.logPromptContent {
+                    FileLogger.shared.verbose("streaming #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
+                }
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams) { text in
@@ -579,7 +583,9 @@ final class LlamaHTTPServer {
                     return true
                 }
                 FileLogger.shared.info("streaming #\(currentRequest): generation done, \(generatedTokens) tokens, finish=\(genResult.finishReason)")
-                FileLogger.shared.verbose("streaming #\(currentRequest): FULL RAW OUTPUT >>>\n\(genResult.text)\n<<<")
+                if FileLogger.shared.logPromptContent {
+                    FileLogger.shared.verbose("streaming #\(currentRequest): FULL RAW OUTPUT >>>\n\(genResult.text)\n<<<")
+                }
                 // Flush any content the reasoning filter held back (non-tool path).
                 if !toolsActive {
                     let tail = thinkFilter.flush()
@@ -715,7 +721,9 @@ final class LlamaHTTPServer {
         previousFootprint = mem
         FileLogger.shared.debug("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
         FileLogger.shared.debug("chat request #\(currentRequest): thinking=\(body.thinkingEnabled)")
-        FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        if FileLogger.shared.logPromptContent {
+            FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        }
 
         let maxTokens = min(max(1, body.resolvedMaxTokens ?? Self.maxCompletionTokens), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)
@@ -730,7 +738,9 @@ final class LlamaHTTPServer {
                                           toolChoice: body.tool_choice)
                 let basePrompt = inference.formatPrompt(messages: msgs)
                 let prompt = applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
-                FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
+                if FileLogger.shared.logPromptContent {
+                    FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
+                }
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams)
@@ -767,7 +777,9 @@ final class LlamaHTTPServer {
         // whether a process death (jetsam SIGKILL leaves no crash report) happens
         // during generation vs. during response encoding/return.
         FileLogger.shared.info("generation OK: #\(currentRequest) \(result.text.count) chars, encoding response")
-        FileLogger.shared.verbose("chat request #\(currentRequest): FULL RAW OUTPUT >>>\n\(result.text)\n<<<")
+        if FileLogger.shared.logPromptContent {
+            FileLogger.shared.verbose("chat request #\(currentRequest): FULL RAW OUTPUT >>>\n\(result.text)\n<<<")
+        }
 
         var openAIReason: String
         switch result.finishReason {
@@ -948,7 +960,9 @@ final class LlamaHTTPServer {
 
         let currentRequest = nextRequestNumber()
         FileLogger.shared.info("completion request #\(currentRequest): \(prompt.count) prompt chars")
-        FileLogger.shared.verbose("completion request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        if FileLogger.shared.logPromptContent {
+            FileLogger.shared.verbose("completion request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
+        }
 
         let maxTokens = min(max(1, body.resolvedMaxTokens ?? Self.maxCompletionTokens), Self.maxCompletionTokens)
         let samplingParams = Self.samplingParams(from: body)

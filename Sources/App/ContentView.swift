@@ -185,6 +185,10 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
+            Toggle("Log prompt & response content", isOn: $viewModel.logPromptContent)
+                .font(.caption)
+                .disabled(viewModel.logLevel != .verbose)
+
             if viewModel.logs.isEmpty {
                 Text("No activity yet.").foregroundColor(.secondary)
             } else {

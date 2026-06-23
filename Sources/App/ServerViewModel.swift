@@ -37,6 +37,13 @@ final class ServerViewModel: ObservableObject {
         didSet { FileLogger.shared.minimumLevel = logLevel }
     }
 
+    /// Whether to log full prompt/response payloads. Separate from `logLevel` so
+    /// `.verbose` level can be used for other diagnostics without leaking sensitive
+    /// or bulky prompt content.
+    @Published var logPromptContent: Bool = FileLogger.shared.logPromptContent {
+        didSet { FileLogger.shared.logPromptContent = logPromptContent }
+    }
+
     // Model library
     @Published private(set) var models: [ModelFile] = []
     @Published var selectedModel: ModelFile?
