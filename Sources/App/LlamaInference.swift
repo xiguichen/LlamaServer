@@ -759,6 +759,7 @@ final class LlamaInference {
             }
         }
 
+        let genStart = CFAbsoluteTimeGetCurrent()
         // Decode the prompt. Breadcrumb first: a too-long prompt or a native
         // abort here would otherwise kill the process with no trace.
         FileLogger.shared.debug("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
@@ -822,6 +823,8 @@ final class LlamaInference {
         let promptTail = String(prompt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
         FileLogger.shared.verbose("prompt tail: …\(promptTail)")
 
+        let prefillEnd = CFAbsoluteTimeGetCurrent()
+        var genTokens = 0  // separate counter for generation timing
         var output = ""
         var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
         var emittedCount = 0             // chars already handed to onToken
@@ -847,9 +850,16 @@ final class LlamaInference {
             return onToken(slice)
         }
 
+        let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
+        var firstTokenTime: CFAbsoluteTime?
         while generated < limit {
             let nCtxUsed = promptTokens.count + generated
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
+
+            if firstTokenTime == nil {
+                firstTokenTime = CFAbsoluteTimeGetCurrent()
+            }
+            genTokens += 1
 
             let newToken = llama_sampler_sample(sampler, context, -1)
             guard newToken != -1 else {
@@ -929,8 +939,14 @@ final class LlamaInference {
         cachedTokenCount = promptTokens.count + decodedGenerated
         cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
 
+        let genEnd = CFAbsoluteTimeGetCurrent()
+        let prefillSecs = prefillEnd - genStart
+        let genSecs = genEnd - (firstTokenTime ?? genEnd)
+        let prefillTokPerSec = prefillSecs > 0 ? Double(promptTokens.count) / prefillSecs : 0
+        let genTokPerSec = genSecs > 0 ? Double(genTokens) / genSecs : 0
+        let tpms = genTokPerSec * 60
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
-        FileLogger.shared.info("generated \(generated) tokens (finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
+        FileLogger.shared.info("generated \(generated) tokens (prefill=\(Int(prefillSecs))s \(Int(prefillTokPerSec))t/s, gen=\(Int(genSecs))s \(Int(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,
