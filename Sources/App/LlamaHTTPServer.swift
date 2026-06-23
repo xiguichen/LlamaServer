@@ -545,6 +545,7 @@ final class LlamaHTTPServer {
 
             var generatedTokens = 0
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
+            let generationStartTime = CFAbsoluteTimeGetCurrent()
             // Strips <think> reasoning from the streamed (non-tool) content so
             // clients receive only the final answer, not the chain-of-thought.
             let thinkFilter = ReasoningStreamFilter()
@@ -573,6 +574,17 @@ final class LlamaHTTPServer {
                     // server is being shut down (prevents blocking the caller).
                     if disconnectWatcher.didDisconnect {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — client disconnected")
+                        return false
+                    }
+                    // Stop at 55 s to avoid the WiFi router's 60 s wall-clock NAT
+                    // timeout — the keepalive sends data every 2 s but the timeout
+                    // is absolute, not idle-reset, so no amount of keepalive can
+                    // prevent it. The 5 s window guarantees finish_reason + [DONE]
+                    // are transmitted before the drop.
+                    // Incomplete tool calls are handled in the post-generation code
+                    // (stripped from output so pi never sees truncated JSON).
+                    if CFAbsoluteTimeGetCurrent() - generationStartTime >= 55 {
+                        FileLogger.shared.debug("streaming #\(currentRequest): token callback — generation cut off at 55 s to beat network timeout")
                         return false
                     }
                     if self._stopping.withLock({ $0 }) {
@@ -674,7 +686,28 @@ final class LlamaHTTPServer {
 
                 if toolsActive {
                     FileLogger.shared.debug("streaming #\(currentRequest): tools active, parsing tool calls")
-                    let parsed = ToolCallParser.parse(genResult.text)
+                    // Strip any incomplete <tool_call> (no closing </tool_call>)
+                    // so pi never receives truncated JSON inside an envelope.
+                    // This happens when the 55 s generation cutoff fires mid-call.
+                    let genText = genResult.text
+                    let cleanText: String
+                    if genText.contains("<tool_call>") && !genText.contains("</tool_call>") {
+                        if let range = genText.range(of: "<tool_call>") {
+                            cleanText = String(genText[..<range.lowerBound])
+                            FileLogger.shared.warn("streaming #\(currentRequest): stripped incomplete tool call, text before=\(cleanText.suffix(100).replacingOccurrences(of: "\n", with: "\\n"))")
+                        } else {
+                            cleanText = genText
+                        }
+                    } else {
+                        cleanText = genText
+                    }
+                    let parsed = ToolCallParser.parse(cleanText)
+                    // If the incomplete tool call stripped everything, signal
+                    // truncation so pi retries instead of getting an empty response.
+                    if cleanText != genText && cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        streamReason = "length"
+                        FileLogger.shared.warn("streaming #\(currentRequest): tool call truncated at cutoff — sending length")
+                    }
                     if !parsed.toolCalls.isEmpty {
                         streamReason = "tool_calls"
                         FileLogger.shared.info("streaming #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
