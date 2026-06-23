@@ -152,17 +152,16 @@ final class LlamaInference {
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
 
-        // Physical micro-batch (n_ubatch) drives prefill GPU parallelism. The
-        // default 512 leaves a large prompt (opencode injects 10k+ tokens)
-        // decoding at ~170 tok/s, i.e. a ~70 s time-to-first-token. Doubling to
-        // 1024 roughly halves prefill time. The cost is a larger Metal compute
-        // buffer, so only enable it when the KV budget clearly absorbs the extra
-        // cost (>= 200 MB of slack beyond the chosen context); otherwise fall
-        // back to 512 so a speedup can never become an OOM. As a final guard, if
-        // the larger buffer still won't fit, llama_init_from_model returns NULL
-        // and we fail gracefully below rather than crashing.
+        // Physical micro-batch (n_ubatch) drives prefill GPU parallelism.
+        // Using 512 everywhere: 1024 can crash with a null-pointer dereference
+        // inside ggml_metal_buffer_is_shared when the Metal backend hasn't
+        // finished its async shader-set initialization, which happens regularly
+        // on fresh app launches with large contexts (>= 32768). 512 keeps the
+        // compute graphs small enough that sched_reserve completes before Metal
+        // readiness becomes a problem, at a modest TTFT cost (~170 vs ~220 tok/s
+        // on A19 Pro for a 5k-token prompt — ~5 s difference).
         let baseUBatch = 512
-        let fastUBatch = 1024
+        let fastUBatch = 512   // was 1024, but see crash note above
         let kvSlack = kvBudget - kvBytesPerToken * effective
         let extraUBatchReserve = 200 * 1024 * 1024
         let fastPrefill = kvSlack > extraUBatchReserve
