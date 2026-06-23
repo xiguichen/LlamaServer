@@ -138,12 +138,17 @@ final class LlamaInference {
         if nCtxTrain > 0 { effective = min(effective, nCtxTrain) }
 
         let kvBudget = budget - modelSize - computeReserve
+        let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken), countStyle: .memory)
+        let kvBudgetStr = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
         if kvBudget < kvBytesPerToken * 256 {
             llama_model_free(loadedModel)
             throw InferenceError.insufficientMemory(
-                "Not enough free memory for a usable KV cache after loading this model. Try a smaller model.")
+                "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token, only \(kvBudgetStr) available). Close other apps or reduce context size.")
         }
         let maxCtxByMemory = (kvBudget / kvBytesPerToken / 256) * 256   // round down to 256
+        if effective > maxCtxByMemory {
+            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(kvTokenSize)/token); reducing to \(maxCtxByMemory)")
+        }
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
 
@@ -185,9 +190,13 @@ final class LlamaInference {
         let nSwa = Int(llama_model_n_swa(loadedModel))
         FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
-            FileLogger.shared.error("context creation returned NULL")
+            FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
+            let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
+            let compMem = ByteCountFormatter.string(fromByteCount: Int64(computeReserve), countStyle: .memory)
+            let avail = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
             llama_model_free(loadedModel)
-            throw InferenceError.contextInit
+            throw InferenceError.insufficientMemory(
+                "Failed to create context: need ~\(ctxMem) KV + ~\(compMem) compute, only \(avail) available. Close other apps or reduce context size.")
         }
         self.context = ctx
         // One-time ground-truth diagnostic for the persistent `seq_rm` failure.
