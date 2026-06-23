@@ -39,8 +39,12 @@ targets:
         # Let users add .gguf models via the Files app / Finder file sharing.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        # We are an HTTPS *server*; allow local networking prompts.
+        # We are an HTTP *server*; allow local networking prompts.
         NSLocalNetworkUsageDescription: "LlamaServer serves LLM requests to other devices on your local network."
+        # Bonjour services trigger the iOS local network permission dialog
+        # reliably (without this the dialog may not appear on first launch).
+        NSBonjourServices:
+          - _http._tcp
         # Keep serving while screen is on; background execution is limited by iOS.
         UIBackgroundModes:
           - audio

@@ -75,6 +75,11 @@ final class LlamaHTTPServer {
     /// Keeps the app alive in the background (via a silent audio session) so the
     /// HTTP server keeps serving requests instead of being suspended by iOS.
     private let keepAlive = BackgroundKeepAlive()
+    /// Bonjour service for _http._tcp. Publishing it triggers iOS's local
+    /// network permission dialog on first launch. Without this, the dialog may
+    /// not appear until the user changes the context size (which reloads the
+    /// model and restarts the listener), leaving the server unreachable.
+    private var bonjourService: NetService?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
     /// Counter of successful generations. Used to periodically recreate the
@@ -151,6 +156,15 @@ final class LlamaHTTPServer {
         let server = makeServer()
         try server.start(port: Int(port))
         self.server = server
+
+        // Publish Bonjour service to trigger iOS local network permission
+        // dialog. The service name includes the port so clients can discover
+        // multiple instances on the same network.
+        let service = NetService(domain: "local.", type: "_http._tcp",
+                                 name: "LlamaServer (\(port))", port: Int32(port))
+        service.publish()
+        self.bonjourService = service
+
         // Hold the app awake in the background so requests aren't suspended.
         keepAlive.start()
         DispatchQueue.main.async {
@@ -169,6 +183,8 @@ final class LlamaHTTPServer {
     }
 
     func stop() {
+        bonjourService?.stop()
+        bonjourService = nil
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         keepAlive.stop()

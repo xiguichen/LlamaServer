@@ -24,6 +24,10 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>LlamaServer serves LLM requests to other devices on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
