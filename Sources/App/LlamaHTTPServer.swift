@@ -121,8 +121,7 @@ final class LlamaHTTPServer {
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
-                let mem = self.memoryMB
-                FileLogger.shared.warn("MEMORY WARNING: current RSS=\(mem)MB, active connections=\(self.activeConnections)")
+                FileLogger.shared.warn("MEMORY WARNING: \(self.systemMemoryLog), active connections=\(self.activeConnections)")
             })
         // iOS closes the listening socket while the app is suspended, so a server
         // that was "running" before backgrounding can come back with a dead
@@ -164,7 +163,7 @@ final class LlamaHTTPServer {
                     FileLogger.shared.warn("[heartbeat] listener down — restarting")
                     self.restartListener()
                 }
-                FileLogger.shared.debug("[heartbeat] alive")
+                FileLogger.shared.debug("[heartbeat] \(self.systemMemoryLog)")
             }
         }
     }
@@ -328,8 +327,6 @@ final class LlamaHTTPServer {
         "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
         "Access-Control-Allow-Headers: *\r\n"
 
-    private var previousFootprint: UInt64 = 0
-
     private var memoryMB: UInt64 {
         // MACH_TASK_BASIC_INFO = 20
         var info = mach_task_basic_info()
@@ -342,6 +339,29 @@ final class LlamaHTTPServer {
         return r == KERN_SUCCESS ? info.resident_size / (1024 * 1024) : 0
     }
 
+    /// Human-readable system memory snapshot: total, free, and this process's RSS.
+    /// Uses Mach `vm_statistics64` for system-wide page counts.
+    private var systemMemoryLog: String {
+        let total = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
+        let pageSize = UInt64(vm_page_size)
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        if kr != KERN_SUCCESS {
+            return "total=\(total)MB rss=\(memoryMB)MB (sysinfo failed)"
+        }
+        let active    = UInt64(stats.active_count) * pageSize / (1024 * 1024)
+        let wired     = UInt64(stats.wire_count) * pageSize / (1024 * 1024)
+        let compressed = UInt64(stats.compressor_page_count) * pageSize / (1024 * 1024)
+        let free      = UInt64(stats.free_count) * pageSize / (1024 * 1024)
+        let rss = memoryMB
+        return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB"
+    }
+
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
         let currentRequest = nextRequestNumber()
         activeConnections += 1
@@ -349,10 +369,7 @@ final class LlamaHTTPServer {
         if FileLogger.shared.logPromptContent {
             FileLogger.shared.verbose("streaming #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
         }
-        let mem = memoryMB
-        let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
-        previousFootprint = mem
-        FileLogger.shared.debug("streaming chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
+        FileLogger.shared.debug("streaming chat request #\(currentRequest): \(systemMemoryLog)")
 
         guard !body.messages.isEmpty else {
             // No SSE stream has started yet, so return a proper HTTP error
@@ -716,11 +733,7 @@ final class LlamaHTTPServer {
         }
 
         let currentRequest = nextRequestNumber()
-        let mem = memoryMB
-        let delta = previousFootprint == 0 ? 0 : Int64(mem) - Int64(previousFootprint)
-        previousFootprint = mem
-        FileLogger.shared.debug("chat request #\(currentRequest): mem=\(mem)MB\(delta >= 0 ? "+" : "")\(delta)")
-        FileLogger.shared.debug("chat request #\(currentRequest): thinking=\(body.thinkingEnabled)")
+        FileLogger.shared.debug("chat request #\(currentRequest): \(systemMemoryLog), thinking=\(body.thinkingEnabled)")
         if FileLogger.shared.logPromptContent {
             FileLogger.shared.verbose("chat request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
         }
@@ -959,7 +972,7 @@ final class LlamaHTTPServer {
         }
 
         let currentRequest = nextRequestNumber()
-        FileLogger.shared.info("completion request #\(currentRequest): \(prompt.count) prompt chars")
+        FileLogger.shared.info("completion request #\(currentRequest): \(prompt.count) prompt chars, \(systemMemoryLog)")
         if FileLogger.shared.logPromptContent {
             FileLogger.shared.verbose("completion request #\(currentRequest): RAW REQUEST BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
         }
