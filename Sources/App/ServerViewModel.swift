@@ -26,7 +26,7 @@ final class ServerViewModel: ObservableObject {
     // Server state
     @Published private(set) var status: Status = .stopped
     @Published var port: String = "8443"
-    @Published var contextSize: String = "4096"
+    @Published var contextSize: String = "32768"
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 

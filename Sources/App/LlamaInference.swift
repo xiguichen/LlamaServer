@@ -60,7 +60,7 @@ final class LlamaInference {
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize requestedContext: Int = 4096, threads: Int32 = 0) throws {
+    init(modelPath: String, contextSize requestedContext: Int = 32768, threads: Int32 = 0) throws {
         // Backend init is idempotent across instances within a process.
         llama_backend_init()
 
