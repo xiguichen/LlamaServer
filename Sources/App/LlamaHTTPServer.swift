@@ -340,10 +340,14 @@ final class LlamaHTTPServer {
     }
 
     /// Human-readable system memory snapshot: total, free, and this process's RSS.
-    /// Uses Mach `vm_statistics64` for system-wide page counts.
+    /// Uses Mach `vm_statistics64` for system-wide page counts (entitlement-gated
+    /// on iOS), falling back to sysctl `vm.page_free_count` / `vm.page_active_count`.
     private var systemMemoryLog: String {
         let total = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
         let pageSize = UInt64(vm_page_size)
+        let rss = memoryMB
+
+        // Try Mach host_statistics (requires entitlement on iOS).
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
         let kr = withUnsafeMutablePointer(to: &stats) {
@@ -351,15 +355,36 @@ final class LlamaHTTPServer {
                 host_statistics(mach_host_self(), HOST_VM_INFO64, $0, &count)
             }
         }
-        if kr != KERN_SUCCESS {
-            return "total=\(total)MB rss=\(memoryMB)MB (sysinfo failed)"
+        if kr == KERN_SUCCESS {
+            let active    = UInt64(stats.active_count) * pageSize / (1024 * 1024)
+            let wired     = UInt64(stats.wire_count) * pageSize / (1024 * 1024)
+            let compressed = UInt64(stats.compressor_page_count) * pageSize / (1024 * 1024)
+            let free      = UInt64(stats.free_count) * pageSize / (1024 * 1024)
+            return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB"
         }
-        let active    = UInt64(stats.active_count) * pageSize / (1024 * 1024)
-        let wired     = UInt64(stats.wire_count) * pageSize / (1024 * 1024)
-        let compressed = UInt64(stats.compressor_page_count) * pageSize / (1024 * 1024)
-        let free      = UInt64(stats.free_count) * pageSize / (1024 * 1024)
-        let rss = memoryMB
-        return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB"
+
+        // Fallback: sysctl vm.page_free_count / vm.page_active_count
+        // (typically works on iOS without entitlements).
+        var freePages: UInt64 = 0
+        var freeSize = MemoryLayout<UInt64>.size
+        if sysctlbyname("vm.page_free_count", &freePages, &freeSize, nil, 0) == 0 {
+            let free = freePages * pageSize / (1024 * 1024)
+            var activePages: UInt64 = 0
+            var activeSize = MemoryLayout<UInt64>.size
+            if sysctlbyname("vm.page_active_count", &activePages, &activeSize, nil, 0) == 0 {
+                let active = activePages * pageSize / (1024 * 1024)
+                var wiredPages: UInt64 = 0
+                var wiredSize = MemoryLayout<UInt64>.size
+                if sysctlbyname("vm.page_wire_count", &wiredPages, &wiredSize, nil, 0) == 0 {
+                    let wired = wiredPages * pageSize / (1024 * 1024)
+                    return "total=\(total)MB active=\(active)MB wired=\(wired)MB free=\(free)MB rss=\(rss)MB"
+                }
+                return "total=\(total)MB active=\(active)MB free=\(free)MB rss=\(rss)MB"
+            }
+            return "total=\(total)MB free=\(free)MB rss=\(rss)MB"
+        }
+
+        return "total=\(total)MB rss=\(rss)MB (sysinfo failed)"
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {
@@ -436,20 +461,21 @@ final class LlamaHTTPServer {
         // the HTTP-level body timeout AND the SDK-level stream timeout.
         let keepAliveActive = OSAllocatedUnfairLock(initialState: true)
         let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-        keepAliveSource.schedule(deadline: .now() + 5, repeating: .seconds(5), leeway: .seconds(1))
+        keepAliveSource.schedule(deadline: .now() + 2, repeating: .seconds(2), leeway: .seconds(1))
         keepAliveSource.setEventHandler { [weak connection] in
-            guard let conn = connection else { return }
+            guard let conn = connection else {
+                FileLogger.shared.warn("streaming #\(currentRequest): keepalive SKIPPED — connection deallocated")
+                return
+            }
             guard keepAliveActive.withLock({ $0 }) else { return }
-            // Send a real data event with empty content (not an SSE comment)
-            // so the OpenAI SDK's stream parser yields a chunk and resets
-            // both undici's bodyTimeout and the SDK's internal timeouts.
+            FileLogger.shared.debug("streaming #\(currentRequest): keepalive firing")
             if let data = try? JSONEncoder().encode(
                 StreamingChunk(id: chatId, created: created, model: modelName,
                                choices: [StreamingChoice(index: 0,
                                                           delta: Delta(role: nil, content: ""),
                                                           finish_reason: nil)])
             ), let str = String(data: data, encoding: .utf8) {
-                conn.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 5)
+                conn.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 30)
             }
         }
         keepAliveSource.resume()
@@ -479,6 +505,7 @@ final class LlamaHTTPServer {
             var toolStreamState: ToolStreamState = .idle
             var toolStreamBuffer = ""
             var didStreamContentDuringToolGen = false
+            var lastChunkTime = CFAbsoluteTimeGetCurrent()
 
             func sendChunk(delta: Delta, finishReason: String?) {
                 guard !disconnectWatcher.didDisconnect else {
@@ -490,13 +517,22 @@ final class LlamaHTTPServer {
                 guard let data = try? JSONEncoder().encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
                                    choices: [StreamingChoice(index: 0, delta: delta,
-                                                             finish_reason: finishReason)])
+                                                              finish_reason: finishReason)])
                 ), let str = String(data: data, encoding: .utf8),
                       let chunkData = "data: \(str)\n\n".data(using: .utf8) else {
                     FileLogger.shared.error("streaming #\(currentRequest): sendChunk ENCODE FAILED")
                     return
                 }
                 connection.send(data: chunkData, timeout: 10)
+                lastChunkTime = CFAbsoluteTimeGetCurrent()
+            }
+
+            func flushKeepAliveIfNeeded() {
+                let now = CFAbsoluteTimeGetCurrent()
+                if now - lastChunkTime >= 4 {
+                    FileLogger.shared.verbose("streaming #\(currentRequest): keepalive from token callback")
+                    sendChunk(delta: Delta(role: nil, content: ""), finishReason: nil)
+                }
             }
 
             // Bail early if the client disconnected while we were waiting
@@ -511,6 +547,7 @@ final class LlamaHTTPServer {
 
             var generatedTokens = 0
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
+            let generationStartTime = CFAbsoluteTimeGetCurrent()
             // Strips <think> reasoning from the streamed (non-tool) content so
             // clients receive only the final answer, not the chain-of-thought.
             let thinkFilter = ReasoningStreamFilter()
@@ -539,6 +576,17 @@ final class LlamaHTTPServer {
                     // server is being shut down (prevents blocking the caller).
                     if disconnectWatcher.didDisconnect {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — client disconnected")
+                        return false
+                    }
+                    // Stop at 55 s to leave time for finish_reason + [DONE] to
+                    // flush through the TCP stack before the 60 s router-level
+                    // NAT timeout kills the connection (empirically observed on
+                    // certain WiFi routers). Without this cutoff the final data
+                    // is queued to CocoaAsyncSocket's async buffer but never
+                    // transmitted, causing pi's "Stream ended without
+                    // finish_reason" error.
+                    if CFAbsoluteTimeGetCurrent() - generationStartTime >= 55 {
+                        FileLogger.shared.debug("streaming #\(currentRequest): token callback — generation cut off at 55 s to beat network timeout")
                         return false
                     }
                     if self._stopping.withLock({ $0 }) {
@@ -591,10 +639,14 @@ final class LlamaHTTPServer {
                                 toolStreamBuffer = ""
                             }
                         }
+                        flushKeepAliveIfNeeded()
                         return true
                     }
                     let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
-                    guard !visible.isEmpty else { return true }
+                    if visible.isEmpty {
+                        flushKeepAliveIfNeeded()
+                        return true
+                    }
                     FileLogger.shared.verbose("streaming #\(currentRequest): chunk >>>\(visible)<<<")
                     sendChunk(delta: Delta(role: nil, content: visible), finishReason: nil)
                     return true
@@ -699,13 +751,14 @@ final class LlamaHTTPServer {
             stopKeepAlive()
             let didDisconnect = disconnectWatcher.didDisconnect
             FileLogger.shared.debug("streaming #\(currentRequest): stream summary — finish_reason_sent=\(finishReasonSent) didDisconnect=\(didDisconnect) genTokens=\(generatedTokens)")
-            // Always attempt [DONE] — Telegraph's send silently drops on a
-            // dead connection, but skipping it breaks SSE clients (Pi, OpenAI
-            // libraries) that require the terminator. The finish_reason and
-            // usage chunks are protected by sendChunk's didDisconnect guard
-            // above, so those are also skipped if the client goes away early.
-            connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
-            FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
+            // Skip [DONE] if the client already disconnected — the finish_reason
+            // was already dropped (GCDAsyncSocket queues writes asynchronously
+            // and the kernel's TCP buffer doesn't flush after FIN). Sending
+            // [DONE] into a dead socket is harmless but adds noise to logs.
+            if !didDisconnect {
+                connection.send(data: "data: [DONE]\n\n".data(using: .utf8)!, timeout: 10)
+                FileLogger.shared.debug("streaming #\(currentRequest): [DONE] sent")
+            }
             // Don't call close() — it races with the async send buffer and can
             // truncate the stream before the kernel transmits [DONE] (or the
             // finish_reason chunk). The [DONE] event is the SSE termination
