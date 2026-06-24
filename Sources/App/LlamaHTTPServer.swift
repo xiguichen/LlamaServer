@@ -286,7 +286,7 @@ final class LlamaHTTPServer {
             let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
             FileLogger.shared.info("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
             guard body.stream == true else { return false }
-            FileLogger.shared.debug("intercept: claiming streaming request #\(self.nextRequestNumber())")
+            FileLogger.shared.debug("intercept: claiming streaming request")
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
         }
