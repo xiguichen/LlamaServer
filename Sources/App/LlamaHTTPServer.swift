@@ -252,10 +252,12 @@ final class LlamaHTTPServer {
 
     private func makeServer() -> StreamableServer {
         let server = StreamableServer()
-        // Default readTimeout is 60 s, which fires before long LLM generations
-        // complete — the SSD response data is written, not read, so the read side
-        // sees no new HTTP request and the socket gets disconnected mid-stream.
-        server.httpConfig.readTimeout = 300
+        // Telegraph starts a socket read after dispatching every request to wait
+        // for the next HTTP request on the keep-alive connection. Since our
+        // streaming response bypasses Telegraph's normal response flow (writing
+        // directly to the socket via interceptHandler), this read would time out
+        // during long generations. Disable it entirely (-1 = no timeout).
+        server.httpConfig.readTimeout = -1
         server.interceptHandler = { [weak self] request, connection in
             guard let self = self else { return false }
             // CORS preflight: answer any OPTIONS request directly so browser-
