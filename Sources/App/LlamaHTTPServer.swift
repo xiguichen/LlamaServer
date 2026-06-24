@@ -252,6 +252,10 @@ final class LlamaHTTPServer {
 
     private func makeServer() -> StreamableServer {
         let server = StreamableServer()
+        // Default readTimeout is 60 s, which fires before long LLM generations
+        // complete — the SSD response data is written, not read, so the read side
+        // sees no new HTTP request and the socket gets disconnected mid-stream.
+        server.httpConfig.readTimeout = 300
         server.interceptHandler = { [weak self] request, connection in
             guard let self = self else { return false }
             // CORS preflight: answer any OPTIONS request directly so browser-
