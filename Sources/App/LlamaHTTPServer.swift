@@ -14,6 +14,12 @@ final class DisconnectWatcher: HTTPConnectionDelegate {
     var didDisconnect: Bool { _didDisconnect.withLock { $0 } }
 
     func connection(_ httpConnection: HTTPConnection, didCloseWithError error: Error?) {
+        if let err = error {
+            let nsErr = err as NSError
+            FileLogger.shared.debug("DisconnectWatcher: didCloseWithError domain=\(nsErr.domain) code=\(nsErr.code) \"\(nsErr.localizedDescription)\"")
+        } else {
+            FileLogger.shared.debug("DisconnectWatcher: didCloseWithError - no error (clean close)")
+        }
         _didDisconnect.withLock { $0 = true }
         server?.connection(httpConnection, didCloseWithError: error)
     }
@@ -466,7 +472,6 @@ final class LlamaHTTPServer {
                 return
             }
             guard keepAliveActive.withLock({ $0 }) else { return }
-            FileLogger.shared.debug("streaming #\(currentRequest): keepalive firing")
             if let data = try? JSONEncoder().encode(
                 StreamingChunk(id: chatId, created: created, model: modelName,
                                choices: [StreamingChoice(index: 0,
@@ -576,17 +581,10 @@ final class LlamaHTTPServer {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — client disconnected")
                         return false
                     }
-                    // Stop at 55 s to avoid the WiFi router's 60 s wall-clock NAT
-                    // timeout — the keepalive sends data every 2 s but the timeout
-                    // is absolute, not idle-reset, so no amount of keepalive can
-                    // prevent it. The 5 s window guarantees finish_reason + [DONE]
-                    // are transmitted before the drop.
-                    // Incomplete tool calls are handled in the post-generation code
-                    // (stripped from output so pi never sees truncated JSON).
-                    if CFAbsoluteTimeGetCurrent() - generationStartTime >= 55 {
-                        FileLogger.shared.debug("streaming #\(currentRequest): token callback — generation cut off at 55 s to beat network timeout")
-                        return false
-                    }
+                    // Generation continues until the model naturally finishes (EOG,
+                    // max_tokens, or context full). The client-side httpIdleTimeoutMs
+                    // is set to 0 (disabled) in pi's settings, so no artificial
+                    // cutoff is needed.
                     if self._stopping.withLock({ $0 }) {
                         FileLogger.shared.debug("streaming #\(currentRequest): token callback aborted — server stopping")
                         return false
@@ -688,7 +686,7 @@ final class LlamaHTTPServer {
                     FileLogger.shared.debug("streaming #\(currentRequest): tools active, parsing tool calls")
                     // Strip any incomplete <tool_call> (no closing </tool_call>)
                     // so pi never receives truncated JSON inside an envelope.
-                    // This happens when the 55 s generation cutoff fires mid-call.
+                    // Safety net for max_tokens, context-full, or edge-case stops.
                     let genText = genResult.text
                     let cleanText: String
                     if genText.contains("<tool_call>") && !genText.contains("</tool_call>") {
