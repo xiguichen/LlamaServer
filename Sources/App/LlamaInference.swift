@@ -53,6 +53,11 @@ final class LlamaInference: @unchecked Sendable {
     /// true. 0 means "let llama.cpp pick" (defaults to the model's MTP head count).
     private let mtpHeads: Int
 
+    /// Computed number of MTP output slots (main head + MTP heads) derived from
+    /// the model's GGUF metadata or, as a fallback, the user-provided mtpHeads.
+    /// Always 1 when useMtp is false.
+    private let mtpOutputCount: Int
+
     /// Whether this model's KV cache supports partial suffix removal
     /// (`llama_memory_seq_rm`). Hybrid attention/SSM and recurrent models keep a
     /// recurrent state that cannot be partially trimmed, so seq_rm always fails
@@ -200,9 +205,30 @@ final class LlamaInference: @unchecked Sendable {
         // The cost is the full per-token KV our memory budget already assumes.
         ctxParams.swa_full = true
 
+        // Determine the number of MTP output slots. When mtpHeads is explicitly
+        // set (non-zero), honour that. Otherwise query the model's GGUF metadata
+        // for nextn_predict_layers (the number of MTP heads) and add 1 for the
+        // main head. Falls back to 3 when the metadata is unavailable.
+        if useMtp && mtpHeads > 0 {
+            mtpOutputCount = mtpHeads
+        } else if useMtp {
+            var buf = [CChar](repeating: 0, count: 16)
+            var found = false
+            var layers = 0
+            if llama_model_meta_val_str(loadedModel, "nextn_predict_layers", &buf, buf.count) > 0 {
+                layers = Int(String(cString: buf)) ?? 0
+                found = true
+            } else if llama_model_meta_val_str(loadedModel, "n_predict_layers", &buf, buf.count) > 0 {
+                layers = Int(String(cString: buf)) ?? 0
+                found = true
+            }
+            mtpOutputCount = found ? max(1, layers + 1) : 3
+        } else {
+            mtpOutputCount = 1
+        }
         if useMtp {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
-            ctxParams.n_outputs_max = UInt32(mtpHeads > 0 ? mtpHeads : 3)
+            ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
@@ -249,7 +275,7 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.swa_full = true
         if useMtp {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
-            ctxParams.n_outputs_max = UInt32(mtpHeads > 0 ? mtpHeads : 3)
+            ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
@@ -874,7 +900,7 @@ final class LlamaInference: @unchecked Sendable {
             return onToken(slice)
         }
 
-        let mtpCount = useMtp ? (mtpHeads > 0 ? mtpHeads : 3) : 1
+        let mtpCount = mtpOutputCount
         let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
         var firstTokenTime: CFAbsoluteTime?
         while generated < limit {
@@ -891,6 +917,7 @@ final class LlamaInference: @unchecked Sendable {
             // logits even when MTP mode has filled multiple output slots.
             var batchTokens: [llama_token] = []
             for i in 0..<mtpCount {
+                guard llama_get_logits_ith(context, Int32(i)) != nil else { break }
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
 
