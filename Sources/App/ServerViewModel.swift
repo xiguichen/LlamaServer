@@ -210,6 +210,7 @@ final class ServerViewModel: ObservableObject {
         let ctxSize = Int(contextSize) ?? 4096
         let modelPath = model.url.path
         let modelKey = "\(modelPath)|\(ctxSize)"
+        let useMtp = self.useMtp
 
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
