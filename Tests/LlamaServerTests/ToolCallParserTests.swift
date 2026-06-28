@@ -125,7 +125,8 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testParseStripsANSI() {
-        let text = #"hello\u{1B}[31m world<tool_call>{"name":"fn","arguments":{"x":"\u{1B}[32mgreen\u{1B}[0m"}}</tool_call>"#
+        let esc = "\u{1B}"
+        let text = "hello\(esc)[31m world<tool_call>{\"name\":\"fn\",\"arguments\":{\"x\":\"\(esc)[32mgreen\(esc)[0m\"}}</tool_call>"
         let result = ToolCallParser.parse(text)
         XCTAssertTrue(result.toolCalls.count == 1, "should recover tool call even with ANSI in args")
     }
