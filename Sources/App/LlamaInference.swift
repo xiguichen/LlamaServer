@@ -14,7 +14,10 @@ import llama   // module provided by vendor/llama.xcframework
 /// the `llama_sampler_*` chain API, and `llama_vocab_is_eog`). If you bump the
 /// pinned llama.cpp tag in scripts/build-llama-xcframework.sh and the build fails,
 /// this is the file to adjust.
-final class LlamaInference {
+/// All mutable state is guarded by the serial `inferenceQueue` in
+/// `LlamaHTTPServer`, so cross-thread access is safe despite the non-Sendable
+/// C pointers (OpaquePointer) this class holds.
+final class LlamaInference: @unchecked Sendable {
 
     enum InferenceError: Error, LocalizedError {
         case backendInit
@@ -41,6 +44,15 @@ final class LlamaInference {
     private let vocab: OpaquePointer
     private let threadCount: Int32
 
+    /// Whether to use Multi-Token Prediction (MTP). When enabled the model
+    /// predicts multiple future tokens per forward pass, which can increase
+    /// throughput on supported models.
+    private let useMtp: Bool
+
+    /// How many MTP heads to use (n_outputs_max). Only meaningful when useMtp is
+    /// true. 0 means "let llama.cpp pick" (defaults to the model's MTP head count).
+    private let mtpHeads: Int
+
     /// Whether this model's KV cache supports partial suffix removal
     /// (`llama_memory_seq_rm`). Hybrid attention/SSM and recurrent models keep a
     /// recurrent state that cannot be partially trimmed, so seq_rm always fails
@@ -60,7 +72,9 @@ final class LlamaInference {
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize requestedContext: Int = 32768, threads: Int32 = 0) throws {
+    init(modelPath: String, contextSize requestedContext: Int = 32768, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
+        self.useMtp = useMtp
+        self.mtpHeads = mtpHeads
         // Backend init is idempotent across instances within a process.
         llama_backend_init()
 
@@ -186,8 +200,13 @@ final class LlamaInference {
         // The cost is the full per-token KV our memory budget already assumes.
         ctxParams.swa_full = true
 
+        if useMtp {
+            ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
+            ctxParams.n_outputs_max = UInt32(mtpHeads > 0 ? mtpHeads : 3)
+        }
+
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(useMtp)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
@@ -205,9 +224,10 @@ final class LlamaInference {
         let isHybrid = llama_model_is_hybrid(loadedModel)
         let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
         FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
-        // Hybrid/recurrent caches can't partially drop a suffix, so don't even
-        // try seq_rm for them (it always fails) — clear and re-decode instead.
-        self.supportsPartialCacheReuse = !isRecurrent && !isHybrid
+        // Use the authoritative can_shift flag instead of inferring from model
+        // type: hybrid/recurrent caches can't partially drop a suffix, and even
+        // some pure-attention architectures may have immovable cache state.
+        self.supportsPartialCacheReuse = canShift
     }
 
     /// Frees the old llama_context and creates a fresh one. This is called after
@@ -227,6 +247,10 @@ final class LlamaInference {
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
         ctxParams.swa_full = true
+        if useMtp {
+            ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
+            ctxParams.n_outputs_max = UInt32(mtpHeads > 0 ? mtpHeads : 3)
+        }
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             // `context` still holds the freed pointer; leave `contextValid` false
@@ -266,7 +290,7 @@ final class LlamaInference {
     /// after a new one is successfully created. If re-creation fails, this stays
     /// false so `generate()` fails fast (instead of using a dangling pointer —
     /// use-after-free) and `unload()` skips the free (instead of double-freeing).
-    private var contextValid = true
+    private(set) var contextValid = true
 
     /// Deterministically frees the llama context and model RIGHT NOW, releasing
     /// the (often multi-GB) Metal/CPU allocation instead of waiting for ARC to

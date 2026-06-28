@@ -134,6 +134,9 @@ struct ContentView: View {
                     .frame(width: 100)
                     .disabled(viewModel.isRunning || viewModel.isBusy)
             }
+            Toggle("Multi-Token Prediction (MTP)", isOn: $viewModel.useMtp)
+                .disabled(viewModel.isRunning || viewModel.isBusy)
+                .font(.caption)
         } header: {
             Text("Server")
         } footer: {
