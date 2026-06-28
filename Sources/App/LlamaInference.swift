@@ -874,6 +874,7 @@ final class LlamaInference: @unchecked Sendable {
             return onToken(slice)
         }
 
+        let mtpCount = useMtp ? (mtpHeads > 0 ? mtpHeads : 3) : 1
         let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
         var firstTokenTime: CFAbsoluteTime?
         while generated < limit {
@@ -885,47 +886,66 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            let newToken = llama_sampler_sample(sampler, context, -1)
-            guard newToken != -1 else {
-                finishReason = "sampler_error"
-                FileLogger.shared.error("llama_sampler_sample returned -1 (invalid token)")
-                break
-            }
-            if llama_vocab_is_eog(vocab, newToken) {
-                FileLogger.shared.debug("eog token id=\(newToken) after \(generated) generated tokens")
-                finishReason = generated == 0 ? "eog_immediate" : "eog"
-                break
-            }
-            llama_sampler_accept(sampler, newToken)
-            generatedTokenIds.append(newToken)
+            // Sample from all available MTP output slots (0 = main head, 1+ = MTP heads).
+            // Sampling from position 0 instead of -1 ensures we read the main head's
+            // logits even when MTP mode has filled multiple output slots.
+            var batchTokens: [llama_token] = []
+            for i in 0..<mtpCount {
+                if generated + batchTokens.count >= limit { break }
+                if nCtxUsed + batchTokens.count >= contextSize { break }
 
-            // Accumulate bytes and decode only complete UTF-8 characters.
-            pending.append(contentsOf: pieceBytes(for: newToken))
-            let decoded = flushDecodableUTF8(&pending)
-            if !decoded.isEmpty { output += decoded }
-            generated += 1
-
-            // Complete stop string? Truncate at it, emit the safe remainder, stop.
-            if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
-                let cut = output.distance(from: output.startIndex, to: r.lowerBound)
-                output = String(output[..<r.lowerBound])
-                finishReason = "stop"
-                earlyStop = true
-                if let onToken = onToken, emittedCount < cut {
-                    let lo = output.index(output.startIndex, offsetBy: emittedCount)
-                    _ = onToken(String(output[lo...]))
-                    emittedCount = cut
+                let token = llama_sampler_sample(sampler, context, Int32(i))
+                guard token != -1 else {
+                    if batchTokens.isEmpty {
+                        finishReason = "sampler_error"
+                        FileLogger.shared.error("llama_sampler_sample returned -1 (invalid token)")
+                    }
+                    break
                 }
-                break
+                if llama_vocab_is_eog(vocab, token) {
+                    if batchTokens.isEmpty {
+                        FileLogger.shared.debug("eog token id=\(token) after \(generated) generated tokens")
+                        finishReason = generated == 0 ? "eog_immediate" : "eog"
+                    }
+                    break
+                }
+                llama_sampler_accept(sampler, token)
+                batchTokens.append(token)
             }
 
-            if emitSafe() == false {
-                finishReason = "stopped"
-                earlyStop = true
-                break
-            }
+            if batchTokens.isEmpty { break }
 
-            var next = [newToken]
+            for token in batchTokens {
+                generatedTokenIds.append(token)
+
+                pending.append(contentsOf: pieceBytes(for: token))
+                let decoded = flushDecodableUTF8(&pending)
+                if !decoded.isEmpty { output += decoded }
+                generated += 1
+
+                if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
+                    let cut = output.distance(from: output.startIndex, to: r.lowerBound)
+                    output = String(output[..<r.lowerBound])
+                    finishReason = "stop"
+                    earlyStop = true
+                    if let onToken = onToken, emittedCount < cut {
+                        let lo = output.index(output.startIndex, offsetBy: emittedCount)
+                        _ = onToken(String(output[lo...]))
+                        emittedCount = cut
+                    }
+                    break
+                }
+
+                if emitSafe() == false {
+                    finishReason = "stopped"
+                    earlyStop = true
+                    break
+                }
+            }
+            if earlyStop { break }
+
+            // Decode all batch tokens in a single forward pass.
+            var next = batchTokens
             let stepDecode = next.withUnsafeMutableBufferPointer { buf -> Int32 in
                 let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
                 return llama_decode(context, batch)
@@ -934,9 +954,7 @@ final class LlamaInference: @unchecked Sendable {
                 recoverFromDecodeFailure()
                 throw InferenceError.decode
             }
-            // Token is now resident in the KV cache (positions stay consistent
-            // with `cachedTokenIds` below). Tokens that ended generation via an
-            // early break above were NOT decoded and must not be counted.
+            // All decoded tokens are now resident in the KV cache.
             decodedGenerated = generated
         }
 
@@ -967,7 +985,7 @@ final class LlamaInference: @unchecked Sendable {
         let prefillSecs = prefillEnd - genStart
         let genSecs = genEnd - (firstTokenTime ?? genEnd)
         let prefillTokPerSec = prefillSecs > 0 ? Double(promptTokens.count) / prefillSecs : 0
-        let genTokPerSec = genSecs > 0 ? Double(genTokens) / genSecs : 0
+        let genTokPerSec = genSecs > 0 ? Double(generated) / genSecs : 0
         let tpms = genTokPerSec * 60
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
         FileLogger.shared.info("generated \(generated) tokens (prefill=\(Int(prefillSecs))s \(Int(prefillTokPerSec))t/s, gen=\(Int(genSecs))s \(Int(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
