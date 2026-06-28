@@ -70,12 +70,40 @@ targets:
         embed: true
         codeSign: false
 
+  LlamaServerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/LlamaServerTests
+      - path: Sources/App/ToolCallParser.swift
+        createIntermediateGroups: true
+      - path: Sources/App/OpenAIModels.swift
+        createIntermediateGroups: true
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        ENABLE_TESTABILITY: YES
+
 schemes:
   LlamaServer:
     build:
       targets:
         LlamaServer: all
+        LlamaServerTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - LlamaServerTests
     archive:
       config: Release
+
+  LlamaServerTests:
+    build:
+      targets:
+        LlamaServerTests: [test]
+    test:
+      config: Debug
+      targets:
+        - LlamaServerTests

@@ -170,7 +170,7 @@ enum ToolCallParser {
     /// content. Brace counting respects string literals and `\` escapes so
     /// braces inside string values (e.g. a `write` tool's file content) don't
     /// throw off the balance. Returns nil if no balanced object is found.
-    private static func firstBalancedJSONObject(in text: String) -> String? {
+    static func firstBalancedJSONObject(in text: String) -> String? {
         let chars = Array(text)
         guard let start = chars.firstIndex(of: "{") else { return nil }
         var depth = 0

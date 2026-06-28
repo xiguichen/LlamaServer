@@ -49,6 +49,9 @@ final class ServerViewModel: ObservableObject {
     @Published var selectedModel: ModelFile?
     @Published var downloadURLString: String = ""
 
+    /// Whether to enable Multi-Token Prediction (MTP) on supported models.
+    @Published var useMtp: Bool = false
+
     /// Re-published so the UI updates on download progress.
     let downloader = ModelDownloader()
 
@@ -211,34 +214,46 @@ final class ServerViewModel: ObservableObject {
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
 
-        // Fast path: the same model+context is already loaded (e.g. the user
-        // stopped and is starting again). Reuse the live engine and just bring a
-        // fresh HTTP server up — no model reload, so the "model load returned
-        // NULL" reload race cannot happen.
+        // Fast path: the same model+context is already loaded and healthy
+        // (e.g. the user stopped and is starting again). Reuse the live engine
+        // and just bring a fresh HTTP server up — no model reload, so the
+        // "model load returned NULL" reload race cannot happen.
         if let engine = inference, loadedModelKey == modelKey {
-            log("Restarting server (model already loaded)…")
-            let portValue2 = portValue
-            Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                do {
-                    let server = LlamaHTTPServer(inference: engine)
-                    try server.start(port: portValue2)
-                    await MainActor.run {
-                        self.httpServer = server
-                        self.status = .running
-                        UIApplication.shared.isIdleTimerDisabled = true
-                        self.log("HTTP server listening on port \(portValue2).")
-                        if let url = self.serverURL { self.log("Reachable at \(url)") }
-                    }
-                } catch {
-                    await MainActor.run {
-                        self.status = .error(error.localizedDescription)
-                        self.log("Failed to start server: \(error.localizedDescription)")
-                        self.httpServer = nil
+            if !engine.contextValid {
+                log("Cached engine has no valid context — reloading model")
+                // Unload the dead engine and fall through to the slow path below
+                // instead of reusing it (which would serve 500s for every request).
+                httpServer?.stop()
+                httpServer = nil
+                engine.unload()
+                inference = nil
+                loadedModelKey = nil
+                // Do NOT return — fall through to the slow path.
+            } else {
+                log("Restarting server (model already loaded)…")
+                let portValue2 = portValue
+                Task.detached(priority: .userInitiated) { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let server = LlamaHTTPServer(inference: engine)
+                        try server.start(port: portValue2)
+                        await MainActor.run {
+                            self.httpServer = server
+                            self.status = .running
+                            UIApplication.shared.isIdleTimerDisabled = true
+                            self.log("HTTP server listening on port \(portValue2).")
+                            if let url = self.serverURL { self.log("Reachable at \(url)") }
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.status = .error(error.localizedDescription)
+                            self.log("Failed to start server: \(error.localizedDescription)")
+                            self.httpServer = nil
+                        }
                     }
                 }
+                return
             }
-            return
         }
 
         // A different model (or none) is loaded: free the old engine first so the
@@ -256,7 +271,7 @@ final class ServerViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
-                let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize)
+                let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize, useMtp: useMtp)
                 let server = LlamaHTTPServer(inference: engine)
                 try server.start(port: portValue)
 

@@ -1101,7 +1101,7 @@ final class LlamaHTTPServer {
             created: Int(Date().timeIntervalSince1970),
             model: body.model ?? inference.modelName,
             choices: [CompletionChoice(index: 0,
-                                        text: ToolCallParser.stripANSI(result.text),
+                                        text: ToolCallParser.stripReasoning(ToolCallParser.stripANSI(result.text)),
                                         finish_reason: reason)],
             usage: Usage(prompt_tokens: result.promptTokens,
                          completion_tokens: result.completionTokens,
