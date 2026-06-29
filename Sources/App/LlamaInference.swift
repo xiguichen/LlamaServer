@@ -928,16 +928,28 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            // Sample from all available output slots. Use negative indices to
-            // access the last batch position's output rows (the only position
-            // with valid logits after prompt decode). Slot 0 (main head) is at
-            // position -mtpCount, slot 1 (first MTP head) at -(mtpCount-1), etc.
+            // Probe available output rows. After prompt decode only the main
+            // head produces output (n_outputs=1); after generation decode all
+            // MTP heads are active (n_outputs=mtpCount). Probe from the end
+            // (-1, -2, ...) to find how many rows are actually available.
+            var availableOutputs = 0
+            for j in stride(from: -1, through: -Int32(mtpCount), by: -1) {
+                if llama_get_logits_ith(context, j) != nil {
+                    availableOutputs += 1
+                } else {
+                    break
+                }
+            }
+
+            // Sample from available output slots using reverse indices.
+            // Slot 0 (main head) → -availableOutputs, slot 1 → -(availableOutputs-1), etc.
             var batchTokens: [llama_token] = []
-            for i in 0..<mtpCount {
-                let logitsIdx = Int32(i - mtpCount)
-                guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
+            for i in 0..<min(mtpCount, availableOutputs) {
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
+
+                let logitsIdx = Int32(i - availableOutputs)
+                guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
 
                 let token = llama_sampler_sample(sampler, context, logitsIdx)
                 guard token != -1 else {
