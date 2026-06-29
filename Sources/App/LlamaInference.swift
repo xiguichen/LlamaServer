@@ -212,15 +212,19 @@ final class LlamaInference: @unchecked Sendable {
         if useMtp && mtpHeads > 0 {
             mtpOutputCount = mtpHeads
         } else if useMtp {
-            var buf = [CChar](repeating: 0, count: 16)
-            var found = false
             var layers = 0
-            if llama_model_meta_val_str(loadedModel, "nextn_predict_layers", &buf, buf.count) > 0 {
-                layers = Int(String(cString: buf)) ?? 0
+            var found = false
+            let metaCount = Int(llama_model_meta_count(loadedModel))
+            for i in 0..<metaCount {
+                var keyBuf = [CChar](repeating: 0, count: 128)
+                guard llama_model_meta_key_by_index(loadedModel, Int32(i), &keyBuf, keyBuf.count) > 0 else { continue }
+                let key = String(cString: keyBuf)
+                guard key.hasSuffix("nextn_predict_layers") || key.hasSuffix("n_predict_layers") else { continue }
+                var valBuf = [CChar](repeating: 0, count: 16)
+                guard llama_model_meta_val_str_by_index(loadedModel, Int32(i), &valBuf, valBuf.count) > 0 else { continue }
+                layers = Int(String(cString: valBuf)) ?? 0
                 found = true
-            } else if llama_model_meta_val_str(loadedModel, "n_predict_layers", &buf, buf.count) > 0 {
-                layers = Int(String(cString: buf)) ?? 0
-                found = true
+                break
             }
             mtpOutputCount = found ? max(1, layers + 1) : 3
         } else {
@@ -912,16 +916,16 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            // Sample from all available MTP output slots (0 = main head, 1+ = MTP heads).
-            // Sampling from position 0 instead of -1 ensures we read the main head's
-            // logits even when MTP mode has filled multiple output slots.
+            // Sample from all available output slots. Main head at position -1 (last
+            // output, always valid), MTP heads at positive positions if available.
             var batchTokens: [llama_token] = []
             for i in 0..<mtpCount {
-                guard llama_get_logits_ith(context, Int32(i)) != nil else { break }
+                let logitsIdx: Int32 = i == 0 ? -1 : Int32(i - 1)
+                guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
 
-                let token = llama_sampler_sample(sampler, context, Int32(i))
+                let token = llama_sampler_sample(sampler, context, logitsIdx)
                 guard token != -1 else {
                     if batchTokens.isEmpty {
                         finishReason = "sampler_error"
