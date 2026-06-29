@@ -928,15 +928,18 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            // Sample from all available output slots. Position 0 is the main head
-            // (next-token prediction). Positions 1+ are MTP head predictions.
+            // Sample from all available output slots. Use negative indices to
+            // access the last batch position's output rows (the only position
+            // with valid logits after prompt decode). Slot 0 (main head) is at
+            // position -mtpCount, slot 1 (first MTP head) at -(mtpCount-1), etc.
             var batchTokens: [llama_token] = []
             for i in 0..<mtpCount {
-                guard llama_get_logits_ith(context, Int32(i)) != nil else { break }
+                let logitsIdx = Int32(i - mtpCount)
+                guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
 
-                let token = llama_sampler_sample(sampler, context, Int32(i))
+                let token = llama_sampler_sample(sampler, context, logitsIdx)
                 guard token != -1 else {
                     if batchTokens.isEmpty {
                         finishReason = "sampler_error"
