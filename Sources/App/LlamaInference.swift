@@ -838,8 +838,20 @@ final class LlamaInference: @unchecked Sendable {
                 let count = min(batchSize, hi - off)
                 let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
                     let chunk = buf.baseAddress!.advanced(by: off)
-                    let batch = llama_batch_get_one(chunk, Int32(count))
-                    return llama_decode(context, batch)
+                    var logits = [Int8](repeating: 0, count: count)
+                    logits[count - 1] = 1
+                    return logits.withUnsafeMutableBufferPointer { logitsBuf in
+                        let batch = llama_batch(
+                            n_tokens: Int32(count),
+                            token: chunk,
+                            embd: nil,
+                            pos: nil,
+                            n_seq_id: nil,
+                            seq_id: nil,
+                            logits: logitsBuf.baseAddress
+                        )
+                        return llama_decode(context, batch)
+                    }
                 }
                 guard status == 0 else {
                     recoverFromDecodeFailure()
@@ -916,18 +928,15 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            // Sample from the last output slot (position -1, always valid).
+            // Sample from all available output slots. Position 0 is the main head
+            // (next-token prediction). Positions 1+ are MTP head predictions.
             var batchTokens: [llama_token] = []
             for i in 0..<mtpCount {
-                // Enumerate output slots from last to first. Position -1 is always
-                // the most recent next-token prediction (main head). Remaining slots
-                // hold MTP head predictions when available.
-                let logitsIdx: Int32 = Int32(-i - 1)
-                guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
+                guard llama_get_logits_ith(context, Int32(i)) != nil else { break }
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
 
-                let token = llama_sampler_sample(sampler, context, logitsIdx)
+                let token = llama_sampler_sample(sampler, context, Int32(i))
                 guard token != -1 else {
                     if batchTokens.isEmpty {
                         finishReason = "sampler_error"
@@ -977,11 +986,25 @@ final class LlamaInference: @unchecked Sendable {
             }
             if earlyStop { break }
 
-            // Decode all batch tokens in a single forward pass.
+            // Decode all batch tokens in a single forward pass. Must set logits
+            // explicitly (not via llama_batch_get_one) for MTP context type.
             var next = batchTokens
             let stepDecode = next.withUnsafeMutableBufferPointer { buf -> Int32 in
-                let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
-                return llama_decode(context, batch)
+                let count = buf.count
+                var logits = [Int8](repeating: 0, count: count)
+                if count > 0 { logits[count - 1] = 1 }
+                return logits.withUnsafeMutableBufferPointer { logitsBuf in
+                    let batch = llama_batch(
+                        n_tokens: Int32(count),
+                        token: buf.baseAddress,
+                        embd: nil,
+                        pos: nil,
+                        n_seq_id: nil,
+                        seq_id: nil,
+                        logits: logitsBuf.baseAddress
+                    )
+                    return llama_decode(context, batch)
+                }
             }
             guard stepDecode == 0 else {
                 recoverFromDecodeFailure()
