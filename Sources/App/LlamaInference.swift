@@ -916,11 +916,13 @@ final class LlamaInference: @unchecked Sendable {
             }
             genTokens += 1
 
-            // Sample from all available output slots. Main head at position -1 (last
-            // output, always valid), MTP heads at positive positions if available.
+            // Sample from the last output slot (position -1, always valid).
             var batchTokens: [llama_token] = []
             for i in 0..<mtpCount {
-                let logitsIdx: Int32 = i == 0 ? -1 : Int32(i - 1)
+                // Enumerate output slots from last to first. Position -1 is always
+                // the most recent next-token prediction (main head). Remaining slots
+                // hold MTP head predictions when available.
+                let logitsIdx: Int32 = Int32(-i - 1)
                 guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
                 if generated + batchTokens.count >= limit { break }
                 if nCtxUsed + batchTokens.count >= contextSize { break }
