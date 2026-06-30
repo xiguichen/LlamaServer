@@ -1152,6 +1152,12 @@ final class LlamaInference: @unchecked Sendable {
                 return rc
             }
 
+            // Draft acceptance instrumentation (depth-1: each round proposes one
+            // token; a HIT emits 2 target-sampled tokens, a MISS emits 1).
+            var mtpRounds = 0      // verify rounds that ran a draft
+            var mtpHits = 0        // rounds where the draft token was accepted
+            var mtpNoDraft = 0     // rounds with no usable draft (plain fallback)
+
             // Position in the target where the next "idLast" will be (re-)decoded.
             // The prompt occupies [0, promptTokens.count); generation starts there.
             var nextPos = llama_pos(promptTokens.count)
@@ -1189,6 +1195,7 @@ final class LlamaInference: @unchecked Sendable {
 
                         // No usable draft -> plain single-token target decode.
                         if !haveDraft {
+                            mtpNoDraft += 1
                             guard decodeSingleTarget(idLast, nextPos) == 0 else {
                                 recoverFromDecodeFailure(); throw InferenceError.decode
                             }
@@ -1220,6 +1227,8 @@ final class LlamaInference: @unchecked Sendable {
                         // rollback position, which hidden state to carry forward).
                         // See MtpSpeculator for the invariants this enforces.
                         let step = MtpSpeculator.decide(d0: d0, s0: s0, nextPos: Int(nextPos))
+                        mtpRounds += 1
+                        if step.hit { mtpHits += 1 }
 
                         if step.hit {
                             // HIT: idLast@nextPos and d0(=s0)@nextPos+1 both valid;
@@ -1252,6 +1261,14 @@ final class LlamaInference: @unchecked Sendable {
                     }
                 }
             }
+
+            // Report the draft acceptance rate so the speed-up (or lack of it) can
+            // be attributed: a low hit rate means the draft head is mispredicting;
+            // a high hit rate with no throughput gain means the per-round overhead
+            // (extra lm_head projections) is dominating for this model.
+            let mtpAttempts = mtpRounds + mtpNoDraft
+            let hitPct = mtpRounds > 0 ? (mtpHits * 100 / mtpRounds) : 0
+            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated)")
 
             // The two-context speculative path manages KV positions in a way that
             // the cross-call prefix-reuse tracking can't reconstruct, so clear both
