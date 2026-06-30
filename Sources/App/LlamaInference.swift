@@ -209,9 +209,15 @@ final class LlamaInference: @unchecked Sendable {
         // set (non-zero), honour that. Otherwise query the model's GGUF metadata
         // for nextn_predict_layers (the number of MTP heads) and add 1 for the
         // main head. Falls back to 3 when the metadata is unavailable.
-        if useMtp && mtpHeads > 0 {
+        let modelIsHybrid = llama_model_is_hybrid(loadedModel)
+        if useMtp && modelIsHybrid {
+            FileLogger.shared.warn("MTP disabled: hybrid models (SSM+attention) cannot use LLAMA_CONTEXT_TYPE_MTP — SSM state cannot be transferred to the MTP context, producing corrupt output")
+        }
+        let mtpEnabled = useMtp && !modelIsHybrid
+
+        if mtpEnabled && mtpHeads > 0 {
             mtpOutputCount = mtpHeads
-        } else if useMtp {
+        } else if mtpEnabled {
             var layers = 0
             var found = false
             let metaCount = Int(llama_model_meta_count(loadedModel))
@@ -230,13 +236,13 @@ final class LlamaInference: @unchecked Sendable {
         } else {
             mtpOutputCount = 1
         }
-        if useMtp {
+        if mtpEnabled {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(useMtp)) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(mtpEnabled)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
@@ -277,7 +283,8 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
         ctxParams.swa_full = true
-        if useMtp {
+        let mtpEnabled = useMtp && !llama_model_is_hybrid(model)
+        if mtpEnabled {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
