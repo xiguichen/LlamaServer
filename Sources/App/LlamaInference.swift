@@ -209,17 +209,9 @@ final class LlamaInference: @unchecked Sendable {
         // set (non-zero), honour that. Otherwise query the model's GGUF metadata
         // for nextn_predict_layers (the number of MTP heads) and add 1 for the
         // main head. Falls back to 3 when the metadata is unavailable.
-        //
-        // Hybrid models (SSM + attention, e.g. qwen35/Dense+SSM) cannot use MTP:
-        // their SSM layers maintain a recurrent state that can't produce multiple
-        // output slots, so llama_decode always produces n_outputs=1 regardless of
-        // n_outputs_max. Enabling MTP on a hybrid model corrupts the logits layout
-        // and produces garbled output.
-        let isHybrid = llama_model_is_hybrid(loadedModel)
-        let mtpEnabled = useMtp && !isHybrid
-        if mtpEnabled && mtpHeads > 0 {
+        if useMtp && mtpHeads > 0 {
             mtpOutputCount = mtpHeads
-        } else if mtpEnabled {
+        } else if useMtp {
             var layers = 0
             var found = false
             let metaCount = Int(llama_model_meta_count(loadedModel))
@@ -238,16 +230,13 @@ final class LlamaInference: @unchecked Sendable {
         } else {
             mtpOutputCount = 1
         }
-        if mtpEnabled {
+        if useMtp {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
-        if useMtp && isHybrid {
-            FileLogger.shared.warn("MTP disabled: hybrid models don't support MTP context type")
-        }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(mtpEnabled)) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(useMtp)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
@@ -262,6 +251,7 @@ final class LlamaInference: @unchecked Sendable {
         // swa_full proved ineffective (swa_window 0), so log the cache traits that
         // actually decide whether a partial suffix removal is supported.
         let isRecurrent = llama_model_is_recurrent(loadedModel)
+        let isHybrid = llama_model_is_hybrid(loadedModel)
         let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
         FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
         // Use the authoritative can_shift flag instead of inferring from model
@@ -287,8 +277,7 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
         ctxParams.swa_full = true
-        let mtpEnabled = useMtp && !llama_model_is_hybrid(model)
-        if mtpEnabled {
+        if useMtp {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
