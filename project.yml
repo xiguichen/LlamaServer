@@ -79,6 +79,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/OpenAIModels.swift
         createIntermediateGroups: true
+      - path: Sources/App/MtpProbe.swift
+        createIntermediateGroups: true
     settings:
       base:
         SWIFT_VERSION: "5.0"

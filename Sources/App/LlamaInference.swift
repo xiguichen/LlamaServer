@@ -949,32 +949,13 @@ final class LlamaInference: @unchecked Sendable {
             //   2. On the second iteration, check -2 once and cache result.
             //   3. After that, either all slots or just slot -1 — no repeat
             //      probes that would hit the native error path.
-            var availableOutputs = 1   // at least the main head
-            if mtpCount > 1 {
-                if !mtpAvailabilityChecked && genTokens == 1 {
-                    // First iteration after prompt decode — only 1 output.
-                    availableOutputs = 1
-                } else if !mtpAvailabilityChecked {
-                    // Second iteration — probe -2 once to test MTP support.
-                    let hasMain = llama_get_logits_ith(context, -1) != nil
-                    let hasMtp = llama_get_logits_ith(context, -2) != nil
-                    mtpHeadsActive = hasMain && hasMtp
-                    mtpAvailabilityChecked = true
-                    availableOutputs = (hasMain ? 1 : 0) + (hasMtp ? 1 : 0)
-                    if availableOutputs < 1 { availableOutputs = 1 }
-                } else if mtpHeadsActive {
-                    // MTP confirmed working — probe all expected slots.
-                    availableOutputs = 0
-                    for j in stride(from: -1, through: -Int32(mtpCount), by: -1) {
-                        if llama_get_logits_ith(context, j) != nil {
-                            availableOutputs += 1
-                        } else {
-                            break
-                        }
-                    }
-                }
-                // else: MTP not available, stay at 1 — no probe needed.
-            }
+            var availableOutputs = MtpProbe.computeOutputs(
+                mtpCount: mtpCount,
+                genTokens: genTokens,
+                mtpAvailabilityChecked: &mtpAvailabilityChecked,
+                mtpHeadsActive: &mtpHeadsActive,
+                checkLogits: { llama_get_logits_ith(context, $0) != nil }
+            )
 
             // Sample from available output slots using reverse indices.
             // Slot 0 (main head) → -availableOutputs, slot 1 → -(availableOutputs-1), etc.
