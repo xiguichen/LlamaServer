@@ -93,7 +93,7 @@ final class MtpProbeTests: XCTestCase {
             genTokens: 10,
             mtpAvailabilityChecked: &checked,
             mtpHeadsActive: &active,
-            checkLogits: { idx in (-4...-1).contains(Int(idx)) }
+            checkLogits: { idx in (Int(idx) >= -4) && (Int(idx) <= -1) }
         )
         XCTAssertEqual(result, 4)
     }
