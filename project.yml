@@ -56,6 +56,9 @@ targets:
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
+        # Bridging header exposes the C++ MTP shim (LlamaExtShim.cpp) to Swift.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/App/LlamaServer-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
         # Unsigned build — re-signing happens later on-device (AltStore/Sideloadly/etc).
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
@@ -80,6 +83,8 @@ targets:
       - path: Sources/App/OpenAIModels.swift
         createIntermediateGroups: true
       - path: Sources/App/MtpProbe.swift
+        createIntermediateGroups: true
+      - path: Sources/App/MtpSpeculator.swift
         createIntermediateGroups: true
     settings:
       base:

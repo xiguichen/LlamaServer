@@ -44,6 +44,30 @@ final class LlamaInference: @unchecked Sendable {
     private let vocab: OpaquePointer
     private let threadCount: Int32
 
+    /// The MTP "draft" context (ctx_dft). Created alongside the main "target"
+    /// context (ctx_tgt = `context`) only when MTP is enabled. It shares the same
+    /// model and is linked to the target via `ctx_other`, running the MTP graph
+    /// (LLAMA_CONTEXT_TYPE_MTP) to speculatively draft the next token. nil when
+    /// MTP is off. Freed in `unload()` / recreated in `recreateContext()`.
+    private var mtpContext: OpaquePointer?
+
+    /// Whether two-context speculative MTP is active for this instance. Set once
+    /// in init (and mirrored in recreateContext). When true the generation loop
+    /// uses the speculative draft/verify path; when false the plain single-token
+    /// path. Distinct from `useMtp` (the user request) because MTP may fail to
+    /// initialize (e.g. draft context creation fails) and gracefully fall back.
+    private var mtpEnabled = false
+
+    /// The model's embedding width (n_embd). The MTP draft context is seeded with
+    /// a hidden state row of this width (the target's post-norm next-token state).
+    private var nEmbd = 0
+
+    /// Max speculative draft depth per round. Depth 1 (draft a single token) keeps
+    /// the target rollback distance at most 1 — covered by the recurrent-state ring
+    /// (n_rs_seq) so a mispredicted draft is rolled back with a cheap `seq_rm`
+    /// (the upstream "RS" path) rather than a full-state checkpoint restore.
+    private let mtpMaxDraft = 1
+
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model
     /// predicts multiple future tokens per forward pass, which can increase
     /// throughput on supported models.
@@ -209,15 +233,20 @@ final class LlamaInference: @unchecked Sendable {
         // set (non-zero), honour that. Otherwise query the model's GGUF metadata
         // for nextn_predict_layers (the number of MTP heads) and add 1 for the
         // main head. Falls back to 3 when the metadata is unavailable.
-        let modelIsHybrid = llama_model_is_hybrid(loadedModel)
-        if useMtp && modelIsHybrid {
-            FileLogger.shared.warn("MTP disabled: hybrid models (SSM+attention) cannot use LLAMA_CONTEXT_TYPE_MTP — SSM state cannot be transferred to the MTP context, producing corrupt output")
-        }
-        let mtpEnabled = useMtp && !modelIsHybrid
-
-        if mtpEnabled && mtpHeads > 0 {
+        //
+        // NOTE: qwen35 and other MTP models are HYBRID (recurrent + attention).
+        // Earlier we disabled MTP for hybrid models because a SINGLE
+        // LLAMA_CONTEXT_TYPE_MTP context cannot transfer the recurrent state and
+        // produced garbage. The correct design (mirrored from llama.cpp's
+        // common_speculative_impl_draft_mtp) uses TWO contexts on one model: a
+        // NORMAL "target" context (this `context`) that is the source of truth,
+        // and a separate MTP "draft" context (`mtpContext`) linked via ctx_other.
+        // So hybrid models ARE supported here — the recurrent rollback on a
+        // mispredicted draft is handled by the recurrent-state ring (n_rs_seq).
+        let wantMtp = useMtp
+        if wantMtp && mtpHeads > 0 {
             mtpOutputCount = mtpHeads
-        } else if mtpEnabled {
+        } else if wantMtp {
             var layers = 0
             var found = false
             let metaCount = Int(llama_model_meta_count(loadedModel))
@@ -236,13 +265,16 @@ final class LlamaInference: @unchecked Sendable {
         } else {
             mtpOutputCount = 1
         }
-        if mtpEnabled {
-            ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
-            ctxParams.n_outputs_max = UInt32(mtpOutputCount)
+        self.nEmbd = Int(llama_model_n_embd(loadedModel))
+        // The TARGET context stays a NORMAL context. Give it a recurrent-state
+        // ring large enough to roll back a mispredicted draft (depth <= mtpMaxDraft)
+        // with a cheap `llama_memory_seq_rm` instead of a full-state restore.
+        if wantMtp {
+            ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(mtpEnabled)) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(wantMtp)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
@@ -264,6 +296,50 @@ final class LlamaInference: @unchecked Sendable {
         // type: hybrid/recurrent caches can't partially drop a suffix, and even
         // some pure-attention architectures may have immovable cache state.
         self.supportsPartialCacheReuse = canShift
+
+        // Two-context speculative MTP setup. The target context (`context`) is the
+        // source of truth; the draft context (`mtpContext`) runs the MTP graph to
+        // propose the next token, which the target then verifies. Best-effort: if
+        // the draft context can't be created we log and fall back to plain decoding
+        // (mtpEnabled stays false) — never a hard failure.
+        if wantMtp {
+            self.mtpEnabled = setupDraftContext(target: ctx)
+            FileLogger.shared.info("MTP \(self.mtpEnabled ? "enabled" : "unavailable") (two-context speculative, n_embd \(nEmbd), output slots \(mtpOutputCount), max draft \(mtpMaxDraft))")
+        }
+    }
+
+    /// Enables the target context's post-norm next-token hidden state and creates
+    /// the linked MTP draft context (ctx_dft). Returns true on success. On any
+    /// failure the draft context is left nil and the caller falls back to plain
+    /// single-token decoding. Mirrors llama.cpp's draft-mtp setup:
+    ///   llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false)
+    ///   llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true)
+    /// with ctx_dft created on the SAME model, typed LLAMA_CONTEXT_TYPE_MTP and
+    /// linked back to the target via ctx_other.
+    private func setupDraftContext(target: OpaquePointer) -> Bool {
+        var ctxParams = llama_context_default_params()
+        ctxParams.n_ctx = UInt32(contextSize)
+        ctxParams.n_batch = UInt32(batchSize)
+        ctxParams.n_ubatch = UInt32(batchSize)
+        ctxParams.n_threads = threadCount
+        ctxParams.n_threads_batch = threadCount
+        ctxParams.swa_full = true
+        ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
+        ctxParams.n_outputs_max = UInt32(mtpOutputCount)
+        ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
+        ctxParams.ctx_other = target
+
+        guard let dft = llama_init_from_model(model, ctxParams) else {
+            FileLogger.shared.warn("MTP: draft context creation returned NULL — falling back to plain decoding")
+            return false
+        }
+        // Enable the next-token hidden-state outputs on both contexts.
+        // Target: dense (masked == false) so every decoded row exposes its h.
+        // Draft:  masked == true (it consumes the seeded h to draft).
+        cllama_set_embeddings_nextn(UnsafeMutableRawPointer(target), true, false)
+        cllama_set_embeddings_nextn(UnsafeMutableRawPointer(dft), true, true)
+        self.mtpContext = dft
+        return true
     }
 
     /// Frees the old llama_context and creates a fresh one. This is called after
@@ -274,6 +350,13 @@ final class LlamaInference: @unchecked Sendable {
         // The old context is now gone; until the new one is created the pointer
         // is dangling. Mark it invalid so a failure below can't be used.
         contextValid = false
+        // Free and clear the linked draft context too — it points at the old
+        // target via ctx_other and must be rebuilt against the new one.
+        if let dft = mtpContext {
+            llama_free(dft)
+            mtpContext = nil
+        }
+        mtpEnabled = false
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
@@ -283,10 +366,10 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
         ctxParams.swa_full = true
-        let mtpEnabled = useMtp && !llama_model_is_hybrid(model)
-        if mtpEnabled {
-            ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
-            ctxParams.n_outputs_max = UInt32(mtpOutputCount)
+        // Target stays a NORMAL context; give it the recurrent-state ring for
+        // cheap draft rollback when MTP is requested (see init()).
+        if useMtp {
+            ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
@@ -298,9 +381,12 @@ final class LlamaInference: @unchecked Sendable {
         }
         context = ctx
         contextValid = true
+        if useMtp {
+            mtpEnabled = setupDraftContext(target: ctx)
+        }
         cachedTokenCount = 0
         cachedTokenIds = []
-        FileLogger.shared.info("context recreated (\(contextSize) tokens)")
+        FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled))")
     }
 
     /// Recovers after a `llama_decode` returns non-zero. On hybrid attention/SSM
@@ -354,6 +440,12 @@ final class LlamaInference: @unchecked Sendable {
         // may have already freed it (contextValid == false), and freeing again
         // would be a double-free.
         if contextValid { llama_free(context) }
+        // Free the linked MTP draft context (if any) before the model.
+        if let dft = mtpContext {
+            llama_free(dft)
+            mtpContext = nil
+        }
+        mtpEnabled = false
         llama_model_free(model)
         // Drop the on-disk prompt-state snapshot (if any) so tmp doesn't accrue
         // stale multi-MB state files across model reloads.
@@ -938,6 +1030,237 @@ final class LlamaInference: @unchecked Sendable {
         let mtpCount = mtpOutputCount
         let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
         var firstTokenTime: CFAbsoluteTime?
+
+        // Shared per-token consumer used by the MTP speculative path. Streams the
+        // token's text, applies stop strings, and returns false when generation
+        // must stop (stop string matched or the client cancelled). Mirrors the
+        // inline emit/stop logic of the plain path below.
+        func consumeToken(_ token: llama_token) -> Bool {
+            generatedTokenIds.append(token)
+            pending.append(contentsOf: pieceBytes(for: token))
+            let decoded = flushDecodableUTF8(&pending)
+            if !decoded.isEmpty { output += decoded }
+            generated += 1
+
+            if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
+                let cut = output.distance(from: output.startIndex, to: r.lowerBound)
+                output = String(output[..<r.lowerBound])
+                finishReason = "stop"
+                earlyStop = true
+                if let onToken = onToken, emittedCount < cut {
+                    let lo = output.index(output.startIndex, offsetBy: emittedCount)
+                    _ = onToken(String(output[lo...]))
+                    emittedCount = cut
+                }
+                return false
+            }
+            if emitSafe() == false {
+                finishReason = "stopped"
+                earlyStop = true
+                return false
+            }
+            return true
+        }
+
+        // Copies `nEmbd` floats of the post-norm next-token hidden state for the
+        // given output row out of a context's internal buffer into an owned Swift
+        // array (the pointer is invalidated by the next decode). nil if the model
+        // does not expose MTP hidden states.
+        func copyH(_ ctx: OpaquePointer, _ row: Int32) -> [Float]? {
+            guard nEmbd > 0,
+                  let p = cllama_get_embeddings_nextn_ith(UnsafeMutableRawPointer(ctx), row)
+            else { return nil }
+            return Array(UnsafeBufferPointer(start: p, count: nEmbd))
+        }
+
+        // Decide whether the speculative MTP path is viable for this generation.
+        // The prompt has just been decoded into the target with nextn enabled, so
+        // the last row's hidden state must be readable; if not, the model/runtime
+        // isn't actually producing MTP states — fall back to plain decoding.
+        var usedMtp = mtpEnabled && mtpContext != nil
+        if usedMtp && copyH(context, 0) == nil {
+            FileLogger.shared.warn("MTP: target nextn hidden state unavailable after prompt decode — using plain decoding")
+            usedMtp = false
+        }
+
+        if usedMtp, let dft = mtpContext {
+            // ============================ MTP speculative path ====================
+            // Two-context depth-1 speculative decoding (mirrors llama.cpp's
+            // common_speculative_impl_draft_mtp + the server verify/accept driver):
+            //   target = `context` (source of truth, normal logits + h_nextn)
+            //   draft  = `dft`     (LLAMA_CONTEXT_TYPE_MTP, ctx_other = target)
+            // Each round drafts ONE token with the draft context, then the target
+            // verifies it. EVERY emitted token is sampled from the TARGET, so a bad
+            // draft can only cost a round (no speed-up) — never corrupt output.
+
+            // Greedy sampler for the draft context (the draft only proposes; the
+            // target's real sampler decides what is actually emitted).
+            var draftChainParams = llama_sampler_chain_default_params()
+            draftChainParams.no_perf = true
+            let draftSampler = llama_sampler_chain_init(draftChainParams)
+            llama_sampler_chain_add(draftSampler, llama_sampler_init_greedy())
+            defer { llama_sampler_free(draftSampler) }
+
+            // --- decode helpers (explicit positions; single sequence id 0) ---
+            func decodeSingleTarget(_ token: llama_token, _ pos: llama_pos) -> Int32 {
+                var batch = llama_batch_init(1, 0, 1)
+                batch.n_tokens = 1
+                batch.token[0] = token
+                batch.pos[0] = pos
+                batch.n_seq_id[0] = 1
+                batch.seq_id[0]![0] = 0
+                batch.logits[0] = 1
+                let rc = llama_decode(context, batch)
+                llama_batch_free(batch)
+                return rc
+            }
+            func decodeVerify(_ t0: llama_token, _ d0: llama_token, _ basePos: llama_pos) -> Int32 {
+                var batch = llama_batch_init(2, 0, 1)
+                batch.n_tokens = 2
+                batch.token[0] = t0;            batch.token[1] = d0
+                batch.pos[0]   = basePos;       batch.pos[1]   = basePos + 1
+                batch.n_seq_id[0] = 1;          batch.n_seq_id[1] = 1
+                batch.seq_id[0]![0] = 0;        batch.seq_id[1]![0] = 0
+                batch.logits[0] = 1;            batch.logits[1] = 1
+                let rc = llama_decode(context, batch)
+                llama_batch_free(batch)
+                return rc
+            }
+            func decodeDraft(_ token: llama_token, _ pos: llama_pos, _ h: [Float]) -> Int32 {
+                // MTP needs BOTH a token and an embd row; llama_batch_init only
+                // allocates one of them, so allocate the token buffer if missing.
+                var batch = llama_batch_init(1, Int32(nEmbd), 1)
+                var ownTok: UnsafeMutablePointer<llama_token>? = nil
+                if batch.token == nil {
+                    ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: 1)
+                    batch.token = ownTok
+                }
+                batch.token[0] = token
+                batch.n_tokens = 1
+                h.withUnsafeBufferPointer { hb in
+                    if let base = batch.embd, let src = hb.baseAddress {
+                        base.update(from: src, count: nEmbd)
+                    }
+                }
+                batch.pos[0] = pos
+                batch.n_seq_id[0] = 1
+                batch.seq_id[0]![0] = 0
+                batch.logits[0] = 1
+                let rc = llama_decode(dft, batch)
+                if let ot = ownTok { batch.token = nil; ot.deallocate() }
+                llama_batch_free(batch)
+                return rc
+            }
+
+            // Position in the target where the next "idLast" will be (re-)decoded.
+            // The prompt occupies [0, promptTokens.count); generation starts there.
+            var nextPos = llama_pos(promptTokens.count)
+
+            // Sample the first generated token from the prompt's last-row logits.
+            var idLast = llama_sampler_sample(sampler, context, -1)
+            // h at the last prompt position (predicts idLast's successor) — pairs
+            // with idLast to seed the draft (MTP head input: token x_p + h_{p-1}).
+            var pendingH = copyH(context, 0) ?? [Float](repeating: 0, count: nEmbd)
+
+            if idLast == -1 {
+                finishReason = "sampler_error"
+                FileLogger.shared.error("MTP: first llama_sampler_sample returned -1")
+            } else if llama_vocab_is_eog(vocab, idLast) {
+                finishReason = "eog_immediate"
+            } else {
+                firstTokenTime = CFAbsoluteTimeGetCurrent()
+                llama_sampler_accept(sampler, idLast)
+                genTokens += 1
+                if consumeToken(idLast) {
+                    while generated < limit {
+                        if Int(nextPos) + 2 >= contextSize { finishReason = "context_full"; break }
+                        genTokens += 1
+
+                        // 1) Draft one token with the draft context.
+                        var d0: llama_token = -1
+                        var haveDraft = false
+                        if decodeDraft(idLast, nextPos, pendingH) == 0 {
+                            let cand = llama_sampler_sample(draftSampler, dft, 0)
+                            if cand != -1 && !llama_vocab_is_eog(vocab, cand) {
+                                d0 = cand
+                                haveDraft = true
+                            }
+                        }
+
+                        // No usable draft -> plain single-token target decode.
+                        if !haveDraft {
+                            guard decodeSingleTarget(idLast, nextPos) == 0 else {
+                                recoverFromDecodeFailure(); throw InferenceError.decode
+                            }
+                            let s = llama_sampler_sample(sampler, context, 0)
+                            if s == -1 { finishReason = "sampler_error"; break }
+                            if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
+                            llama_sampler_accept(sampler, s)
+                            pendingH = copyH(context, 0) ?? pendingH
+                            idLast = s
+                            nextPos += 1
+                            if !consumeToken(s) { break }
+                            continue
+                        }
+
+                        // 2) Verify the draft: decode [idLast, d0] in the target.
+                        guard decodeVerify(idLast, d0, nextPos) == 0 else {
+                            recoverFromDecodeFailure(); throw InferenceError.decode
+                        }
+                        let vh0 = copyH(context, 0) ?? pendingH
+                        let vh1 = copyH(context, 1) ?? pendingH
+
+                        // 3) Sample the REAL successor of idLast from row 0.
+                        let s0 = llama_sampler_sample(sampler, context, 0)
+                        if s0 == -1 { finishReason = "sampler_error"; break }
+                        if llama_vocab_is_eog(vocab, s0) { finishReason = "eog"; break }
+                        llama_sampler_accept(sampler, s0)
+
+                        // Pure verify decision (accept/reject, position advance,
+                        // rollback position, which hidden state to carry forward).
+                        // See MtpSpeculator for the invariants this enforces.
+                        let step = MtpSpeculator.decide(d0: d0, s0: s0, nextPos: Int(nextPos))
+
+                        if step.hit {
+                            // HIT: idLast@nextPos and d0(=s0)@nextPos+1 both valid;
+                            // row 1 gives the next token s1 for free.
+                            if !consumeToken(s0) { break }
+                            if generated >= limit { break }
+                            let s1 = llama_sampler_sample(sampler, context, 1)
+                            if s1 == -1 { finishReason = "sampler_error"; break }
+                            if llama_vocab_is_eog(vocab, s1) { finishReason = "eog"; break }
+                            llama_sampler_accept(sampler, s1)
+                            if !consumeToken(s1) { break }
+                            idLast = s1
+                        } else {
+                            // MISS: drop the mispredicted d0@nextPos+1 from both
+                            // contexts (rollback distance 1 <= n_rs_seq -> cheap RS
+                            // seq_rm even on the hybrid/recurrent target).
+                            if let rb = step.rollbackPos {
+                                if let mem = llama_get_memory(context) {
+                                    _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
+                                }
+                                if let dmem = llama_get_memory(dft) {
+                                    _ = llama_memory_seq_rm(dmem, 0, llama_pos(rb), -1)
+                                }
+                            }
+                            if !consumeToken(s0) { break }
+                            idLast = s0
+                        }
+                        pendingH = (step.carryHFromRow == 1) ? vh1 : vh0
+                        nextPos += llama_pos(step.posAdvance)
+                    }
+                }
+            }
+
+            // The two-context speculative path manages KV positions in a way that
+            // the cross-call prefix-reuse tracking can't reconstruct, so clear both
+            // caches and reset tracking. Next call re-decodes the prompt (hybrid
+            // models reuse via the on-disk snapshot path instead).
+            if let mem = llama_get_memory(context) { llama_memory_clear(mem, true) }
+            if let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, true) }
+            decodedGenerated = 0
+        } else {
         while generated < limit {
             let nCtxUsed = promptTokens.count + generated
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
@@ -1051,6 +1374,7 @@ final class LlamaInference: @unchecked Sendable {
             // All decoded tokens are now resident in the KV cache.
             decodedGenerated = generated
         }
+        } // end plain (non-MTP) generation path
 
         // Flush any trailing bytes (lossy) and any held-back text, unless a stop
         // string / client cancel already finalized the output.
@@ -1072,8 +1396,15 @@ final class LlamaInference: @unchecked Sendable {
         // Only tokens actually decoded into the KV cache are recorded —
         // `decodedGenerated` excludes any final token from a stop-string or
         // client-cancel break that was sampled but never fed back to the cache.
-        cachedTokenCount = promptTokens.count + decodedGenerated
-        cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
+        if usedMtp {
+            // The MTP path already cleared both KV caches; force a clean slate so
+            // the next call never trusts a prefix that is no longer resident.
+            cachedTokenCount = 0
+            cachedTokenIds = []
+        } else {
+            cachedTokenCount = promptTokens.count + decodedGenerated
+            cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
+        }
 
         let genEnd = CFAbsoluteTimeGetCurrent()
         let prefillSecs = prefillEnd - genStart
