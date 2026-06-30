@@ -209,9 +209,17 @@ final class LlamaInference: @unchecked Sendable {
         // set (non-zero), honour that. Otherwise query the model's GGUF metadata
         // for nextn_predict_layers (the number of MTP heads) and add 1 for the
         // main head. Falls back to 3 when the metadata is unavailable.
-        if useMtp && mtpHeads > 0 {
+        //
+        // Hybrid models (SSM + attention, e.g. qwen35/Dense+SSM) cannot use MTP:
+        // their SSM layers maintain a recurrent state that can't produce multiple
+        // output slots, so llama_decode always produces n_outputs=1 regardless of
+        // n_outputs_max. Enabling MTP on a hybrid model corrupts the logits layout
+        // and produces garbled output.
+        let isHybrid = llama_model_is_hybrid(loadedModel)
+        let mtpEnabled = useMtp && !isHybrid
+        if mtpEnabled && mtpHeads > 0 {
             mtpOutputCount = mtpHeads
-        } else if useMtp {
+        } else if mtpEnabled {
             var layers = 0
             var found = false
             let metaCount = Int(llama_model_meta_count(loadedModel))
@@ -230,13 +238,16 @@ final class LlamaInference: @unchecked Sendable {
         } else {
             mtpOutputCount = 1
         }
-        if useMtp {
+        if mtpEnabled {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
+        if useMtp && isHybrid {
+            FileLogger.shared.warn("MTP disabled: hybrid models don't support MTP context type")
+        }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
-        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(useMtp)) for '\(self.modelName)'")
+        FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(mtpEnabled)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
@@ -251,7 +262,6 @@ final class LlamaInference: @unchecked Sendable {
         // swa_full proved ineffective (swa_window 0), so log the cache traits that
         // actually decide whether a partial suffix removal is supported.
         let isRecurrent = llama_model_is_recurrent(loadedModel)
-        let isHybrid = llama_model_is_hybrid(loadedModel)
         let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
         FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
         // Use the authoritative can_shift flag instead of inferring from model
@@ -277,7 +287,8 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_threads_batch = threadCount
         // Keep the full SWA cache so prefix reuse (seq_rm) works — see init().
         ctxParams.swa_full = true
-        if useMtp {
+        let mtpEnabled = useMtp && !llama_model_is_hybrid(model)
+        if mtpEnabled {
             ctxParams.ctx_type = LLAMA_CONTEXT_TYPE_MTP
             ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         }
@@ -311,6 +322,14 @@ final class LlamaInference: @unchecked Sendable {
             FileLogger.shared.error("context recreation after decode failure FAILED: \(error.localizedDescription)")
         }
     }
+
+    /// Tracks whether MTP head outputs have ever been confirmed available
+    /// during the current generate() call. When false, the probe skips
+    /// out-of-bounds indices to avoid llama.cpp error logs.
+    private var mtpHeadsActive = false
+    /// Whether the MTP availability probe has been performed (after the first
+    /// generation decode, which is the earliest MTP heads could appear).
+    private var mtpAvailabilityChecked = false
 
     /// Tracks whether the native model/context have already been freed so we
     /// never double-free (which would crash). Set by `unload()`.
@@ -890,6 +909,10 @@ final class LlamaInference: @unchecked Sendable {
         FileLogger.shared.verbose("prompt tail: …\(promptTail)")
 
         let prefillEnd = CFAbsoluteTimeGetCurrent()
+        // Reset MTP tracking for a fresh generation (closed over by the
+        // while-loop below, which has closure capture for its mutable state).
+        mtpHeadsActive = false
+        mtpAvailabilityChecked = false
         var genTokens = 0  // separate counter for generation timing
         var output = ""
         var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
@@ -929,16 +952,39 @@ final class LlamaInference: @unchecked Sendable {
             genTokens += 1
 
             // Probe available output rows. After prompt decode only the main
-            // head produces output (n_outputs=1); after generation decode all
-            // MTP heads are active (n_outputs=mtpCount). Probe from the end
-            // (-1, -2, ...) to find how many rows are actually available.
-            var availableOutputs = 0
-            for j in stride(from: -1, through: -Int32(mtpCount), by: -1) {
-                if llama_get_logits_ith(context, j) != nil {
-                    availableOutputs += 1
-                } else {
-                    break
+            // head produces output (n_outputs=1); MTP heads — if the model
+            // supports them — become available after the first single-token
+            // generation decode. To avoid llama.cpp error logs for
+            // out-of-bounds indices we:
+            //   1. Skip probing MTP heads on the first iteration (always 1).
+            //   2. On the second iteration, check -2 once and cache result.
+            //   3. After that, either all slots or just slot -1 — no repeat
+            //      probes that would hit the native error path.
+            var availableOutputs = 1   // at least the main head
+            if mtpCount > 1 {
+                if !mtpAvailabilityChecked && genTokens == 1 {
+                    // First iteration after prompt decode — only 1 output.
+                    availableOutputs = 1
+                } else if !mtpAvailabilityChecked {
+                    // Second iteration — probe -2 once to test MTP support.
+                    let hasMain = llama_get_logits_ith(context, -1) != nil
+                    let hasMtp = llama_get_logits_ith(context, -2) != nil
+                    mtpHeadsActive = hasMain && hasMtp
+                    mtpAvailabilityChecked = true
+                    availableOutputs = (hasMain ? 1 : 0) + (hasMtp ? 1 : 0)
+                    if availableOutputs < 1 { availableOutputs = 1 }
+                } else if mtpHeadsActive {
+                    // MTP confirmed working — probe all expected slots.
+                    availableOutputs = 0
+                    for j in stride(from: -1, through: -Int32(mtpCount), by: -1) {
+                        if llama_get_logits_ith(context, j) != nil {
+                            availableOutputs += 1
+                        } else {
+                            break
+                        }
+                    }
                 }
+                // else: MTP not available, stay at 1 — no probe needed.
             }
 
             // Sample from available output slots using reverse indices.
