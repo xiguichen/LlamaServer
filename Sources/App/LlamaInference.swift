@@ -101,7 +101,7 @@ final class LlamaInference: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize requestedContext: Int = 32768, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
+    init(modelPath: String, contextSize requestedContext: Int = 65536, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
         self.useMtp = useMtp
         self.mtpHeads = mtpHeads
         // Backend init is idempotent across instances within a process.
@@ -177,7 +177,7 @@ final class LlamaInference: @unchecked Sendable {
         // K + V, f16 (2 bytes), across all layers, per token.
         let kvBytesPerToken = max(1, 2 * nLayer * (headDim * nHeadKV) * 2)
 
-        var effective = min(max(256, requestedContext), 32768)
+        var effective = min(max(256, requestedContext), 65536)
         if nCtxTrain > 0 { effective = min(effective, nCtxTrain) }
 
         let kvBudget = budget - modelSize - computeReserve
