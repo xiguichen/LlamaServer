@@ -125,7 +125,7 @@ final class LlamaInference: @unchecked Sendable {
         // total RAM, so be conservative. We use this to fail *gracefully* with a
         // message instead of letting a too-big load/KV-cache crash the app.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
-        let budget = Int(Double(totalRAM) * 0.55)
+        let budget = Int(Double(totalRAM) * 1.0)
         let computeReserve = 320 * 1024 * 1024   // activation/compute buffers headroom
 
         // Pre-check the model file size before attempting the load that would
