@@ -138,7 +138,7 @@ final class LlamaInference: @unchecked Sendable {
         // numbers on disk — a suspiciously low process-available (~3.3GB class)
         // means the install did not get increased-memory-limit; a low value with
         // an otherwise healthy ceiling means stale resident memory at init.
-        let fmt = { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+        let fmt = { (bytes: Int) in ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
         FileLogger.shared.info("memory budget \(fmt(budget)) [process-available \(fmt(processAvailable)), physical \(fmt(totalRAM))]")
 
         // Pre-check the model file size before attempting the load that would
