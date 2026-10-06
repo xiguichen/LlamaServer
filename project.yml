@@ -48,6 +48,17 @@ targets:
         # Keep serving while screen is on; background execution is limited by iOS.
         UIBackgroundModes:
           - audio
+    # Required for real 6GB+ inference headroom on iOS 26+/27 devices.
+    # The per-process jetsam limit rises from ~3.3GB to ~6GB+ only when the app
+    # carries com.apple.developer.kernel.increased-memory-limit. No paid account
+    # needed: AltStore 2.3+ (AltSign >= b2c8861793) and Xcode "Personal Team"
+    # signing both grant this capability to free Apple ID apps; SideStore does not.
+    # NOTE: only effective for *signed* builds — the unsigned CI IPA carries no
+    # signature, so re-signing tool must keep the entitlement (AltStore 2.3+ does).
+    entitlements:
+      path: LlamaServer.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.llamaserver
@@ -85,6 +96,8 @@ targets:
       - path: Sources/App/MtpProbe.swift
         createIntermediateGroups: true
       - path: Sources/App/MtpSpeculator.swift
+        createIntermediateGroups: true
+      - path: Sources/App/MemoryBudget.swift
         createIntermediateGroups: true
     settings:
       base:
