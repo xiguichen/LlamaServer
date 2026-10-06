@@ -134,6 +134,13 @@ final class LlamaInference: @unchecked Sendable {
         let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, processAvailable: processAvailable)
         let computeReserve = 320 * 1024 * 1024   // activation/compute buffers headroom
 
+        // Derivation logged BEFORE the pre-check so a refusal always leaves the
+        // numbers on disk — a suspiciously low process-available (~3.3GB class)
+        // means the install did not get increased-memory-limit; a low value with
+        // an otherwise healthy ceiling means stale resident memory at init.
+        let fmt = { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+        FileLogger.shared.info("memory budget \(fmt(budget)) [process-available \(fmt(processAvailable)), physical \(fmt(totalRAM))]")
+
         // Pre-check the model file size before attempting the load that would
         // otherwise OOM-kill the whole app.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: modelPath),
@@ -142,7 +149,7 @@ final class LlamaInference: @unchecked Sendable {
             let f = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
             let b = ByteCountFormatter.string(fromByteCount: Int64(budget), countStyle: .file)
             throw InferenceError.insufficientMemory(
-                "Model is \(f) but only ~\(b) is usable on this device. Try a smaller model (1–3B, Q4).")
+                "Model is \(f) but only ~\(b) is usable on this device (process-available \(fmt(processAvailable)), physical \(fmt(totalRAM))). Try a smaller model (1–3B, Q4).")
         }
 
         var modelParams = llama_model_default_params()
@@ -153,7 +160,7 @@ final class LlamaInference: @unchecked Sendable {
         // (GGML_ABORT/SIGABRT) on an unsupported architecture or OOMs during
         // load, this line survives the crash in llamaserver.log — so a crash is
         // never "without any log", and it's readable on-device (no Mac needed).
-        FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB [process-available \(processAvailable / (1024 * 1024)) MB, physical \(totalRAM / (1024 * 1024)) MB])")
+        FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
 
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
             FileLogger.shared.error("model load returned NULL for '\(self.modelName)'")
