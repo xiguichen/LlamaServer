@@ -124,11 +124,15 @@ final class LlamaInference: @unchecked Sendable {
 
         // Memory budget. iOS jetsam-kills (SIGKILL — uncatchable) apps at a
         // per-process limit well below total RAM (measured: ~6.1GB ceiling on
-        // 12GB hardware without the increased-memory-limit entitlement). Budget
-        // against os_proc_available_memory() — how much MORE this process may
-        // allocate before jetsam kills it — so we fail *gracefully* with a
-        // message instead of letting a too-big load/KV-cache get us SIGKILLed
-        // with no log. Falls back to physical RAM when the API reports 0.
+        // 12GB hardware), so we fail *gracefully* with a message instead of
+        // letting a too-big load/KV-cache get us SIGKILLed with no log.
+        // Budget = min(physical, max(processAvailable, 55% of physical)) minus
+        // transient headroom (see MemoryBudget). The 55%-of-RAM floor matters:
+        // os_proc_available_memory() under-reports at init on some installs
+        // (~3.46GB observed here vs the ~3.10GB the previously-working
+        // 2.78GB-model config needs) — trusting the raw reading alone refused
+        // every start, while the floor keeps that config loading and still
+        // trusts a larger entitled reading.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
         let processAvailable = Int(os_proc_available_memory())
         let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, processAvailable: processAvailable)
