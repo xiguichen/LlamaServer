@@ -82,7 +82,10 @@ jobs:
             -project LlamaServer.xcodeproj \
             -scheme LlamaServer
 
-      - name: Build (ad-hoc signed, entitlements preserved)
+      # xcodebuild cannot ad-hoc sign for the iphoneos SDK ("Ad Hoc code
+      # signing is not allowed with SDK 'iOS x.y"), so the build stays unsigned;
+      # scripts/package-ipa.sh applies the ad-hoc signature + entitlements.
+      - name: Build (unsigned)
         run: |
           xcodebuild \
             -project LlamaServer.xcodeproj \
@@ -91,16 +94,13 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_ENTITLEMENTS="LlamaServer.entitlements" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
+            CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             build
 
-      - name: Package unsigned IPA
+      - name: Package IPA (ad-hoc signed, entitlements preserved)
         run: bash scripts/package-ipa.sh
 
       - name: Upload IPA artifact

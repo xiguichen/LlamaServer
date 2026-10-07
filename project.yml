@@ -53,8 +53,10 @@ targets:
     # carries com.apple.developer.kernel.increased-memory-limit. No paid account
     # needed: AltStore 2.3+ (AltSign >= b2c8861793) and Xcode "Personal Team"
     # signing both grant this capability to free Apple ID apps; SideStore does not.
-    # NOTE: only effective for *signed* builds — the unsigned CI IPA carries no
-    # signature, so re-signing tool must keep the entitlement (AltStore 2.3+ does).
+    # NOTE: xcodebuild cannot ad-hoc sign for the iphoneos SDK, so CI builds
+    # unsigned and scripts/package-ipa.sh ad-hoc signs the .app with this
+    # entitlements file — embedding the blob in LC_CODE_SIGNATURE, the only
+    # place AltSign (ldid::Entitlements) reads from.
     entitlements:
       path: LlamaServer.entitlements
       properties:
