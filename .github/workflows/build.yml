@@ -82,7 +82,7 @@ jobs:
             -project LlamaServer.xcodeproj \
             -scheme LlamaServer
 
-      - name: Build (unsigned)
+      - name: Build (ad-hoc signed, entitlements preserved)
         run: |
           xcodebuild \
             -project LlamaServer.xcodeproj \
@@ -91,9 +91,12 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_ENTITLEMENTS="LlamaServer.entitlements" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM="" \
             build
 
