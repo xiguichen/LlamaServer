@@ -44,4 +44,14 @@ struct MemoryBudget {
         let headroom = min(transientHeadroomCap, ceiling / 8)
         return ceiling - headroom
     }
+
+    /// Start-time memory snapshot log line. Raw byte counts come first,
+    /// verbatim (the exact `os_proc_available_memory()` / budget values, so a
+    /// byte-for-byte A/B across toolchain or entitlement changes is possible);
+    /// the rounded `ByteCountFormatter` rendering follows in parentheses for
+    /// humans reading the log on-device.
+    static func logLine(budget: Int, processAvailable: Int, physicalRAM: Int) -> String {
+        let fmt = { (bytes: Int) in ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+        return "memory budget \(budget)B (\(fmt(budget))) [process-available \(processAvailable)B (\(fmt(processAvailable))), physical \(physicalRAM)B (\(fmt(physicalRAM)))]"
+    }
 }

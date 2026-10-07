@@ -67,6 +67,20 @@ final class MemoryBudgetTests: XCTestCase {
         XCTAssertEqual(budget, physical - 512 * MB)
     }
 
+    // MARK: - Start-log line
+
+    func testLogLineCarriesRawByteValues() {
+        // Raw os_proc_available_memory() bytes must appear verbatim — the
+        // rounded rendering alone can't be compared byte-for-byte across
+        // toolchain/entitlement changes.
+        let line = MemoryBudget.logLine(budget: 6_549_825_126,
+                                        processAvailable: 3_460_000_000,
+                                        physicalRAM: 12 * GB)
+        XCTAssertTrue(line.contains("memory budget 6549825126B"), line)
+        XCTAssertTrue(line.contains("process-available 3460000000B"), line)
+        XCTAssertTrue(line.contains("physical 12884901888B"), line)
+    }
+
     // MARK: - Headroom scales down for small budgets
 
     func testHeadroomShrinksWhenBudgetIsSmall() {

@@ -367,13 +367,23 @@ final class LlamaHTTPServer {
         return r == KERN_SUCCESS ? info.resident_size / (1024 * 1024) : 0
     }
 
-    /// Human-readable system memory snapshot: total, free, and this process's RSS.
-    /// Uses Mach `vm_statistics64` for system-wide page counts (entitlement-gated
-    /// on iOS), falling back to `os_proc_available_memory()` (iOS 17+ public API).
+    /// System memory snapshot: total, this process's RSS, and the raw
+    /// `os_proc_available_memory()` value written verbatim (bytes) so every
+    /// line doubles as an exact A/B record across toolchain/entitlement
+    /// changes, plus Mach `vm_statistics64` system-wide page counts when
+    /// available (entitlement-gated on iOS).
     private var systemMemoryLog: String {
         let total = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
         let pageSize = UInt64(vm_page_size)
         let rss = memoryMB
+
+        // os_proc_available_memory(): bytes this process may allocate before
+        // jetsam kills it (iOS 17+, no entitlement needed). Captured raw and
+        // included in BOTH branches — previously the Mach-success branch
+        // omitted it entirely and the fallback truncated to whole MB.
+        let availableRaw = os_proc_available_memory()
+        let availableMB = availableRaw / (1024 * 1024)
+        let availableField = "available=\(availableRaw)B(\(availableMB)MB)"
 
         // Try Mach host_statistics (requires entitlement on iOS).
         var stats = vm_statistics64()
@@ -388,13 +398,12 @@ final class LlamaHTTPServer {
             let wired     = UInt64(stats.wire_count) * pageSize / (1024 * 1024)
             let compressed = UInt64(stats.compressor_page_count) * pageSize / (1024 * 1024)
             let free      = UInt64(stats.free_count) * pageSize / (1024 * 1024)
-            return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB"
+            return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB \(availableField)"
         }
 
-        // Fallback: os_proc_available_memory() (iOS 17+, no entitlement needed).
-        // Returns bytes available to the calling process (memory before jetsam).
-        let available = os_proc_available_memory() / (1024 * 1024)
-        return "total=\(total)MB available=\(available)MB rss=\(rss)MB"
+        // Mach stats unavailable (host_statistics is entitlement-gated on
+        // iOS): report the process-level numbers we always have.
+        return "total=\(total)MB \(availableField) rss=\(rss)MB"
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {

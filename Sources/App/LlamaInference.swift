@@ -142,8 +142,9 @@ final class LlamaInference: @unchecked Sendable {
         // numbers on disk — a suspiciously low process-available (~3.3GB class)
         // means the install did not get increased-memory-limit; a low value with
         // an otherwise healthy ceiling means stale resident memory at init.
-        let fmt = { (bytes: Int) in ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
-        FileLogger.shared.info("memory budget \(fmt(budget)) [process-available \(fmt(processAvailable)), physical \(fmt(totalRAM))]")
+        // Raw bytes first (exact os_proc_available_memory() output), rounded
+        // rendering in parens — see MemoryBudget.logLine.
+        FileLogger.shared.info(MemoryBudget.logLine(budget: budget, processAvailable: processAvailable, physicalRAM: totalRAM))
 
         // Pre-check the model file size before attempting the load that would
         // otherwise OOM-kill the whole app.
@@ -152,8 +153,10 @@ final class LlamaInference: @unchecked Sendable {
            fileSize + computeReserve > budget {
             let f = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
             let b = ByteCountFormatter.string(fromByteCount: Int64(budget), countStyle: .file)
+            let pa = ByteCountFormatter.string(fromByteCount: Int64(processAvailable), countStyle: .file)
+            let ph = ByteCountFormatter.string(fromByteCount: Int64(totalRAM), countStyle: .file)
             throw InferenceError.insufficientMemory(
-                "Model is \(f) but only ~\(b) is usable on this device (process-available \(fmt(processAvailable)), physical \(fmt(totalRAM))). Try a smaller model (1–3B, Q4).")
+                "Model is \(f) but only ~\(b) is usable on this device (process-available \(processAvailable)B ~\(pa), physical \(totalRAM)B ~\(ph)). Try a smaller model (1–3B, Q4).")
         }
 
         var modelParams = llama_model_default_params()
