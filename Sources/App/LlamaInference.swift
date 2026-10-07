@@ -146,6 +146,22 @@ final class LlamaInference: @unchecked Sendable {
         // rendering in parens — see MemoryBudget.logLine.
         FileLogger.shared.info(MemoryBudget.logLine(budget: budget, processAvailable: processAvailable, physicalRAM: totalRAM))
 
+        // Entitlement diagnostic. A real app whose process-available is far
+        // below physical RAM did NOT get the increased-memory-limit uplift:
+        // entitled installs report the ~6GB class on 12GB hardware, un-entitled
+        // installs land in the ~3.3GB class. The MemoryBudget 55% floor then
+        // *inflates* `budget` above what jetsam will actually allow, so a
+        // config sized for `budget` can be SIGKILLed with no graceful error.
+        // Flag it explicitly so the log always says why.
+        if processAvailable > 0, processAvailable < totalRAM / 2 {
+            FileLogger.shared.warn(
+                "increased-memory-limit entitlement appears MISSING: process-available " +
+                "\(processAvailable)B is below half of physical \(totalRAM)B. " +
+                "Re-sign with AltStore 2.3+ (AltSign >= b2c8861793) or Xcode Personal Team. " +
+                "The \(budget)B budget is an over-estimate; expect a jetsam kill above " +
+                "~\(processAvailable)B.")
+        }
+
         // Pre-check the model file size before attempting the load that would
         // otherwise OOM-kill the whole app.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: modelPath),
