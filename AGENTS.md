@@ -5,8 +5,8 @@
 No local Xcode required. Everything runs in GitHub Actions:
 
 1. Commit and push to `main`/`master` (or open a PR).
-2. CI pipeline `.github/workflows/build.yml` on a `macos-14` runner runs two jobs:
-   - **test**: `xcodegen generate` → `xcodebuild test` (simulator, unit tests only)
+2. CI pipeline `.github/workflows/build.yml` on an `xcode-27` runner (macOS 27 arm64, Xcode 27 → iOS 27 SDK) runs two jobs:
+   - **test**: `xcodegen generate` → `xcodebuild test` (simulator, unit tests only; destination `iPhone 17` — Xcode 27 images have no iPhone 16 device type)
    - **build**: `xcodegen generate` → `xcodebuild` (unsigned Release) → `bash scripts/package-ipa.sh` → upload artifact.
 3. Check the "Actions" tab for results. The test job must pass; the build job produces `LlamaServer-unsigned.ipa`.
 

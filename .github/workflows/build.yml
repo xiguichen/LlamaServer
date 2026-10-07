@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-14
+    runs-on: xcode-27
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,14 +38,14 @@ jobs:
             -project LlamaServer.xcodeproj \
             -scheme LlamaServerTests \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             ONLY_ACTIVE_ARCH=NO
 
   build:
-    runs-on: macos-14
+    runs-on: xcode-27
     env:
       # Override on a manual run via the workflow input above.
       LLAMA_TAG: ${{ github.event.inputs.llama_tag || 'b9553' }}
