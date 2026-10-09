@@ -19,6 +19,12 @@ enum ToolCallParser {
         let cleanedContent: String
         /// Structured tool calls extracted from the response (may be empty).
         let toolCalls: [ToolCall]
+        /// True when the response contained a tool-call envelope that could
+        /// not be turned into a tool call (unparseable JSON, missing or
+        /// blank name). `cleanedContent` is already stripped of envelope
+        /// fragments; callers should finish with an explicit error rather
+        /// than a silent `stop`.
+        let hasUnrecoveredEnvelope: Bool
     }
 
     /// Matches a `<tool_call> … </tool_call>` block, capturing the inner JSON.
@@ -59,15 +65,6 @@ enum ToolCallParser {
         let fullRange = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
         let matches = toolCallRegex.matches(in: stripped, options: [], range: fullRange)
 
-        guard !matches.isEmpty else {
-            // No closed envelope — try to recover a tool call whose closing tag
-            // the model omitted before falling back to plain (reasoning-free) text.
-            if let recovered = recoverUnclosedToolCall(in: stripped) {
-                return recovered
-            }
-            return ParseResult(cleanedContent: stripReasoning(stripped), toolCalls: [])
-        }
-
         var toolCalls: [ToolCall] = []
         for match in matches {
             guard match.numberOfRanges >= 2,
@@ -81,9 +78,33 @@ enum ToolCallParser {
         // Remove the envelopes and any <think> reasoning from visible content.
         let cleaned = toolCallRegex.stringByReplacingMatches(
             in: stripped, options: [], range: fullRange, withTemplate: "")
-        let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return ParseResult(cleanedContent: trimmed, toolCalls: toolCalls)
+        if !toolCalls.isEmpty {
+            let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+            return ParseResult(cleanedContent: trimmed, toolCalls: toolCalls,
+                               hasUnrecoveredEnvelope: false)
+        }
+
+        // The closed envelope's JSON couldn't be parsed — e.g. the model omitted
+        // the outer `}` or put stray junk before the close tag (seen from small
+        // models under context pressure). Try greedy recovery before giving up.
+        if let recovered = recoverUnclosedToolCall(in: stripped) {
+            return recovered
+        }
+
+        // Hopeless: strip the envelope shell so raw envelope text never reaches
+        // the client as `content`, and remember that an envelope was dropped so
+        // callers can finish with an explicit error instead of a silent `stop`.
+        var noFragments = cleaned
+        for remnant in ["<tool_call>", "</tool_call>", "</arg"] {
+            noFragments = noFragments.replacingOccurrences(of: remnant, with: "")
+        }
+        let trimmed = stripReasoning(noFragments).trimmingCharacters(in: .whitespacesAndNewlines)
+        let hadEnvelope = stripped.contains("<tool_call>")
+            || stripped.contains("</tool_call>")
+            || stripped.contains("</arg")
+        return ParseResult(cleanedContent: trimmed, toolCalls: [],
+                           hasUnrecoveredEnvelope: hadEnvelope)
     }
 
     /// Removes `<think> … </think>` reasoning blocks (and any unterminated
@@ -111,8 +132,16 @@ enum ToolCallParser {
         if let fullMatch = Range(match.range, in: text) {
             cleaned.removeSubrange(fullMatch)
         }
+        // The greedy match stops at the last `}`, so envelope remnants can
+        // survive after it (a stray open/close tag, a junk fragment like
+        // `</arg` the model emitted before the real close tag). Remove them
+        // so cleanedContent never exposes raw envelope text to the client.
+        for remnant in ["<tool_call>", "</tool_call>", "</arg"] {
+            cleaned = cleaned.replacingOccurrences(of: remnant, with: "")
+        }
         let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
-        return ParseResult(cleanedContent: trimmed, toolCalls: [call])
+        return ParseResult(cleanedContent: trimmed, toolCalls: [call],
+                           hasUnrecoveredEnvelope: false)
     }
 
     /// Removes ANSI escape sequences from arbitrary model output.
@@ -136,10 +165,21 @@ enum ToolCallParser {
         // greedy recovery regex hands us "{…valid…}]}]}". JSONSerialization
         // rejects any trailing content, which would silently drop the tool call.
         // Reduce the text to the first brace-balanced object before parsing.
-        let balanced = firstBalancedJSONObject(in: jsonText) ?? jsonText
+        // If no balanced object exists (the model dropped the outer `}` before
+        // the envelope's closing tag), autoClosedJSONObject repairs it.
+        let balanced = firstBalancedJSONObject(in: jsonText)
+            ?? autoClosedJSONObject(in: jsonText)
+            ?? jsonText
         guard let data = balanced.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let name = obj["name"] as? String, !name.isEmpty else {
+              let rawName = obj["name"] as? String else {
+            return nil
+        }
+        // A tool call without a usable name is garbage to the client (blank
+        // names break tool dispatch in OpenAI clients). Trim and reject
+        // anything left empty.
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
             return nil
         }
 
@@ -202,6 +242,77 @@ enum ToolCallParser {
             i += 1
         }
         return nil
+    }
+
+    /// Last-resort repair for a JSON object the model left unclosed before
+    /// emitting the envelope's closing tag (observed with qwen3.5:4b under
+    /// context pressure: the outer `}` of `{"name":…, "arguments":{…}` never
+    /// arrives, sometimes with a stray tag fragment like `</arg` after the
+    /// last `}`). Scans from the first `{`, truncates any non-JSON tail
+    /// (bail-out on the first `<` outside a string), drops a trailing comma,
+    /// and appends the structurally missing `}`/`]` closers.
+    ///
+    /// Returns nil when the text contains no `{`, when the scan ends inside an
+    /// open string (a truncated argument must *fail*, not be silently
+    /// fabricated), or when nothing was actually left unclosed.
+    private static func autoClosedJSONObject(in text: String) -> String? {
+        let chars = Array(text)
+        guard let start = chars.firstIndex(of: "{") else { return nil }
+
+        var stack: [Character] = []
+        var inString = false
+        var escaped = false
+        var lastJSONIndex = start
+        var i = start
+        while i < chars.count {
+            let c = chars[i]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if c == "\\" {
+                    escaped = true
+                } else if c == "\"" {
+                    inString = false
+                    lastJSONIndex = i
+                }
+            } else {
+                switch c {
+                case "\"":
+                    inString = true
+                case "{", "[":
+                    stack.append(c)
+                    lastJSONIndex = i
+                case "}", "]":
+                    // Only a matching closer pops; a mismatched one leaves the
+                    // depth wrong so the final parse fails — the safe outcome
+                    // for hopelessly garbled JSON is a dropped tool call.
+                    let expected: Character = c == "}" ? "{" : "["
+                    if stack.last == expected { stack.removeLast() }
+                    lastJSONIndex = i
+                case "<":
+                    // Never valid JSON outside a string — a stray tag fragment
+                    // (`</arg`) or similar junk. Everything from here on goes.
+                    i = chars.count
+                case ",", ":", " ", "\n", "\r", "\t":
+                    break
+                default:
+                    lastJSONIndex = i
+                }
+            }
+            i += 1
+        }
+
+        // Must end with an unclosed opener, and must not cut mid-string.
+        guard !stack.isEmpty, !inString else { return nil }
+
+        var result = String(chars[start...min(lastJSONIndex, chars.count - 1)])
+        while let last = result.last, last == "," || last.isWhitespace {
+            result.removeLast()
+        }
+        for opener in stack.reversed() {
+            result.append(opener == "{" ? "}" : "]")
+        }
+        return result
     }
 }
 

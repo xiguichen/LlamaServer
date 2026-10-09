@@ -690,12 +690,11 @@ final class LlamaHTTPServer {
                     self.generationCount += 1
                 }
 
-                // Map the engine's finish reason onto the OpenAI vocabulary.
-                var streamReason: String
-                switch genResult.finishReason {
-                case "length", "context_full": streamReason = "length"
-                default:                       streamReason = "stop"
-                }
+                // The OpenAI finish reason is derived AFTER tool-call parsing
+                // below, from the engine result plus the parse outcome
+                // (FinishReasonPolicy in ResponsePolicy.swift).
+                var outputUnusable = false
+                var toolCallsFound = false
 
                 if toolsActive {
                     FileLogger.shared.debug("streaming #\(currentRequest): tools active, parsing tool calls")
@@ -715,14 +714,21 @@ final class LlamaHTTPServer {
                         cleanText = genText
                     }
                     let parsed = ToolCallParser.parse(cleanText)
-                    // If the incomplete tool call stripped everything, signal
-                    // truncation so pi retries instead of getting an empty response.
+                    // The incomplete tool call stripped everything, or the
+                    // parser couldn't salvage an envelope (unparseable JSON /
+                    // blank name): the model failed to produce a usable
+                    // response. FinishReasonPolicy reports this as an explicit
+                    // error unless a real token cutoff caused it.
                     if cleanText != genText && cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        streamReason = "length"
-                        FileLogger.shared.warn("streaming #\(currentRequest): tool call truncated at cutoff — sending length")
+                        outputUnusable = true
+                        FileLogger.shared.warn("streaming #\(currentRequest): tool call unrecoverable after cutoff")
+                    }
+                    if parsed.hasUnrecoveredEnvelope {
+                        outputUnusable = true
+                        FileLogger.shared.warn("streaming #\(currentRequest): envelope dropped (unparseable JSON or blank name)")
                     }
                     if !parsed.toolCalls.isEmpty {
-                        streamReason = "tool_calls"
+                        toolCallsFound = true
                         FileLogger.shared.info("streaming #\(currentRequest): found \(parsed.toolCalls.count) tool calls")
                         for call in parsed.toolCalls {
                             FileLogger.shared.verbose("streaming #\(currentRequest): tool_call name=\(call.function.name) args=\(call.function.arguments)")
@@ -744,8 +750,13 @@ final class LlamaHTTPServer {
                                   finishReason: nil)
                         FileLogger.shared.debug("streaming #\(currentRequest): sent tool_calls chunk")
                     } else if !parsed.cleanedContent.isEmpty {
-                        // No tool call after all — flush the buffered content.
+                        // Envelope fragments are stripped by the parser and
+                        // reported via hasUnrecoveredEnvelope (set above), so
+                        // what remains is fragment-free prose the model wrote
+                        // around the broken envelope — flush it; the finish
+                        // reason carries the failure via FinishReasonPolicy.
                         if !didStreamContentDuringToolGen {
+                            // No tool call after all — flush the buffered content.
                             FileLogger.shared.debug("streaming #\(currentRequest): no tool calls, flushing content")
                             sendChunk(delta: Delta(role: nil, content: parsed.cleanedContent),
                                       finishReason: nil)
@@ -756,6 +767,13 @@ final class LlamaHTTPServer {
                         FileLogger.shared.warn("streaming #\(currentRequest): no tool calls and no content")
                     }
                 }
+
+                // Derive the OpenAI finish reason from the engine result plus
+                // the tool-call outcome — one honest policy for all cases
+                // (length only for real max-token cutoffs).
+                let streamReason = FinishReasonPolicy.map(engineFinish: genResult.finishReason,
+                                                          hasToolCalls: toolCallsFound,
+                                                          outputUnusable: outputUnusable)
 
                 // Final chunk carries the finish reason.
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
@@ -777,6 +795,23 @@ final class LlamaHTTPServer {
                 }
             } catch {
                 FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
+                // A headroom failure carries an actionable message the client
+                // should see: deliver it as an OpenAI-style stream error event
+                // (with an empty choices array so naive clients that iterate
+                // choices don't choke) before the error finish chunk.
+                if let inferenceError = error as? LlamaInference.InferenceError,
+                   case .contextTooFull = inferenceError {
+                    let event: [String: Any] = [
+                        "error": ["message": error.localizedDescription,
+                                  "type": "invalid_request_error"],
+                        "choices": []
+                    ]
+                    if let data = try? JSONSerialization.data(withJSONObject: event),
+                       let str = String(data: data, encoding: .utf8) {
+                        connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                        FileLogger.shared.debug("streaming #\(currentRequest): context-too-full error event sent")
+                    }
+                }
                 sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
                 finishReasonSent = true
             }
@@ -865,6 +900,12 @@ final class LlamaHTTPServer {
         }
 
         if let failure = failure {
+            if let inferenceError = failure as? LlamaInference.InferenceError,
+               case .contextTooFull = inferenceError {
+                // The prompt leaves no room for a usable response — a client
+                // error carrying the actionable message, not a server fault.
+                return errorResponse(failure.localizedDescription, status: .badRequest)
+            }
             return errorResponse(failure.localizedDescription, status: .internalServerError)
         }
         guard let result = result else {
@@ -879,26 +920,21 @@ final class LlamaHTTPServer {
             FileLogger.shared.verbose("chat request #\(currentRequest): FULL RAW OUTPUT >>>\n\(result.text)\n<<<")
         }
 
-        var openAIReason: String
-        switch result.finishReason {
-        case "eog", "eog_immediate", "stopped":
-            openAIReason = "stop"
-        case "length", "context_full":
-            openAIReason = "length"
-        default:
-            openAIReason = "stop"
-        }
-
         // Parse any <tool_call> envelopes back into structured tool calls and
         // strip ANSI escapes from the human-visible content. When the model
         // requested a tool, OpenAI clients expect `tool_calls` on the message
         // and `finish_reason: "tool_calls"` (mirrors llama-server behavior).
         let parsed = ToolCallParser.parse(result.text)
+        // One honest policy for all paths: length only for real max-token
+        // cutoffs; dropped envelopes / context_full become an explicit error
+        // (see FinishReasonPolicy).
+        let openAIReason = FinishReasonPolicy.map(engineFinish: result.finishReason,
+                                                  hasToolCalls: !parsed.toolCalls.isEmpty,
+                                                  outputUnusable: parsed.hasUnrecoveredEnvelope)
         let assistantMessage: ChatMessage
         if parsed.toolCalls.isEmpty {
             assistantMessage = ChatMessage(role: "assistant", content: parsed.cleanedContent)
         } else {
-            openAIReason = "tool_calls"
             // OpenAI sends content: null alongside tool_calls; keep any
             // surrounding prose only if the model emitted some.
             let content = parsed.cleanedContent.isEmpty ? nil : parsed.cleanedContent
@@ -1092,17 +1128,21 @@ final class LlamaHTTPServer {
         }
 
         if let failure = failure {
+            if let inferenceError = failure as? LlamaInference.InferenceError,
+               case .contextTooFull = inferenceError {
+                // The prompt leaves no room for a usable response — a client
+                // error carrying the actionable message, not a server fault.
+                return errorResponse(failure.localizedDescription, status: .badRequest)
+            }
             return errorResponse(failure.localizedDescription, status: .internalServerError)
         }
         guard let result = result else {
             return errorResponse("Generation produced no result", status: .internalServerError)
         }
 
-        let reason: String
-        switch result.finishReason {
-        case "length", "context_full": reason = "length"
-        default:                       reason = "stop"
-        }
+        let reason = FinishReasonPolicy.map(engineFinish: result.finishReason,
+                                            hasToolCalls: false,
+                                            outputUnusable: false)
 
         let response = CompletionResponse(
             id: "cmpl-\(UUID().uuidString)",

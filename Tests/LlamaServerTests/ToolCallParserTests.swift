@@ -131,6 +131,52 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertTrue(result.toolCalls.count == 1, "should recover tool call even with ANSI in args")
     }
 
+    // MARK: - parse (name hardening / no envelope fragments)
+
+    func testParseWhitespaceOnlyNameYieldsNoToolCall() {
+        let text = #"Hello<tool_call>{"name":"   ","arguments":{}}</tool_call>"#
+        let result = ToolCallParser.parse(text)
+        XCTAssertTrue(result.toolCalls.isEmpty,
+                      "whitespace-only name must not become a tool call")
+        XCTAssertEqual(result.cleanedContent, "Hello")
+    }
+
+    func testParseEmptyNameYieldsNoToolCall() {
+        let text = #"Hello<tool_call>{"name":"","arguments":{}}</tool_call>"#
+        let result = ToolCallParser.parse(text)
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertEqual(result.cleanedContent, "Hello")
+    }
+
+    func testParseTrimsToolName() {
+        let text = #"<tool_call>{"name":"  fn  ","arguments":{}}</tool_call>"#
+        let result = ToolCallParser.parse(text)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls[0].function.name, "fn")
+    }
+
+    func testParseStripsEnvelopeFragmentsFromContent() {
+        let text = "Hello</arg>"
+        let result = ToolCallParser.parse(text)
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertFalse(result.cleanedContent.contains("</arg"),
+                       "envelope fragments must never reach the client as content")
+        XCTAssertTrue(result.hasUnrecoveredEnvelope,
+                      "an envelope the parser dropped must be reported so the server finishes with an explicit error")
+    }
+
+    func testParsePlainTextReportsNoUnrecoveredEnvelope() {
+        let result = ToolCallParser.parse("just text")
+        XCTAssertFalse(result.hasUnrecoveredEnvelope)
+    }
+
+    func testParseSuccessfulToolCallReportsNoUnrecoveredEnvelope() {
+        let text = #"Calling it now.<tool_call>{"name":"fn","arguments":{}}</tool_call>"#
+        let result = ToolCallParser.parse(text)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertFalse(result.hasUnrecoveredEnvelope)
+    }
+
     // MARK: - ReasoningStreamFilter
 
     func testReasoningFilterPassesThroughNormalText() {

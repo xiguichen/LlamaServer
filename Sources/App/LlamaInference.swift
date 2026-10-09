@@ -27,6 +27,9 @@ final class LlamaInference: @unchecked Sendable {
         case tokenize
         case decode
         case insufficientMemory(String)
+        /// The prompt leaves no room for a usable response (see
+        /// `ContextHeadroom`); carries an actionable message for the client.
+        case contextTooFull(String)
 
         var errorDescription: String? {
             switch self {
@@ -36,6 +39,7 @@ final class LlamaInference: @unchecked Sendable {
             case .tokenize:              return "Failed to tokenize input."
             case .decode:                return "llama_decode failed (context may be full)."
             case .insufficientMemory(let m): return m
+            case .contextTooFull(let m):    return m
             }
         }
     }
@@ -102,7 +106,7 @@ final class LlamaInference: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize requestedContext: Int = 65536, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
+    init(modelPath: String, contextSize requestedContext: Int = 131072, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
         self.useMtp = useMtp
         self.mtpHeads = mtpHeads
         // Backend init is idempotent across instances within a process.
@@ -200,8 +204,9 @@ final class LlamaInference: @unchecked Sendable {
 
         // Clamp the context size to (a) the model's trained window, (b) a hard
         // ceiling, and (c) what the KV cache can fit in the memory budget.
-        // Without this, a large value (e.g. 140000) allocates a multi-GB KV cache
-        // and the app is instantly OOM-killed.
+        // Without this, a large value allocates a multi-GB KV cache and the app
+        // is instantly OOM-killed; (c) is the real per-device guard — it logs a
+        // reduction (or refuses gracefully) based on the live memory budget.
         let nLayer    = Int(llama_model_n_layer(loadedModel))
         let nHead     = max(1, Int(llama_model_n_head(loadedModel)))
         let nHeadKV   = max(1, Int(llama_model_n_head_kv(loadedModel)))
@@ -213,7 +218,7 @@ final class LlamaInference: @unchecked Sendable {
         // K + V, f16 (2 bytes), across all layers, per token.
         let kvBytesPerToken = max(1, 2 * nLayer * (headDim * nHeadKV) * 2)
 
-        var effective = min(max(256, requestedContext), 65536)
+        var effective = min(max(256, requestedContext), 131072)
         if nCtxTrain > 0 { effective = min(effective, nCtxTrain) }
 
         let kvBudget = budget - modelSize - computeReserve
@@ -849,6 +854,15 @@ final class LlamaInference: @unchecked Sendable {
 
         let promptTokens = try tokenize(prompt, addBOS: true)
         guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
+
+        // Fail fast when the prompt leaves no room for a usable response:
+        // otherwise the engine emits a token or two, hits the context wall,
+        // and the client sees a bogus finish_reason "length" truncation.
+        if let headroomMessage = ContextHeadroom.check(promptTokens: promptTokens.count,
+                                                       contextSize: contextSize) {
+            FileLogger.shared.warn("generate: refusing prompt — \(headroomMessage)")
+            throw InferenceError.contextTooFull(headroomMessage)
+        }
 
         // --- KV cache prefix reuse --------------------------------------------
         // Reuse the largest shared *token* prefix between this prompt and what is
