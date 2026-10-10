@@ -62,6 +62,51 @@ final class KVCacheSpecTests: XCTestCase {
         XCTAssertEqual(spec, 92_160)
     }
 
+    // MARK: - kvLayerCount (hybrid models)
+
+    func testKVLayerCountHybridFullAttentionInterval() {
+        // Qwen3.5 hybrid (observed in device log): n_layer 32,
+        // `qwen35.full_attention_interval = 4` — only every 4th layer is
+        // full attention and keeps a KV cache; the rest are recurrent
+        // (Gated Delta Net) layers with a fixed-size state. llama.cpp's
+        // own log showed the KV cache at "8 layers" with the others
+        // "filtered", and allocated exactly 738 MiB for 83,968 tokens —
+        // i.e. 9,216 B/token, a quarter of the all-layers estimate.
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "4"), 8)
+        // Uneven division: attention layers are the ones where
+        // (index + 1) % interval == 0, so 30 layers / interval 4 → 7.
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 30, fullAttentionInterval: "4"), 7)
+        // Interval larger than the model: at least one KV layer must remain.
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 3, fullAttentionInterval: "4"), 1)
+    }
+
+    func testKVLayerCountDefaultsToAllLayersForDenseModels() {
+        // Every dense (non-hybrid) model: key absent, unparsable, or <= 1
+        // → all layers keep a KV cache (the behavior every previous
+        // release relied on).
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: nil), 32)
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: ""), 32)
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "abc"), 32)
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "0"), 32)
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "1"), 32)
+        XCTAssertEqual(KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "-4"), 32)
+    }
+
+    func testHybridKVCostMatchesLlamaActualAllocation() {
+        // End-to-end pin of the device-log bug: with the corrected layer
+        // count the q4_0 estimate must equal llama.cpp's real allocation
+        // (738 MiB / 83,968 tokens = 9,216 B/token) instead of the
+        // 36,864 B/token all-layers over-count that clamped the context
+        // to 83,968 despite ~2.89 GB of KV budget.
+        let kvLayers = KVCacheSpec.kvLayerCount(nLayer: 32, fullAttentionInterval: "4")
+        let perToken = KVCacheSpec.kvBytesPerToken(
+            nLayer: kvLayers, headDimK: 256, headDimV: 256, nHeadKV: 4, type: .q4_0)
+        XCTAssertEqual(perToken, 9_216, "matches llama's 738 MiB / 83,968 tokens")
+        // 131,072 tokens then need 1.13 GB — inside the observed
+        // 3,100,752,896 B kvBudget, so no clamp should fire.
+        XCTAssertLessThanOrEqual(131_072 * perToken, 3_100_752_896)
+    }
+
     // MARK: - resolveHeadDim
 
     func testResolveHeadDimPrefersGGUFKeyLength() {

@@ -66,6 +66,34 @@ enum KVCacheSpec {
         }
     }
 
+    // MARK: Hybrid-model layer counts
+
+    /// The number of layers that actually keep a KV cache.
+    ///
+    /// Dense models: every layer is full attention → `nLayer`.
+    ///
+    /// Hybrid models (e.g. Qwen3.5 SSM+attention): the GGUF stores
+    /// `<arch>.full_attention_interval` — only every `interval`-th layer
+    /// (index+1 divisible by interval) is full attention; the recurrent
+    /// layers hold a fixed-size state that does not grow with context.
+    /// Counting all `nLayer` over-estimates KV cost by `interval`-x and
+    /// clamps the context unnecessarily: observed on a 32-layer /
+    /// interval-4 model, 36,864 B/token estimated vs llama.cpp's actual
+    /// 9,216 B/token (8 KV layers — 738 MiB / 83,968 tokens in its log),
+    /// which cut a viable 131,072 context down to 83,968.
+    ///
+    /// `fullAttentionInterval` is the raw GGUF value (as returned by
+    /// `ggufMetaValue`); absent, unparsable, or <= 1 means dense.
+    static func kvLayerCount(nLayer: Int, fullAttentionInterval: String?) -> Int {
+        guard let raw = fullAttentionInterval?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let interval = Int(raw), interval > 1 else {
+            return max(0, nLayer)
+        }
+        // Attention layers are those with (index + 1) % interval == 0, so
+        // the count is floor(nLayer / interval); keep at least one KV layer.
+        return max(1, min(nLayer, nLayer / interval))
+    }
+
     // MARK: Head dimension resolution
 
     /// Prefer the GGUF's explicit head length (`…attention.key_length` /

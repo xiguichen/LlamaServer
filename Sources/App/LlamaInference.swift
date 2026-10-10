@@ -253,6 +253,16 @@ final class LlamaInference: @unchecked Sendable {
             ggufValue: Self.ggufMetaValue(loadedModel, suffix: ".attention.value_length"),
             fallback: headDimDerived)
 
+        // Hybrid models (SSM + attention, e.g. Qwen3.5) only keep a KV
+        // cache on every full_attention_interval-th layer; the recurrent
+        // layers' state is fixed-size. Counting all layers over-estimates
+        // KV cost by the interval factor and clamps away contexts the
+        // device can actually hold (observed: 83,968 instead of 131,072).
+        let fullAttnInterval = Self.ggufMetaValue(
+            loadedModel, suffix: ".full_attention_interval")
+        let kvLayers = KVCacheSpec.kvLayerCount(
+            nLayer: nLayer, fullAttentionInterval: fullAttnInterval)
+
         // KV element type: honor the selection only when the model's head dims
         // pass llama.cpp's quantization check (head_dim % 32 == 0), else fall
         // back to f16 so context creation cannot fail on a type rule.
@@ -266,7 +276,7 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         let kvBytesPerToken = max(1, KVCacheSpec.kvBytesPerToken(
-            nLayer: nLayer, headDimK: headDimK, headDimV: headDimV,
+            nLayer: kvLayers, headDimK: headDimK, headDimV: headDimV,
             nHeadKV: nHeadKV, type: resolvedKV))
 
         // Clamp the context size to (a) the model's trained window — lifted
@@ -280,7 +290,7 @@ final class LlamaInference: @unchecked Sendable {
             let yarnDesc = requestedYarnLongContext
                 ? "on (x\(KVCacheSpec.yarnFactor), orig \(KVCacheSpec.yarnOrigCtx))" : "off"
             FileLogger.shared.info(
-                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
+                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), kv layers \(kvLayers)/\(nLayer), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
         }
 
         let kvBudget = budget - modelSize - computeReserve
