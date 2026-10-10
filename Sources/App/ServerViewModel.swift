@@ -26,7 +26,7 @@ final class ServerViewModel: ObservableObject {
     // Server state
     @Published private(set) var status: Status = .stopped
     @Published var port: String = "8443"
-    @Published var contextSize: String = "131072"
+    @Published var contextSize: String = "262144"
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
@@ -56,7 +56,7 @@ final class ServerViewModel: ObservableObject {
     /// `f16` = full precision; `q8_0`/`q4_0` quantize the cache for far less
     /// memory per token (q4_0 ≈ 3.6x smaller, tiny accuracy cost). Models
     /// whose head_dim isn't divisible by 32 fall back to f16 (logged at start).
-    @Published var kvCacheType: String = KVCacheType.f16.rawValue
+    @Published var kvCacheType: String = KVCacheType.q8_0.rawValue
 
     /// Lifts the model's trained-window clamp (n_ctx_train) via YaRN rope
     /// scaling ×4 from a 32K original window — Qwen's validated 32K→131K
