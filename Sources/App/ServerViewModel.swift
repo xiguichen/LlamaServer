@@ -52,6 +52,17 @@ final class ServerViewModel: ObservableObject {
     /// Whether to enable Multi-Token Prediction (MTP) on supported models.
     @Published var useMtp: Bool = false
 
+    /// KV-cache element type (raw `KVCacheType` value for picker bindings):
+    /// `f16` = full precision; `q8_0`/`q4_0` quantize the cache for far less
+    /// memory per token (q4_0 ≈ 3.6x smaller, tiny accuracy cost). Models
+    /// whose head_dim isn't divisible by 32 fall back to f16 (logged at start).
+    @Published var kvCacheType: String = KVCacheType.f16.rawValue
+
+    /// Lifts the model's trained-window clamp (n_ctx_train) via YaRN rope
+    /// scaling ×4 from a 32K original window — Qwen's validated 32K→131K
+    /// recipe. Leave off for models already trained at large windows.
+    @Published var longContextYarn: Bool = false
+
     /// Re-published so the UI updates on download progress.
     let downloader = ModelDownloader()
 
@@ -208,8 +219,10 @@ final class ServerViewModel: ObservableObject {
             return
         }
         let ctxSize = Int(contextSize) ?? 4096
+        let kvCache = KVCacheType(rawValue: self.kvCacheType) ?? .f16
+        let yarnLongContext = self.longContextYarn
         let modelPath = model.url.path
-        let modelKey = "\(modelPath)|\(ctxSize)"
+        let modelKey = "\(modelPath)|\(ctxSize)|\(kvCache.rawValue)|\(yarnLongContext)"
         let useMtp = self.useMtp
 
         status = .loadingModel
@@ -272,7 +285,7 @@ final class ServerViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
-                let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize, useMtp: useMtp)
+                let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize, useMtp: useMtp, kvCacheType: kvCache, yarnLongContext: yarnLongContext)
                 let server = LlamaHTTPServer(inference: engine)
                 try server.start(port: portValue)
 
@@ -285,6 +298,9 @@ final class ServerViewModel: ObservableObject {
                     UIApplication.shared.isIdleTimerDisabled = true
                     if effectiveCtx < ctxSize {
                         self.log("Context reduced to \(effectiveCtx) tokens to fit device memory.")
+                    }
+                    if kvCache != .f16 || yarnLongContext {
+                        self.log("KV cache \(kvCache.rawValue)\(yarnLongContext ? ", YaRN long-context on" : "").")
                     }
                     self.log("Model loaded (context \(effectiveCtx)). HTTP server listening on port \(portValue).")
                     if let url = self.serverURL { self.log("Reachable at \(url)") }

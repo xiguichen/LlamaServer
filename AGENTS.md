@@ -35,6 +35,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 | `Sources/App/OpenAIModels.swift` | Codable request/response types for OpenAI API |
 | `Sources/App/ToolCallParser.swift` | Parse `<tool_call>{…}</tool_call>` envelopes and `<think>…</think>` reasoning blocks from model output |
 | `Sources/App/ServerViewModel.swift` | @MainActor glue: model library, start/stop engine, UI state |
+| `Sources/App/KVCacheSpec.swift` | Pure KV-cache decisions: bytes/token for f16/q8_0/q4_0, head-dim resolution, quant capability, context-window cap, YaRN recipe |
 | `Sources/App/FileLogger.swift` | Crash-survivable on-disk log; sync-flushes every line |
 
 ## Important gotchas
@@ -48,6 +49,9 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **`<think>` reasoning** blocks are stripped from streamed content by `ReasoningStreamFilter` (character-by-character state machine, NSRegularExpression for final parse).
 - **`resolvedMaxTokens`** precedence: `n_predict` > `max_completion_tokens` > `max_tokens` for chat, `n_predict` > `max_tokens` for `/v1/completions`.
 - **`enable_thinking`** can be top-level or nested under `chat_template_kwargs.enable_thinking`. Default is `false` (opt-in per request).
+- **Head dims come from GGUF `attention.key_length`/`value_length`** (suffix-matched via `LlamaInference.ggufMetaValue`), falling back to `n_embd/n_head`. Qwen3-4B stores 128 while derived is 80 — deriving alone under-counts f16 KV cost by 1.6× and the clamp approved unbackable contexts.
+- **Quantized KV cache** (`kvCacheType` q8_0/q4_0): only when `head_dim % 32 == 0` (llama.cpp b9553 validates per-head); quantized `type_v` requires flash attention, so `flash_attn_type` is forced `ENABLED` (AUTO can resolve off → constructor throw → NULL). Ineligible models fall back to f16 with a warn log (`KVCacheSpec.resolveCacheType`).
+- **YaRN long-context** (`longContextYarn`): sets `rope_scaling_type=YARN`, `rope_freq_scale=0.25` (factor 4), `yarn_orig_ctx=32768` on every context (target/MTP/recreate) and lifts the `n_ctx_train` clamp (Qwen3-4B: 40,960 → up to 131,072, still memory-clamped).
 
 ## Tests
 

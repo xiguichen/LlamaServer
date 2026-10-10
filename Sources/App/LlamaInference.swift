@@ -98,6 +98,16 @@ final class LlamaInference: @unchecked Sendable {
     /// after clamping to the device's memory budget and the model's train window).
     let contextSize: Int
 
+    /// The KV-cache element type actually in use. The user's selection is
+    /// honored only when the model's head dims admit quantization
+    /// (`KVCacheSpec.supports`); otherwise this is `.f16` — see init.
+    private let kvCacheType: KVCacheType
+
+    /// Whether YaRN long-context scaling is active. When true the n_ctx_train
+    /// clamp is lifted and rope params are applied to EVERY context this
+    /// instance creates (target, MTP draft, recreate).
+    private let yarnLongContext: Bool
+
     /// Logical max tokens per llama_decode call. A single decode must NOT exceed
     /// this or llama.cpp aborts (ggml_abort) — the prompt is decoded in chunks.
     let batchSize: Int
@@ -106,7 +116,23 @@ final class LlamaInference: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    init(modelPath: String, contextSize requestedContext: Int = 131072, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0) throws {
+    /// First GGUF metadata value whose key ends with `suffix` (e.g.
+    /// ".attention.key_length" → "qwen3.attention.key_length"). Keys are
+    /// arch-prefixed, so a suffix match avoids hardcoding arch names.
+    private static func ggufMetaValue(_ model: OpaquePointer, suffix: String) -> String? {
+        let count = Int(llama_model_meta_count(model))
+        for i in 0..<count {
+            var keyBuf = [CChar](repeating: 0, count: 256)
+            guard llama_model_meta_key_by_index(model, Int32(i), &keyBuf, keyBuf.count) > 0 else { continue }
+            guard String(cString: keyBuf).hasSuffix(suffix) else { continue }
+            var valBuf = [CChar](repeating: 0, count: 32)
+            guard llama_model_meta_val_str_by_index(model, Int32(i), &valBuf, valBuf.count) > 0 else { return nil }
+            return String(cString: valBuf)
+        }
+        return nil
+    }
+
+    init(modelPath: String, contextSize requestedContext: Int = 131072, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0, kvCacheType requestedKVCacheType: KVCacheType = .f16, yarnLongContext requestedYarnLongContext: Bool = false) throws {
         self.useMtp = useMtp
         self.mtpHeads = mtpHeads
         // Backend init is idempotent across instances within a process.
@@ -214,12 +240,48 @@ final class LlamaInference: @unchecked Sendable {
         let nCtxTrain = Int(llama_model_n_ctx_train(loadedModel))
         let modelSize = Int(llama_model_size(loadedModel))
 
-        let headDim = max(1, nEmbd / nHead)
-        // K + V, f16 (2 bytes), across all layers, per token.
-        let kvBytesPerToken = max(1, 2 * nLayer * (headDim * nHeadKV) * 2)
+        // Head dims come from the GGUF's explicit attention.key_length /
+        // attention.value_length when present (Qwen3-4B stores 128 while
+        // n_embd/n_head is 80), falling back to the derived n_embd/n_head.
+        // Deriving alone under-estimates f16 KV cost by 1.6x for such models,
+        // letting the clamp approve contexts the device cannot back.
+        let headDimDerived = max(1, nEmbd / nHead)
+        let headDimK = KVCacheSpec.resolveHeadDim(
+            ggufValue: Self.ggufMetaValue(loadedModel, suffix: ".attention.key_length"),
+            fallback: headDimDerived)
+        let headDimV = KVCacheSpec.resolveHeadDim(
+            ggufValue: Self.ggufMetaValue(loadedModel, suffix: ".attention.value_length"),
+            fallback: headDimDerived)
 
-        var effective = min(max(256, requestedContext), 131072)
-        if nCtxTrain > 0 { effective = min(effective, nCtxTrain) }
+        // KV element type: honor the selection only when the model's head dims
+        // pass llama.cpp's quantization check (head_dim % 32 == 0), else fall
+        // back to f16 so context creation cannot fail on a type rule.
+        let (resolvedKV, kvFellBack) = KVCacheSpec.resolveCacheType(
+            selected: requestedKVCacheType, headDimK: headDimK, headDimV: headDimV)
+        self.kvCacheType = resolvedKV
+        self.yarnLongContext = requestedYarnLongContext
+        if kvFellBack {
+            FileLogger.shared.warn(
+                "KV cache type \(requestedKVCacheType.rawValue) unsupported (head_dim K=\(headDimK) V=\(headDimV), need %32==0) — using f16")
+        }
+
+        let kvBytesPerToken = max(1, KVCacheSpec.kvBytesPerToken(
+            nLayer: nLayer, headDimK: headDimK, headDimV: headDimV,
+            nHeadKV: nHeadKV, type: resolvedKV))
+
+        // Clamp the context size to (a) the model's trained window — lifted
+        // when YaRN long-context is on — (b) the 256..131072 hard bounds, and
+        // later (c) what the KV cache can fit in the memory budget.
+        var effective = KVCacheSpec.contextCap(
+            requested: requestedContext, nCtxTrain: nCtxTrain,
+            longContext: requestedYarnLongContext)
+
+        if resolvedKV != .f16 || requestedYarnLongContext {
+            let yarnDesc = requestedYarnLongContext
+                ? "on (x\(KVCacheSpec.yarnFactor), orig \(KVCacheSpec.yarnOrigCtx))" : "off"
+            FileLogger.shared.info(
+                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
+        }
 
         let kvBudget = budget - modelSize - computeReserve
         let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken), countStyle: .memory)
@@ -314,6 +376,8 @@ final class LlamaInference: @unchecked Sendable {
             ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
 
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
+
         let nSwa = Int(llama_model_n_swa(loadedModel))
         FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(wantMtp)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
@@ -349,6 +413,43 @@ final class LlamaInference: @unchecked Sendable {
         }
     }
 
+    /// Applies the KV-cache element type and YaRN rope settings to a context
+    /// params block. Called for EVERY context this instance creates (target,
+    /// MTP draft, recreate) so rope/KV behavior stays identical across them —
+    /// a draft context with different rope scaling would misalign positions.
+    ///
+    /// Static because the target context's params are built before
+    /// `self.context` exists (definite initialization would reject an
+    /// instance-method call that early).
+    ///
+    /// Quantized caches force flash attention ENABLED (not AUTO): llama.cpp
+    /// rejects a quantized V cache without flash attention, and AUTO can
+    /// resolve off, which would throw during context construction.
+    private static func applyCacheAndRopeParams(_ p: inout llama_context_params,
+                                                kvCacheType: KVCacheType,
+                                                yarnLongContext: Bool) {
+        switch kvCacheType {
+        case .f16:
+            break // llama.cpp defaults type_k/type_v to F16
+        case .q8_0:
+            p.type_k = GGML_TYPE_Q8_0
+            p.type_v = GGML_TYPE_Q8_0
+            p.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
+        case .q4_0:
+            p.type_k = GGML_TYPE_Q4_0
+            p.type_v = GGML_TYPE_Q4_0
+            p.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
+        }
+        if yarnLongContext {
+            // Qwen's validated recipe: --rope-scaling yarn --rope-scale 4
+            // --yarn-orig-ctx 32768. llama.cpp derives factor from
+            // 1/rope_freq_scale, so freq scale is 1/4 (KVCacheSpec).
+            p.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN
+            p.rope_freq_scale = KVCacheSpec.yarnRopeFreqScale
+            p.yarn_orig_ctx = UInt32(KVCacheSpec.yarnOrigCtx)
+        }
+    }
+
     /// Enables the target context's post-norm next-token hidden state and creates
     /// the linked MTP draft context (ctx_dft). Returns true on success. On any
     /// failure the draft context is left nil and the caller falls back to plain
@@ -369,6 +470,7 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         ctxParams.ctx_other = target
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
 
         guard let dft = llama_init_from_model(model, ctxParams) else {
             FileLogger.shared.warn("MTP: draft context creation returned NULL — falling back to plain decoding")
@@ -412,6 +514,7 @@ final class LlamaInference: @unchecked Sendable {
         if useMtp {
             ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             // `context` still holds the freed pointer; leave `contextValid` false

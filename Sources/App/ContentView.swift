@@ -137,10 +137,19 @@ struct ContentView: View {
             Toggle("Multi-Token Prediction (MTP)", isOn: $viewModel.useMtp)
                 .disabled(viewModel.isRunning || viewModel.isBusy)
                 .font(.caption)
+            Picker("KV cache", selection: $viewModel.kvCacheType) {
+                ForEach(KVCacheType.allCases, id: \.rawValue) { type in
+                    Text(type.rawValue).tag(type.rawValue)
+                }
+            }
+            .disabled(viewModel.isRunning || viewModel.isBusy)
+            Toggle("Long context (YaRN ×4)", isOn: $viewModel.longContextYarn)
+                .disabled(viewModel.isRunning || viewModel.isBusy)
+                .font(.caption)
         } header: {
             Text("Server")
         } footer: {
-            Text("Context is automatically capped to fit this device's memory (and the model's trained window). Large values like 140000 aren't possible on-device.")
+            Text("Context is capped to fit this device's memory and the model's trained window. q8_0/q4_0 shrink the KV cache (far more tokens per byte — q4_0 ≈ 3.6x — for a tiny quality cost). \"Long context\" lifts the trained-window cap with the model's validated YaRN scaling (e.g. Qwen3: 32K→131K); leave it off otherwise.")
         }
     }
 
