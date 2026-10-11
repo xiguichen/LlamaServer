@@ -23,12 +23,32 @@ struct ChatMessage: Codable {
     let content: MessageContent?
     let tool_calls: [ToolCall]?
     let tool_call_id: String?
+    /// OpenAI marks `refusal` required on assistant messages. We never refuse,
+    /// so we encode it as explicit null — present, but null — to satisfy strict
+    /// clients without fabricating a value. `nil` on decode (we ignore it).
+    let refusal: String?
+
+    enum CodingKeys: String, CodingKey {
+        case role, content, tool_calls, tool_call_id, refusal
+    }
 
     init(role: String, content: String?, tool_calls: [ToolCall]? = nil, tool_call_id: String? = nil) {
         self.role = role
         self.content = content.map { .text($0) }
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
+        self.refusal = nil
+    }
+
+    // Encode `refusal` as null when absent (Swift would otherwise omit a nil
+    // optional); decode ignores it entirely so inbound requests stay lenient.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(role, forKey: .role)
+        try c.encodeIfPresent(content, forKey: .content)
+        try c.encodeIfPresent(tool_calls, forKey: .tool_calls)
+        try c.encodeIfPresent(tool_call_id, forKey: .tool_call_id)
+        try c.encode(refusal, forKey: .refusal)
     }
 }
 
@@ -122,6 +142,29 @@ struct ChatCompletionRequest: Codable {
     }
 }
 
+/// Pure request-validation rules for `/v1/chat/completions`, kept out of the
+/// HTTP handler so they can be unit-tested without a live model.
+///
+/// OpenAI treats `model` as required: a request that omits it is a client
+/// error (400), not something to complete against a default. LlamaServer
+/// previously only checked `messages`, so a missing `model` fell through to a
+/// normal 200 completion — a spec deviation caught by llm-comply's
+/// `chat-error-handling` test. This predicate is the single source of truth
+/// the handler consults before generating.
+enum ChatRequestSpec {
+    /// Returns a human-readable reason the request must be rejected with a 400,
+    /// or nil when it is acceptable. Order matters only for the message shown.
+    static func validationError(model: String?, messageCount: Int) -> String? {
+        if model?.isEmpty ?? true {
+            return "`model` must not be empty"
+        }
+        if messageCount == 0 {
+            return "`messages` must not be empty"
+        }
+        return nil
+    }
+}
+
 /// Subset of the `chat_template_kwargs` object some clients send; we only read
 /// the Qwen3 thinking toggle.
 struct ChatTemplateKwargs: Codable {
@@ -207,6 +250,29 @@ struct ChatCompletionChoice: Codable {
     let index: Int
     let message: ChatMessage
     let finish_reason: String
+    /// OpenAI marks `logprobs` required on each choice. The server computes no
+    /// token log-probabilities, so we encode it as explicit null — present, but
+    /// null — to satisfy strict clients (llm-comply's pinned spec requires it).
+    let logprobs: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index, message, finish_reason, logprobs
+    }
+
+    init(index: Int, message: ChatMessage, finish_reason: String) {
+        self.index = index
+        self.message = message
+        self.finish_reason = finish_reason
+        self.logprobs = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(index, forKey: .index)
+        try c.encode(message, forKey: .message)
+        try c.encode(finish_reason, forKey: .finish_reason)
+        try c.encode(logprobs, forKey: .logprobs)
+    }
 }
 
 struct Usage: Codable {

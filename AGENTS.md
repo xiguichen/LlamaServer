@@ -32,7 +32,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 |------|------|
 | `Sources/App/LlamaInference.swift` | C API wrapper: load model, tokenize, decode, sample (MTP-aware) |
 | `Sources/App/LlamaHTTPServer.swift` | Telegraph server, routes, streaming handler, tool-call parsing, recreate logic |
-| `Sources/App/OpenAIModels.swift` | Codable request/response types for OpenAI API |
+| `Sources/App/OpenAIModels.swift` | Codable request/response types for OpenAI API + `ChatRequestSpec` (pure 400-on-missing-model validation) |
 | `Sources/App/ToolCallParser.swift` | Parse `<tool_call>{…}</tool_call>` envelopes and `<think>…</think>` reasoning blocks from model output |
 | `Sources/App/ServerViewModel.swift` | @MainActor glue: model library, start/stop engine, UI state |
 | `Sources/App/KVCacheSpec.swift` | Pure KV-cache decisions: bytes/token for f16/q8_0/q4_0, head-dim resolution, quant capability, context-window cap, YaRN recipe |
@@ -51,6 +51,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **`<think>` reasoning** blocks are stripped from streamed content by `ReasoningStreamFilter` (character-by-character state machine, NSRegularExpression for final parse).
 - **`resolvedMaxTokens`** precedence: `n_predict` > `max_completion_tokens` > `max_tokens` for chat, `n_predict` > `max_tokens` for `/v1/completions`.
 - **`enable_thinking`** can be top-level or nested under `chat_template_kwargs.enable_thinking`. Default is `false` (opt-in per request).
+- **OpenAI-spec field presence**: llm-comply's pinned spec marks `logprobs` (per choice) and `refusal` (per message) required, and `model` required on input. The server encodes `logprobs`/`refusal` as **explicit null** (present, never fabricated — see the `encode(to:)` overrides in `OpenAIModels.swift`; Swift would omit a nil optional) and rejects a missing/empty `model` with a 400 via `ChatRequestSpec`. Do not remove these — the on-device `llm-compliance-test` skill (running `llm-comply openai-chat` against a deployed build) gates on them; regression shows as `chat-error-handling` failing (200 instead of 400) or content tests failing on missing fields. The streaming path (`StreamingChoice`/`Delta`) needs no such fields and passes as-is.
 - **Head dims come from GGUF `attention.key_length`/`value_length`** (suffix-matched via `LlamaInference.ggufMetaValue`), falling back to `n_embd/n_head`. Qwen3-4B stores 128 while derived is 80 — deriving alone under-counts f16 KV cost by 1.6× and the clamp approved unbackable contexts.
 - **Hybrid models keep KV only on full-attention layers** (`KVCacheSpec.kvLayerCount`): the GGUF `<arch>.full_attention_interval` (e.g. Qwen3.5 SSM+attention, interval 4 → 8 of 32 layers) selects which layers cache K/V; recurrent layers have fixed-size state. Counting all layers over-estimates KV cost interval× (observed 36,864 vs actual 9,216 B/token → a viable 131,072 context clamped to 83,968).
 - **Quantized KV cache** (`kvCacheType` q8_0/q4_0): only when `head_dim % 32 == 0` (llama.cpp b9553 validates per-head); quantized `type_v` requires flash attention, so `flash_attn_type` is forced `ENABLED` (AUTO can resolve off → constructor throw → NULL). Ineligible models fall back to f16 with a warn log (`KVCacheSpec.resolveCacheType`).

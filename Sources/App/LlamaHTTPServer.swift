@@ -862,8 +862,13 @@ final class LlamaHTTPServer {
             FileLogger.shared.verbose("chat response: FAILED RAW BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
             return errorResponse("Invalid request body", status: .badRequest)
         }
-        guard !body.messages.isEmpty else {
-            return errorResponse("`messages` must not be empty", status: .badRequest)
+        // OpenAI requires `model`; reject a request that omits it (or leaves
+        // messages empty) with a 400 instead of silently completing — see
+        // ChatRequestSpec for the testable rule. Caught by llm-comply's
+        // `chat-error-handling` test.
+        if let rejection = ChatRequestSpec.validationError(model: body.model,
+                                                           messageCount: body.messages.count) {
+            return errorResponse(rejection, status: .badRequest)
         }
 
         let currentRequest = nextRequestNumber()
