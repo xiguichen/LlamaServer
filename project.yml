@@ -113,6 +113,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/StartupTimer.swift
         createIntermediateGroups: true
+      - path: Sources/App/EngineConfigSpec.swift
+        createIntermediateGroups: true
     settings:
       base:
         SWIFT_VERSION: "5.0"

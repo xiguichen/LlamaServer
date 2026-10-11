@@ -222,8 +222,13 @@ final class ServerViewModel: ObservableObject {
         let kvCache = KVCacheType(rawValue: self.kvCacheType) ?? .f16
         let yarnLongContext = self.longContextYarn
         let modelPath = model.url.path
-        let modelKey = "\(modelPath)|\(ctxSize)|\(kvCache.rawValue)|\(yarnLongContext)"
         let useMtp = self.useMtp
+        // Cache identity must include EVERY setting baked into the engine at
+        // construction — omitting one (as `useMtp` was) makes that toggle
+        // silently ignored on restart. See EngineConfigSpec.
+        let modelKey = EngineConfigSpec.cacheKey(modelPath: modelPath, contextSize: ctxSize,
+                                                 kvCacheType: kvCache.rawValue,
+                                                 yarnLongContext: yarnLongContext, useMtp: useMtp)
 
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
