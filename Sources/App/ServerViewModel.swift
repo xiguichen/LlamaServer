@@ -285,9 +285,25 @@ final class ServerViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
+                let engineStart = Date()
                 let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize, useMtp: useMtp, kvCacheType: kvCache, yarnLongContext: yarnLongContext)
+                let engineSeconds = Date().timeIntervalSince(engineStart)
                 let server = LlamaHTTPServer(inference: engine)
+                let serverStart = Date()
                 try server.start(port: portValue)
+                let serverSeconds = Date().timeIntervalSince(serverStart)
+
+                // Load-gap instrumentation (#6): the tap-to-listening window a
+                // client actually experiences, split into engine init (model
+                // load + context, broken down further by LlamaInference's
+                // "load phases" line) and HTTP server start. Durable record via
+                // FileLogger; also surfaced on-device so the gap is readable
+                // without pulling the log.
+                var gap = StartupTimer()
+                gap.record("engine init", seconds: engineSeconds)
+                gap.record("server start", seconds: serverSeconds)
+                let gapLine = "Startup gap: \(gap.summary())"
+                FileLogger.shared.info(gapLine)
 
                 let effectiveCtx = engine.contextSize
                 await MainActor.run {
@@ -296,6 +312,7 @@ final class ServerViewModel: ObservableObject {
                     self.loadedModelKey = modelKey
                     self.status = .running
                     UIApplication.shared.isIdleTimerDisabled = true
+                    self.log(gapLine)
                     if effectiveCtx < ctxSize {
                         self.log("Context reduced to \(effectiveCtx) tokens to fit device memory.")
                     }

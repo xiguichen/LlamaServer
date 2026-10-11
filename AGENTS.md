@@ -39,6 +39,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 | `Sources/App/RecreateTracker.swift` | Pure bookkeeping: when the periodic context recreate is due, and the off-response-path placement decision |
 | `Sources/App/ReuseSurvival.swift` | Pure predicate: the prompt-prefix reuse snapshot survives a `recreateContext()` (dense and hybrid) |
 | `Sources/App/FileLogger.swift` | Crash-survivable on-disk log; error/warn fsync'd sync, info+ buffered |
+| `Sources/App/StartupTimer.swift` | Pure startup-phase accumulator: records named phases + durations, formats the load-gap breakdown line (`load phases:` / `Startup gap:`) |
 
 ## Important gotchas
 

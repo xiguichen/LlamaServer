@@ -215,10 +215,12 @@ final class LlamaInference: @unchecked Sendable {
         // never "without any log", and it's readable on-device (no Mac needed).
         FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
 
+        let modelLoadStart = Date()
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
             FileLogger.shared.error("model load returned NULL for '\(self.modelName)'")
             throw InferenceError.modelLoad(modelPath)
         }
+        let modelLoadSeconds = Date().timeIntervalSince(modelLoadStart)
         FileLogger.shared.info("model loaded OK: '\(self.modelName)'")
         self.model = loadedModel
 
@@ -393,6 +395,7 @@ final class LlamaInference: @unchecked Sendable {
         // ggml_metal_buffer_is_shared. A tiny decode waits that out (kernels are
         // size-independent pipeline objects, so what warms here is what the large
         // context needs). Best-effort: failure just means we skip the warmup.
+        let ctxCreateStart = Date()
         if batchSize >= KVCacheSpec.prewarmUbatchContextSize {
             Self.prewarmMetal(model: loadedModel, ctxParams: ctxParams)
         }
@@ -409,6 +412,7 @@ final class LlamaInference: @unchecked Sendable {
                 "Failed to create context: need ~\(ctxMem) KV + ~\(compMem) compute, only \(avail) available. Close other apps or reduce context size.")
         }
         self.context = ctx
+        let ctxCreateSeconds = Date().timeIntervalSince(ctxCreateStart)
         // One-time ground-truth diagnostic for the persistent `seq_rm` failure.
         // swa_full proved ineffective (swa_window 0), so log the cache traits that
         // actually decide whether a partial suffix removal is supported.
@@ -426,10 +430,23 @@ final class LlamaInference: @unchecked Sendable {
         // propose the next token, which the target then verifies. Best-effort: if
         // the draft context can't be created we log and fall back to plain decoding
         // (mtpEnabled stays false) — never a hard failure.
+        var mtpSetupSeconds: TimeInterval = 0
         if wantMtp {
+            let mtpSetupStart = Date()
             self.mtpEnabled = setupDraftContext(target: ctx)
+            mtpSetupSeconds = Date().timeIntervalSince(mtpSetupStart)
             FileLogger.shared.info("MTP \(self.mtpEnabled ? "enabled" : "unavailable") (two-context speculative, n_embd \(nEmbd), output slots \(mtpOutputCount), max draft \(mtpMaxDraft))")
         }
+
+        // Load-gap breakdown (#6): where the engine's startup time went. The
+        // outer tap-to-listening gap (engine init + HTTP server start) is
+        // logged separately by ServerViewModel. Pure formatting lives in
+        // StartupTimer so the line is unit-testable.
+        var loadPhases = StartupTimer()
+        loadPhases.record("model load", seconds: modelLoadSeconds)
+        loadPhases.record("context", seconds: ctxCreateSeconds)
+        if wantMtp { loadPhases.record("mtp draft", seconds: mtpSetupSeconds) }
+        FileLogger.shared.info("load phases: \(loadPhases.summary())")
     }
 
     /// Applies the KV-cache element type and YaRN rope settings to a context
