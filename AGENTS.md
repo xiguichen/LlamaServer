@@ -22,7 +22,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **Single process.** llama.cpp linked as a framework (`import llama`), runs in-process. No separate server binary.
 - **HTTP server**: Telegraph framework. Intercepts streaming requests via `interceptHandler` on `StreamableServer` (bypasses normal route handler for SSE writes direct to `HTTPConnection`).
 - **Serial inference queue**: `DispatchQueue(label: "llama.inference.serial")` — all `LlamaInference` calls go through this queue (not thread-safe).
-- **Context recreated** every 10 generations (`contextRecreateThreshold`) to flush Metal GPU/allocator state that can cause hangs.
+- **Context recreated** every 10 generations (`contextRecreateThreshold`) to flush Metal GPU/allocator state that can cause hangs. The recreate runs OFF the response path (`RecreateTracker`, called after the finish chunk in streaming), and the prompt-prefix reuse snapshot survives it (`ReuseSurvival`) — a dense model's `cachedTokenIds` and the on-disk seq blob are preserved so the next turn restores from disk instead of re-decoding the whole prompt.
 - **Non-streaming** chat completions: synchronous on the serial queue, returns full response once done.
 - **Streaming** chat completions: async on the serial queue, each token flushed as SSE via direct connection write. Keep-alive sends empty delta chunks every 2s.
 
@@ -36,7 +36,9 @@ No local Xcode required. Everything runs in GitHub Actions:
 | `Sources/App/ToolCallParser.swift` | Parse `<tool_call>{…}</tool_call>` envelopes and `<think>…</think>` reasoning blocks from model output |
 | `Sources/App/ServerViewModel.swift` | @MainActor glue: model library, start/stop engine, UI state |
 | `Sources/App/KVCacheSpec.swift` | Pure KV-cache decisions: bytes/token for f16/q8_0/q4_0, head-dim resolution, quant capability, context-window cap, YaRN recipe |
-| `Sources/App/FileLogger.swift` | Crash-survivable on-disk log; sync-flushes every line |
+| `Sources/App/RecreateTracker.swift` | Pure bookkeeping: when the periodic context recreate is due, and the off-response-path placement decision |
+| `Sources/App/ReuseSurvival.swift` | Pure predicate: the prompt-prefix reuse snapshot survives a `recreateContext()` (dense and hybrid) |
+| `Sources/App/FileLogger.swift` | Crash-survivable on-disk log; error/warn fsync'd sync, info+ buffered |
 
 ## Important gotchas
 

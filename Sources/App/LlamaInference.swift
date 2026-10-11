@@ -394,7 +394,7 @@ final class LlamaInference: @unchecked Sendable {
         // size-independent pipeline objects, so what warms here is what the large
         // context needs). Best-effort: failure just means we skip the warmup.
         if batchSize >= KVCacheSpec.prewarmUbatchContextSize {
-            prewarmMetal(model: loadedModel, ctxParams: ctxParams)
+            Self.prewarmMetal(model: loadedModel, ctxParams: ctxParams)
         }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
@@ -482,7 +482,7 @@ final class LlamaInference: @unchecked Sendable {
     /// Best-effort: a failure (context creation or decode) just skips the
     /// warmup and logs; the caller proceeds regardless — worst case we're in
     /// the old behavior. Runs on the serial inference queue during init.
-    private func prewarmMetal(model: OpaquePointer, ctxParams baseParams: llama_context_params) {
+    private static func prewarmMetal(model: OpaquePointer, ctxParams baseParams: llama_context_params) {
         var p = baseParams
         p.n_ctx = 256
         p.n_batch = 8
@@ -580,9 +580,18 @@ final class LlamaInference: @unchecked Sendable {
         if useMtp {
             mtpEnabled = setupDraftContext(target: ctx)
         }
-        cachedTokenCount = 0
-        cachedTokenIds = []
-        FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled))")
+        // A recreate rebuilds the llama_context but NOT the on-disk prompt
+        // snapshot or its token ids — both survive into the new context (see
+        // ReuseSurvival). Dense models get their `cachedTokenIds` back so the
+        // common-prefix reuse still applies; the hybrid snapshot restores from
+        // disk into the fresh context exactly as before.
+        if ReuseSurvival.snapshotSurvivesRecreate(supportsPartialReuse: supportsPartialCacheReuse) {
+            FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled)); prompt snapshot preserved for reuse")
+        } else {
+            cachedTokenCount = 0
+            cachedTokenIds = []
+            FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled))")
+        }
     }
 
     /// Recovers after a `llama_decode` returns non-zero. On hybrid attention/SSM
@@ -1031,6 +1040,11 @@ final class LlamaInference: @unchecked Sendable {
         // turning a multi-second prompt decode into a near-instant one. Upstream
         // llama-server uses the same common-prefix + seq_rm strategy.
         var reuseLen = 0
+        // A recreated context has a genuinely empty KV cache even though
+        // cachedTokenIds may still be populated (it survived the recreate). Track
+        // whether any prompt state is actually resident so we don't try seq_rm
+        // against an empty cache.
+        let cacheResident = !supportsPartialCacheReuse || !cachedTokenIds.isEmpty
         if let memory = llama_get_memory(context) {
             if !supportsPartialCacheReuse {
                 // Hybrid/recurrent model: a KV suffix can't be trimmed, so prefix
@@ -1038,8 +1052,20 @@ final class LlamaInference: @unchecked Sendable {
                 // sequence state from a saved snapshot when the new prompt extends
                 // it; otherwise fall back to a full clear + re-decode.
                 reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
-            } else if cachedTokenIds.isEmpty {
-                llama_memory_clear(memory, true)
+            } else if !cacheResident, hasSnapshot {
+                // Dense model on a fresh context (just recreated): the KV cache is
+                // empty but the on-disk prompt snapshot survived, so restore it
+                // instead of re-decoding the whole prompt. Falls through to the
+                // empty-cache clear below if the snapshot can't be applied.
+                reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
+                if reuseLen > 0 {
+                    FileLogger.shared.debug("KV snapshot restored after recreate (\(reuseLen) tokens, prompt \(promptTokens.count))")
+                }
+                if reuseLen == 0 {
+                    // Snapshot couldn't be applied (or none survived) — the fresh
+                    // context's cache is already empty, so just start decoding.
+                    FileLogger.shared.debug("KV cache cold after recreate (no usable snapshot); full decode")
+                }
             } else {
                 // Longest common prefix of the cached tokens and the new prompt.
                 let maxLCP = min(cachedTokenIds.count, promptTokens.count)

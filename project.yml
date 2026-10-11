@@ -109,6 +109,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/RecreateTracker.swift
         createIntermediateGroups: true
+      - path: Sources/App/ReuseSurvival.swift
+        createIntermediateGroups: true
     settings:
       base:
         SWIFT_VERSION: "5.0"
