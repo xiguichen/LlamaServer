@@ -40,12 +40,15 @@ struct ChatMessage: Codable {
         self.refusal = nil
     }
 
-    // Encode `refusal` as null when absent (Swift would otherwise omit a nil
-    // optional); decode ignores it entirely so inbound requests stay lenient.
+    // Encode `content`/`refusal` as null when absent (Swift would otherwise
+    // omit a nil optional); decode ignores unknown fields so inbound requests
+    // stay lenient. Explicit-null `content` matters on tool-call turns: OpenAI
+    // sends `content: null` alongside tool_calls, and strict clients require
+    // the key be present.
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(role, forKey: .role)
-        try c.encodeIfPresent(content, forKey: .content)
+        try c.encode(content, forKey: .content)
         try c.encodeIfPresent(tool_calls, forKey: .tool_calls)
         try c.encodeIfPresent(tool_call_id, forKey: .tool_call_id)
         try c.encode(refusal, forKey: .refusal)

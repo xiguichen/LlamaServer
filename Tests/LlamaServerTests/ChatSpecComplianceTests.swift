@@ -68,4 +68,36 @@ final class ChatSpecComplianceTests: XCTestCase {
         let msg = try? JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
         XCTAssertEqual(msg?.role, "user")
     }
+
+    // MARK: Tool-call turns — content is present but null
+
+    func testToolCallMessageEncodesContentAsNull() {
+        // A tool-call assistant turn has no prose, only tool_calls. OpenAI
+        // sends `content: null`; llm-comply's pinned spec requires the key be
+        // present. Dropping it (encodeIfPresent) failed that check on-device.
+        let call = ToolCall(id: "call_1", type: "function",
+                            function: ToolCallFunction(name: "get_weather",
+                                                       arguments: "{}"))
+        let msg = ChatMessage(role: "assistant", content: nil, tool_calls: [call])
+        let obj = asJSONObject(msg)
+        XCTAssertNotNil(obj, "tool-call message should encode to a JSON object")
+        XCTAssertEqual(obj?["content"] is NSNull, true,
+                       "content must be present and null on a tool-call turn")
+        XCTAssertNotNil(obj?["tool_calls"] as? [Any],
+                        "tool_calls must still be encoded")
+    }
+
+    func testPlainTextMessageStillEncodesContent() {
+        let obj = asJSONObject(ChatMessage(role: "assistant", content: "hi"))
+        XCTAssertEqual(obj?["content"] as? String, "hi",
+                       "a plain-text turn must still carry its content string")
+    }
+
+    func testInboundMessageWithNullContentDecodes() {
+        // A client may legitimately send content: null alongside tool calls or
+        // tool results; decoding must not throw.
+        let json = #"{"role":"assistant","content":null,"tool_calls":[]}"#
+        let msg = try? JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        XCTAssertEqual(msg?.role, "assistant")
+    }
 }
