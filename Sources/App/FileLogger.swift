@@ -59,8 +59,12 @@ enum LogLevel: Int, CaseIterable, Comparable, Identifiable {
 }
 
 /// Crash-survivable logger. Appends timestamped, level-tagged lines to a file in
-/// the app's Documents directory, flushing each line to disk synchronously so the
-/// last breadcrumb before a native abort (GGML_ABORT / jetsam SIGKILL) is preserved.
+/// the app's Documents directory. Crash-critical levels (error/warn) are written
+/// AND fsynced synchronously so the last breadcrumb before a native abort
+/// (GGML_ABORT / jetsam SIGKILL) is on disk before log() returns; routine levels
+/// (info/debug/verbose) are buffered and fsync'd at most once per
+/// `diskSyncInterval`/`diskSyncBytes` so the per-token inference path and the
+/// model-load log flood never block on storage I/O.
 ///
 /// The log is readable on-device with NO Mac required:
 ///   Files app -> On My iPhone -> LlamaServer -> llamaserver.log
@@ -84,6 +88,41 @@ final class FileLogger {
     private let queue = DispatchQueue(label: "llamaserver.filelogger")
     private let maxBytes = 1_000_000          // rotate at ~1 MB
     private let dateFormatter: DateFormatter
+
+    // MARK: Flush policy (pure, unit-tested)
+
+    /// How a line at a given level reaches disk.
+    enum FlushPolicy: Equatable {
+        /// `queue.sync` + fsync before log() returns — crash-critical levels.
+        case immediate
+        /// Buffered append; fsync at most once per interval/size threshold.
+        case buffered
+    }
+
+    static func flushPolicy(for level: LogLevel) -> FlushPolicy {
+        level <= .warn ? .immediate : .buffered
+    }
+
+    /// NSLog (system log) mirror: only warnings and above. Routine lines cost
+    /// ~10–100 µs each in NSLog machinery — with ~1,500 llama.cpp debug lines
+    /// per model load that was real time off the critical path.
+    static func shouldNSLog(_ level: LogLevel) -> Bool { level <= .warn }
+
+    /// Buffered lines are fsynced at most this long after the first unflushed
+    /// write — bounds breadcrumb loss on a hard crash to ~1s of routine lines.
+    static let diskSyncInterval: TimeInterval = 1.0
+    /// …or when this many buffered bytes have accumulated.
+    static let diskSyncBytes = 64 * 1024
+    /// The on-screen mirror delivers batches at most this often (the old
+    /// per-line main-queue dispatch flooded SwiftUI during model load).
+    static let mirrorInterval: TimeInterval = 0.1
+
+    /// All of the following are mutated ONLY on `queue`.
+    private var writeHandle: FileHandle?
+    private var pendingSyncBytes = 0
+    private var syncScheduled = false
+    private var mirrorLines: [String] = []
+    private var mirrorScheduled = false
 
     private static let levelDefaultsKey = "FileLogger.minimumLevel"
     private let levelLock = OSAllocatedUnfairLock<LogLevel>(initialState: .info)
@@ -155,38 +194,93 @@ final class FileLogger {
 
     /// Append a line at `level`. The message is only built and written when the
     /// level passes the filter (`@autoclosure` keeps expensive payload dumps free
-    /// when they're disabled). Synchronous + fsync so it is on disk before
-    /// returning — important when the next thing the caller does may crash.
+    /// when they're disabled). Per `flushPolicy(for:)`, error/warn are on disk
+    /// (fsynced) before returning; routine levels never block the caller.
     func log(_ message: @autoclosure () -> String, level: LogLevel = .info) {
         guard level <= minimumLevel else { return }
         let msg = message()
-        let line = "[\(dateFormatter.string(from: Date()))] [\(level.tag)] \(msg)\n"
-        // Also emit to the system log (visible in Console.app when a Mac IS available).
-        NSLog("[LlamaServer] %@", msg)
-
-        queue.sync {
-            guard let data = line.data(using: .utf8) else { return }
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: fileURL.path) {
-                try? data.write(to: fileURL, options: .atomic)
-            } else if let handle = try? FileHandle(forWritingTo: fileURL) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-                try? handle.synchronize()   // fsync — guarantee it survives a crash
-            }
+        if Self.flushPolicy(for: level) == .immediate {
+            queue.sync { self.writeLine(msg, level: level, syncNow: true) }
+        } else {
+            queue.async { self.writeLine(msg, level: level, syncNow: false) }
         }
+    }
 
-        // Mirror to the in-app panel (without the trailing newline).
-        if let onLine = onLine {
-            let display = String(line.dropLast())
-            DispatchQueue.main.async { onLine(display) }
+    /// Formats and writes one line. Runs ONLY on `queue` (which also
+    /// serializes DateFormatter usage — it is not thread-safe).
+    private func writeLine(_ msg: String, level: LogLevel, syncNow: Bool) {
+        let line = "[\(dateFormatter.string(from: Date()))] [\(level.tag)] \(msg)\n"
+        if Self.shouldNSLog(level) {
+            NSLog("[LlamaServer] %@", msg)
+        }
+        guard let data = line.data(using: .utf8), let handle = openWriteHandle() else { return }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            return
+        }
+        pendingSyncBytes += data.count
+        if syncNow || pendingSyncBytes >= Self.diskSyncBytes {
+            syncToDisk()
+        } else {
+            scheduleSync()
+        }
+        // Queue for the coalesced on-screen mirror.
+        mirrorLines.append(String(line.dropLast()))
+        scheduleMirrorFlush()
+    }
+
+    /// Lazily opens (and creates) the append handle; kept open across lines
+    /// (the old code opened + seeked + closed per line).
+    private func openWriteHandle() -> FileHandle? {
+        if let writeHandle { return writeHandle }
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: fileURL.path) {
+            fm.createFile(atPath: fileURL.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: fileURL) else { return nil }
+        try? handle.seekToEnd()
+        writeHandle = handle
+        return handle
+    }
+
+    /// fsync the buffered tail. Callers are on `queue`.
+    private func syncToDisk() {
+        guard pendingSyncBytes > 0 else { return }
+        try? writeHandle?.synchronize()
+        pendingSyncBytes = 0
+    }
+
+    private func scheduleSync() {
+        guard !syncScheduled else { return }
+        syncScheduled = true
+        queue.asyncAfter(deadline: .now() + Self.diskSyncInterval) { [weak self] in
+            guard let self else { return }
+            self.syncScheduled = false
+            self.syncToDisk()
+        }
+    }
+
+    /// Deliver accumulated mirror lines to the UI in one main-thread batch at
+    /// most every `mirrorInterval` — keeps SwiftUI from re-diffing per line
+    /// during the model-load log flood.
+    private func scheduleMirrorFlush() {
+        guard !mirrorScheduled, !mirrorLines.isEmpty else { return }
+        mirrorScheduled = true
+        queue.asyncAfter(deadline: .now() + Self.mirrorInterval) { [weak self] in
+            guard let self else { return }
+            self.mirrorScheduled = false
+            let batch = self.mirrorLines
+            self.mirrorLines.removeAll(keepingCapacity: true)
+            guard let onLine = self.onLine else { return }
+            DispatchQueue.main.async { batch.forEach(onLine) }
         }
     }
 
     /// Return the last `maxLines` lines for display in the UI.
     func tail(maxLines: Int = 200) -> [String] {
         queue.sync {
+            syncToDisk()   // make buffered lines visible to the read
             guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
             let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
             return Array(lines.suffix(maxLines))
@@ -195,6 +289,11 @@ final class FileLogger {
 
     func clear() {
         queue.sync {
+            syncToDisk()
+            try? writeHandle?.close()
+            writeHandle = nil
+            pendingSyncBytes = 0
+            mirrorLines = []
             try? Data().write(to: fileURL, options: .atomic)
         }
     }

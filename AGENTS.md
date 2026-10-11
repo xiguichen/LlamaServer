@@ -64,5 +64,5 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 - `OSAllocatedUnfairLock` for thread-safe flags/counters (not `os_unfair_lock` C API).
 - No `#warning` — use `FileLogger.shared.warn(...)` for recoverable issues; the log is crash-survivable.
-- FileLogger sync-flushes to disk. Set `minimumLevel` from UI `.verbose` to capture full request/response payloads.
+- FileLogger: error/warn are written AND fsynced synchronously (crash breadcrumbs survive aborts); info/debug/verbose are buffered on the logger queue (fsync ≤ 1s / 64KB) so the inference path never blocks on I/O; NSLog fires for warn+ only; the on-screen mirror delivers ≤ 10Hz batches. Set `minimumLevel` from UI `.verbose` to capture full request/response payloads.
 - `llama_log_set` routes llama.cpp native logs into FileLogger at `.debug` level.
