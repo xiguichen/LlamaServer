@@ -105,6 +105,10 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/KVCacheSpec.swift
         createIntermediateGroups: true
+      - path: Sources/App/FileLogger.swift
+        createIntermediateGroups: true
+      - path: Sources/App/RecreateTracker.swift
+        createIntermediateGroups: true
     settings:
       base:
         SWIFT_VERSION: "5.0"
