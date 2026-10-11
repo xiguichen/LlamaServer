@@ -135,8 +135,12 @@ final class LlamaInference: @unchecked Sendable {
     init(modelPath: String, contextSize requestedContext: Int = 131072, threads: Int32 = 0, useMtp: Bool = false, mtpHeads: Int = 0, kvCacheType requestedKVCacheType: KVCacheType = .f16, yarnLongContext requestedYarnLongContext: Bool = false) throws {
         self.useMtp = useMtp
         self.mtpHeads = mtpHeads
-        // Backend init is idempotent across instances within a process.
+        // Backend init is idempotent across instances within a process. Timed
+        // because on a cold app launch this one-time Metal device setup can
+        // dominate startup (observed ~6.7s before the first model load).
+        let backendInitStart = Date()
         llama_backend_init()
+        let backendInitSeconds = Date().timeIntervalSince(backendInitStart)
 
         // Route llama.cpp's own internal log (including the real reason a
         // `llama_decode` fails) into our file log. Without this we only see the
@@ -443,6 +447,7 @@ final class LlamaInference: @unchecked Sendable {
         // logged separately by ServerViewModel. Pure formatting lives in
         // StartupTimer so the line is unit-testable.
         var loadPhases = StartupTimer()
+        loadPhases.record("backend init", seconds: backendInitSeconds)
         loadPhases.record("model load", seconds: modelLoadSeconds)
         loadPhases.record("context", seconds: ctxCreateSeconds)
         if wantMtp { loadPhases.record("mtp draft", seconds: mtpSetupSeconds) }
