@@ -308,20 +308,18 @@ final class LlamaInference: @unchecked Sendable {
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
 
-        // Physical micro-batch (n_ubatch) drives prefill GPU parallelism.
-        // Using 512 everywhere: 1024 can crash with a null-pointer dereference
-        // inside ggml_metal_buffer_is_shared when the Metal backend hasn't
-        // finished its async shader-set initialization, which happens regularly
-        // on fresh app launches with large contexts (>= 32768). 512 keeps the
-        // compute graphs small enough that sched_reserve completes before Metal
-        // readiness becomes a problem, at a modest TTFT cost (~170 vs ~220 tok/s
-        // on A19 Pro for a 5k-token prompt — ~5 s difference).
-        let baseUBatch = 512
-        let fastUBatch = 512   // was 1024, but see crash note above
+        // Physical micro-batch (n_ubatch) drives prefill GPU parallelism. The
+        // policy is `KVCacheSpec.ubatchSize`: 1024 for large contexts with KV
+        // headroom (measured ~29% faster prefill — 220 vs 170 tok/s on a 5k
+        // prompt), 512 elsewhere. A >=32k context at 1024 used to crash with a
+        // null-pointer deref inside ggml_metal_buffer_is_shared on FRESH app
+        // launches (the Metal backend hadn't finished its async shader-set
+        // init); `prewarmMetal` now runs a tiny decode first so that init has
+        // completed before we build the large context.
         let kvSlack = kvBudget - kvBytesPerToken * effective
-        let extraUBatchReserve = 200 * 1024 * 1024
-        let fastPrefill = kvSlack > extraUBatchReserve
-        self.batchSize = min(effective, fastPrefill ? fastUBatch : baseUBatch)
+        let fastPrefill = kvSlack > KVCacheSpec.ubatchSlackBytes
+        self.batchSize = min(effective, KVCacheSpec.ubatchSize(contextSize: effective,
+                                                                kvSlackBytes: kvSlack))
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(effective)
@@ -387,6 +385,17 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
+
+        // Force Metal's async shader-set initialization to completion BEFORE
+        // building the large context, when that context will use the 1024
+        // micro-batch. ggml_metal finishes loading its pipelines asynchronously;
+        // a >=32k context created on a cold backend hits a null-deref in
+        // ggml_metal_buffer_is_shared. A tiny decode waits that out (kernels are
+        // size-independent pipeline objects, so what warms here is what the large
+        // context needs). Best-effort: failure just means we skip the warmup.
+        if batchSize >= KVCacheSpec.prewarmUbatchContextSize {
+            prewarmMetal(model: loadedModel, ctxParams: ctxParams)
+        }
 
         let nSwa = Int(llama_model_n_swa(loadedModel))
         FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(wantMtp)) for '\(self.modelName)'")
@@ -458,6 +467,39 @@ final class LlamaInference: @unchecked Sendable {
             p.rope_freq_scale = KVCacheSpec.yarnRopeFreqScale
             p.yarn_orig_ctx = UInt32(KVCacheSpec.yarnOrigCtx)
         }
+    }
+
+    /// Forces Metal's async shader-set initialization to completion with a
+    /// tiny decode before the caller builds the large context.
+    ///
+    /// ggml_metal finishes loading its pipelines asynchronously; building a
+    /// >=32k-token context with a 1024 micro-batch while that is still running
+    /// hits a null-deref in ggml_metal_buffer_is_shared (seen on fresh app
+    /// launches). A tiny 256-token context with a small ubatch, decoding a
+    /// single token, waits that out. Kernels are size-independent pipeline
+    /// objects, so what this warms is exactly what the large context needs.
+    ///
+    /// Best-effort: a failure (context creation or decode) just skips the
+    /// warmup and logs; the caller proceeds regardless — worst case we're in
+    /// the old behavior. Runs on the serial inference queue during init.
+    private func prewarmMetal(model: OpaquePointer, ctxParams baseParams: llama_context_params) {
+        var p = baseParams
+        p.n_ctx = 256
+        p.n_batch = 8
+        p.n_ubatch = 8
+        p.n_rs_seq = 0
+        guard let ctx = llama_init_from_model(model, p) else {
+            FileLogger.shared.warn("metal pre-warm: tiny context creation returned NULL; skipping warmup")
+            return
+        }
+        defer { llama_free(ctx) }
+        var token = llama_vocab_bos(llama_model_get_vocab(model))
+        let batch = llama_batch_get_one(&token, 1)
+        if llama_decode(ctx, batch) != 0 {
+            FileLogger.shared.warn("metal pre-warm: decode failed; skipping warmup")
+            return
+        }
+        FileLogger.shared.info("metal pre-warm done (tiny context + 1-token decode before large-context build)")
     }
 
     /// Enables the target context's post-norm next-token hidden state and creates

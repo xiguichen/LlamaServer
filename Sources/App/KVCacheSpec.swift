@@ -66,6 +66,31 @@ enum KVCacheSpec {
         }
     }
 
+    // MARK: Micro-batch (ubatch) policy
+
+    /// Contexts at/above this size get the 1024 micro-batch (measured ~29%
+    /// faster prefill — 220 vs 170 tok/s on a ~5k prompt) — but only via the
+    /// Metal pre-warm path in `LlamaInference`, because a >=32k context built
+    /// on a cold Metal backend crashes (async shader-set init still running).
+    static let prewarmUbatchContextSize = 32_768
+
+    /// KV-budget headroom required to double the micro-batch: activation
+    /// buffers draw from the same budget as the cache.
+    static let ubatchSlackBytes = 200 * 1024 * 1024
+
+    /// The micro-batch (`n_ubatch`) for a context of `contextSize` with
+    /// `kvSlackBytes` of KV-budget headroom. Callers then clamp to the
+    /// context size itself (a batch can't exceed the context).
+    ///
+    /// - Tight slack (<= `ubatchSlackBytes`): the conservative 512, since the
+    ///   larger batch's activation buffers would contend with the cache.
+    /// - Large, pre-warmed context: 1024 for faster prefill.
+    /// - Smaller contexts stayed crash-free at 512, so behavior is unchanged.
+    static func ubatchSize(contextSize: Int, kvSlackBytes: Int) -> Int {
+        guard kvSlackBytes > ubatchSlackBytes else { return 512 }
+        return contextSize >= prewarmUbatchContextSize ? 1024 : 512
+    }
+
     // MARK: Hybrid-model layer counts
 
     /// The number of layers that actually keep a KV cache.

@@ -185,6 +185,26 @@ final class KVCacheSpecTests: XCTestCase {
             256, "floor 256 applies")
     }
 
+    // MARK: - ubatch policy
+
+    func testUbatchSizeScalesWithHeadroomAndContext() {
+        let slack = 1024 * 1024 * 1024          // 1 GB of KV-budget slack
+        let tight = 100 * 1024 * 1024           // under the 200 MB reserve
+        // Large contexts (Metal pre-warmed at init) get the 1024 micro-batch:
+        // measured ~29% faster prefill (220 vs 170 tok/s on a 5k prompt).
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: slack), 1024)
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 32_768, kvSlackBytes: slack), 1024,
+                       "the pre-warm threshold itself qualifies for 1024")
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 32_767, kvSlackBytes: slack), 512,
+                       "below the pre-warm threshold stay on the conservative batch")
+        // Tight KV slack keeps the smaller batch regardless of size
+        // (activation buffers share the budget with the cache).
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: tight), 512)
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: 0), 512)
+        // Small contexts always stayed crash-free — unchanged behavior.
+        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 8_192, kvSlackBytes: slack), 512)
+    }
+
     // MARK: - YaRN constants
 
     func testYarnRecipeMatchesQwenValidatedScaling() {
