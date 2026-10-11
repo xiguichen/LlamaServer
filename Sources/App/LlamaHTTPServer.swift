@@ -88,11 +88,11 @@ final class LlamaHTTPServer {
     private var bonjourService: NetService?
     /// Serializes access to the (non-thread-safe) llama context.
     private let inferenceQueue = DispatchQueue(label: "llama.inference.serial")
-    /// Counter of successful generations. Used to periodically recreate the
-    /// llama_context and flush accumulated GPU/allocator state.
-    private var generationCount = 0
-    /// Recreate the context every N generations to avoid Metal GPU stalls.
+    /// Counting + cadence for the periodic llama_context recreate (flushes
+    /// accumulated GPU/allocator state). The recreate itself runs OFF the
+    /// response path — see `runPendingRecreate`.
     private let contextRecreateThreshold = 10
+    private lazy var recreateTracker = RecreateTracker(threshold: contextRecreateThreshold)
     private let requestCountLock = OSAllocatedUnfairLock()
     private var _requestCount = 0
     private var requestCount: Int {
@@ -564,6 +564,7 @@ final class LlamaHTTPServer {
             }
 
             var generatedTokens = 0
+            var generationSucceeded = false
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
             let generationStartTime = CFAbsoluteTimeGetCurrent()
             // Strips <think> reasoning from the streamed (non-tool) content so
@@ -673,22 +674,12 @@ final class LlamaHTTPServer {
                         sendChunk(delta: Delta(role: nil, content: tail), finishReason: nil)
                     }
                 }
-                // Periodic context flush. Isolate its own do/catch: the
-                // generation already SUCCEEDED and its content was streamed, so a
-                // recreate failure must NOT turn this into a `finish_reason:
-                // "error"`. If it fails the engine marks itself unusable and the
-                // NEXT request surfaces the error cleanly.
-                if self.generationCount + 1 >= self.contextRecreateThreshold {
-                    do {
-                        FileLogger.shared.info("streaming #\(currentRequest): recreating context (threshold reached)")
-                        try self.inference.recreateContext()
-                        self.generationCount = 0
-                    } catch {
-                        FileLogger.shared.error("streaming #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
-                    }
-                } else {
-                    self.generationCount += 1
-                }
+                // Periodic context flush. The recreate re-allocates the KV
+                // cache (~0.3-0.5 s) — run it AFTER finish_reason + [DONE]
+                // are delivered (see stream end below), never between the
+                // last token and the finish chunk, which made every 10th
+                // response visibly stall. Only successful generations count.
+                generationSucceeded = true
 
                 // The OpenAI finish reason is derived AFTER tool-call parsing
                 // below, from the engine result plus the parse outcome
@@ -832,7 +823,30 @@ final class LlamaHTTPServer {
             FileLogger.shared.debug("streaming #\(currentRequest): closing connection")
             connection.close(immediately: false)
             self.activeConnections -= 1
-            FileLogger.shared.debug("streaming #\(currentRequest): stream ended (total active: \(self.activeConnections), genCount: \(self.generationCount))")
+            // Periodic context recreate — now that the client has everything.
+            if generationSucceeded {
+                self.runPendingRecreate(request: currentRequest, kind: "streaming")
+            }
+            FileLogger.shared.debug("streaming #\(currentRequest): stream ended (total active: \(self.activeConnections), recreate count: \(self.recreateTracker.count))")
+        }
+    }
+
+    /// Counts a successful generation and runs the periodic context recreate
+    /// if due. MUST be called on the inference queue, after the client's
+    /// response has been fully delivered: the recreate re-allocates the KV
+    /// cache (~0.3-0.5 s) and used to stall every 10th streamed response
+    /// between the last token and finish_reason. A failure only logs — the
+    /// engine marks itself unusable and the NEXT request surfaces the error
+    /// cleanly (RecreateTracker retries the flush on the next generation).
+    private func runPendingRecreate(request: Int, kind: String) {
+        guard recreateTracker.record() else { return }
+        do {
+            try inference.recreateContext()
+            recreateTracker.recreateFinished(success: true)
+            FileLogger.shared.info("\(kind) request #\(request): periodic context recreate done (every \(contextRecreateThreshold) generations, off response path)")
+        } catch {
+            recreateTracker.recreateFinished(success: false)
+            FileLogger.shared.error("\(kind) request #\(request): periodic recreateContext failed: \(error.localizedDescription)")
         }
     }
 
@@ -881,22 +895,9 @@ final class LlamaHTTPServer {
                 failure = error
             }
 
-            // Periodically recreate the context to flush accumulated
-            // GPU/allocator state that could otherwise cause Metal to hang.
-            // Kept OUT of the generate do/catch above so a flush failure can
-            // never discard a successful `result` (turning a 200 into a 500).
-            if failure == nil {
-                if generationCount + 1 >= contextRecreateThreshold {
-                    do {
-                        try inference.recreateContext()
-                        generationCount = 0
-                    } catch {
-                        FileLogger.shared.error("chat request #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
-                    }
-                } else {
-                    generationCount += 1
-                }
-            }
+            // Periodic recreate bookkeeping moved to runPendingRecreate —
+            // scheduled AFTER this response is delivered so the KV-cache
+            // re-allocation never delays the client.
         }
 
         if let failure = failure {
@@ -910,6 +911,12 @@ final class LlamaHTTPServer {
         }
         guard let result = result else {
             return errorResponse("Generation produced no result", status: .internalServerError)
+        }
+        // Only successful generations count toward (and pay for) the periodic
+        // recreate; schedule it on the inference queue so the response below
+        // is not held behind the KV-cache re-allocation.
+        inferenceQueue.async { [weak self] in
+            self?.runPendingRecreate(request: currentRequest, kind: "chat")
         }
 
         // Breadcrumb after generation, before response assembly: lets us tell
@@ -1111,20 +1118,8 @@ final class LlamaHTTPServer {
             } catch {
                 failure = error
             }
-            // Periodic context flush, isolated so a flush failure can't discard
-            // a successful `result` (see chatCompletionResponse for rationale).
-            if failure == nil {
-                if generationCount + 1 >= contextRecreateThreshold {
-                    do {
-                        try inference.recreateContext()
-                        generationCount = 0
-                    } catch {
-                        FileLogger.shared.error("completion request #\(currentRequest): periodic recreateContext failed: \(error.localizedDescription)")
-                    }
-                } else {
-                    generationCount += 1
-                }
-            }
+            // Periodic recreate bookkeeping moved to runPendingRecreate —
+            // scheduled AFTER this response is delivered (see chat path).
         }
 
         if let failure = failure {
@@ -1138,6 +1133,9 @@ final class LlamaHTTPServer {
         }
         guard let result = result else {
             return errorResponse("Generation produced no result", status: .internalServerError)
+        }
+        inferenceQueue.async { [weak self] in
+            self?.runPendingRecreate(request: currentRequest, kind: "completion")
         }
 
         let reason = FinishReasonPolicy.map(engineFinish: result.finishReason,
