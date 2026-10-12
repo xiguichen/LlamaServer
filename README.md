@@ -154,5 +154,5 @@ caveats:
 - [x] Model library: list / select / import / **download from URL**.
 - [x] Streaming responses (SSE) for `/v1/chat/completions`.
 - [ ] Persist the last-used model and settings.
-- [x] Pin a specific `llama.cpp` release tag (`b9553`, prebuilt xcframework).
+- [x] Pin a specific `llama.cpp` release tag (`b11557`, prebuilt xcframework).
 - [ ] Optional bearer-token auth for the API.
