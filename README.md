@@ -75,7 +75,7 @@ scripts/
 
 1. Push this repo to GitHub.
 2. Go to **Actions → "Build unsigned IPA" → Run workflow** (or just push to `main`).
-   - Optionally set the `llama.cpp` tag (defaults to `b9553`). It must be a release
+   - Optionally set the `llama.cpp` tag (defaults to `b11557`). It must be a release
      that publishes an `xcframework.zip` asset — see
      <https://github.com/ggml-org/llama.cpp/releases>.
 3. When it finishes, download the **`LlamaServer-unsigned-ipa`** artifact. It
@@ -143,7 +143,7 @@ caveats:
 1. **Runtime is unverified.** The build + IPA structure are confirmed, but actually
    loading a model and serving inference can only be proven on a real iPhone.
 2. **llama.cpp API drift.** `Sources/App/LlamaInference.swift` is written against the
-   pinned tag **`b9553`** C API. If you change `LLAMA_TAG` in
+   pinned tag **`b11557`** C API. If you change `LLAMA_TAG` in
    `scripts/fetch-llama-xcframework.sh` and the build fails, adjust that file.
 3. **Plain HTTP.** The server has no TLS — only expose it on trusted local networks.
 4. **`UIBackgroundModes: audio`** is a placeholder to reduce suspension; iOS still

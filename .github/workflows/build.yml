@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       llama_tag:
-        description: "llama.cpp release tag with an xcframework.zip asset (e.g. b9553)"
+        description: "llama.cpp release tag with an xcframework.zip asset (e.g. b11557)"
         required: false
-        default: "b9553"
+        default: "b11557"
 
 permissions:
   contents: read
@@ -48,7 +48,7 @@ jobs:
     runs-on: xcode-27
     env:
       # Override on a manual run via the workflow input above.
-      LLAMA_TAG: ${{ github.event.inputs.llama_tag || 'b9553' }}
+      LLAMA_TAG: ${{ github.event.inputs.llama_tag || 'b11557' }}
 
     steps:
       - name: Checkout
