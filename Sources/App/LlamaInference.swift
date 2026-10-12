@@ -67,11 +67,14 @@ final class LlamaInference: @unchecked Sendable {
     /// a hidden state row of this width (the target's post-norm next-token state).
     private var nEmbd = 0
 
-    /// Max speculative draft depth per round. Depth 1 (draft a single token) keeps
-    /// the target rollback distance at most 1 — covered by the recurrent-state ring
-    /// (n_rs_seq) so a mispredicted draft is rolled back with a cheap `seq_rm`
-    /// (the upstream "RS" path) rather than a full-state checkpoint restore.
-    private let mtpMaxDraft = 1
+    /// Max speculative draft depth per round. Depth 2 chains a second draft
+    /// through the same MTP head (the model has one MTP block; a second draft
+    /// re-applies it self-conditioned on the draft's own hidden state). The
+    /// target rollback distance stays <= mtpMaxDraft — covered by the
+    /// recurrent-state ring (n_rs_seq, derived from this value) so rejected
+    /// drafts are rolled back with a cheap `seq_rm` (the upstream "RS" path)
+    /// rather than a full-state checkpoint restore.
+    private let mtpMaxDraft = 2
 
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model
     /// predicts multiple future tokens per forward pass, which can increase
@@ -368,24 +371,31 @@ final class LlamaInference: @unchecked Sendable {
         // So hybrid models ARE supported here — the recurrent rollback on a
         // mispredicted draft is handled by the recurrent-state ring (n_rs_seq).
         let wantMtp = useMtp
-        if wantMtp && mtpHeads > 0 {
-            mtpOutputCount = mtpHeads
-        } else if wantMtp {
-            var layers = 0
-            var found = false
-            let metaCount = Int(llama_model_meta_count(loadedModel))
-            for i in 0..<metaCount {
-                var keyBuf = [CChar](repeating: 0, count: 128)
-                guard llama_model_meta_key_by_index(loadedModel, Int32(i), &keyBuf, keyBuf.count) > 0 else { continue }
-                let key = String(cString: keyBuf)
-                guard key.hasSuffix("nextn_predict_layers") || key.hasSuffix("n_predict_layers") else { continue }
-                var valBuf = [CChar](repeating: 0, count: 16)
-                guard llama_model_meta_val_str_by_index(loadedModel, Int32(i), &valBuf, valBuf.count) > 0 else { continue }
-                layers = Int(String(cString: valBuf)) ?? 0
-                found = true
-                break
+        if wantMtp {
+            // GGUF-derived slot count: nextn_predict_layers (+1 for the main
+            // head). Only scanned when no explicit count was provided; nil
+            // keeps MtpSpec's metadata-absent fallback of 3.
+            var headsFromGGUF: Int? = nil
+            if mtpHeads <= 0 {
+                var layers = 0
+                var found = false
+                let metaCount = Int(llama_model_meta_count(loadedModel))
+                for i in 0..<metaCount {
+                    var keyBuf = [CChar](repeating: 0, count: 128)
+                    guard llama_model_meta_key_by_index(loadedModel, Int32(i), &keyBuf, keyBuf.count) > 0 else { continue }
+                    let key = String(cString: keyBuf)
+                    guard key.hasSuffix("nextn_predict_layers") || key.hasSuffix("n_predict_layers") else { continue }
+                    var valBuf = [CChar](repeating: 0, count: 16)
+                    guard llama_model_meta_val_str_by_index(loadedModel, Int32(i), &valBuf, valBuf.count) > 0 else { continue }
+                    layers = Int(String(cString: valBuf)) ?? 0
+                    found = true
+                    break
+                }
+                headsFromGGUF = found ? layers + 1 : nil
             }
-            mtpOutputCount = found ? max(1, layers + 1) : 3
+            mtpOutputCount = MtpSpec.resolveOutputSlots(headsFromGGUF: headsFromGGUF,
+                                                        explicitHeads: mtpHeads,
+                                                        maxDraft: mtpMaxDraft)
         } else {
             mtpOutputCount = 1
         }
@@ -1345,13 +1355,17 @@ final class LlamaInference: @unchecked Sendable {
 
         if usedMtp, let dft = mtpContext {
             // ============================ MTP speculative path ====================
-            // Two-context depth-1 speculative decoding (mirrors llama.cpp's
+            // Two-context depth-N speculative decoding (mirrors llama.cpp's
             // common_speculative_impl_draft_mtp + the server verify/accept driver):
             //   target = `context` (source of truth, normal logits + h_nextn)
             //   draft  = `dft`     (LLAMA_CONTEXT_TYPE_MTP, ctx_other = target)
-            // Each round drafts ONE token with the draft context, then the target
-            // verifies it. EVERY emitted token is sampled from the TARGET, so a bad
-            // draft can only cost a round (no speed-up) — never corrupt output.
+            // Each round chains up to mtpMaxDraft drafts through the single MTP
+            // head — each gated by the draft model's own confidence >= pMin —
+            // and the target verifies [idLast] + drafts in one batch. EVERY
+            // emitted token is sampled from the TARGET, so a bad draft can only
+            // cost a round (no speed-up) — never corrupt output. A full accept
+            // catch-up-decodes the bonus token into the draft context so its
+            // KV stays contiguous with the target's accepted sequence.
 
             // Greedy sampler for the draft context (the draft only proposes; the
             // target's real sampler decides what is actually emitted).
@@ -1374,14 +1388,17 @@ final class LlamaInference: @unchecked Sendable {
                 llama_batch_free(batch)
                 return rc
             }
-            func decodeVerify(_ t0: llama_token, _ d0: llama_token, _ basePos: llama_pos) -> Int32 {
-                var batch = llama_batch_init(2, 0, 1)
-                batch.n_tokens = 2
-                batch.token[0] = t0;            batch.token[1] = d0
-                batch.pos[0]   = basePos;       batch.pos[1]   = basePos + 1
-                batch.n_seq_id[0] = 1;          batch.n_seq_id[1] = 1
-                batch.seq_id[0]![0] = 0;        batch.seq_id[1]![0] = 0
-                batch.logits[0] = 1;            batch.logits[1] = 1
+            func decodeVerify(_ tokens: [llama_token], _ basePos: llama_pos) -> Int32 {
+                let n = Int32(tokens.count)
+                var batch = llama_batch_init(n, 0, 1)
+                batch.n_tokens = n
+                for i in 0..<Int(n) {
+                    batch.token[i] = tokens[i]
+                    batch.pos[i] = basePos + llama_pos(i)
+                    batch.n_seq_id[i] = 1
+                    batch.seq_id[i]![0] = 0
+                    batch.logits[i] = 1
+                }
                 let rc = llama_decode(context, batch)
                 llama_batch_free(batch)
                 return rc
@@ -1412,15 +1429,31 @@ final class LlamaInference: @unchecked Sendable {
                 return rc
             }
 
-            // Draft acceptance instrumentation (depth-1: each round proposes one
-            // token; a HIT emits 2 target-sampled tokens, a MISS emits 1).
+            // Softmax probability the draft model assigns to `token` for the
+            // most recent draft decode's output row 0 (the only row a
+            // single-token draft decode produces). Gates drafting at
+            // MtpSpec.pMin: below the threshold the round falls back to plain
+            // decoding instead of spending a multi-row verify on a draft the
+            // draft model itself doesn't believe.
+            func draftConfidence(_ token: llama_token) -> Float {
+                guard let logits = llama_get_logits_ith(dft, 0) else { return 0 }
+                let vocabSize = Int(llama_vocab_n_tokens(vocab))
+                return MtpSpec.draftConfidence(row: UnsafeBufferPointer(start: logits, count: vocabSize),
+                                               token: token)
+            }
+
+            // Draft acceptance instrumentation. A round proposes up to
+            // mtpMaxDraft tokens; `accepted` counts drafted tokens verified as
+            // real (avg depth = accepted / rounds).
             var mtpRounds = 0      // verify rounds that ran a draft
-            var mtpHits = 0        // rounds where the draft token was accepted
+            var mtpHits = 0        // rounds where at least one draft was accepted
+            var mtpAccepted = 0    // total drafted tokens verified as real
             var mtpNoDraft = 0     // rounds with no usable draft (plain fallback)
             // Per-phase timing for the round, aggregated into the stats line.
-            // Completed rounds record one triplet; a round aborted by eog /
-            // stop-string / sampler error records nothing (same semantics as
-            // mtpRounds, which counts only decided rounds).
+            // A drafted round records its quadruplet whenever the verify
+            // decision ran (including rounds that then stop on eog / stop
+            // string / limit); fallback rounds record after a completed
+            // decode+sample; rounds aborting before either record nothing.
             var phaseStats = MtpPhaseStats()
 
             // Position in the target where the next "idLast" will be (re-)decoded.
@@ -1444,28 +1477,44 @@ final class LlamaInference: @unchecked Sendable {
                 genTokens += 1
                 if consumeToken(idLast) {
                     while generated < limit {
-                        if Int(nextPos) + 2 >= contextSize { finishReason = "context_full"; break }
+                        if Int(nextPos) + mtpMaxDraft + 1 >= contextSize { finishReason = "context_full"; break }
                         genTokens += 1
 
-                        // 1) Draft one token with the draft context.
-                        var d0: llama_token = -1
-                        var haveDraft = false
+                        // 1) Draft: chain up to mtpMaxDraft tokens through the
+                        //    MTP head, each gated by the draft model's own
+                        //    confidence (pMin). The chained draft is
+                        //    self-conditioned (its h comes from the draft's own
+                        //    output), which is why gating matters more with
+                        //    depth — a low-confidence chain link gets cut.
+                        var drafts: [llama_token] = []
                         let phaseDraftStart = CFAbsoluteTimeGetCurrent()
-                        let draftRC = decodeDraft(idLast, nextPos, pendingH)
-                        let phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
+                        let drc0 = decodeDraft(idLast, nextPos, pendingH)
+                        var phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
                         var phaseSample: TimeInterval = 0
-                        if draftRC == 0 {
+                        if drc0 == 0 {
                             let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
-                            let cand = llama_sampler_sample(draftSampler, dft, 0)
+                            let cand0 = llama_sampler_sample(draftSampler, dft, 0)
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
-                            if cand != -1 && !llama_vocab_is_eog(vocab, cand) {
-                                d0 = cand
-                                haveDraft = true
+                            if cand0 != -1, !llama_vocab_is_eog(vocab, cand0), draftConfidence(cand0) >= MtpSpec.pMin {
+                                drafts.append(cand0)
+                                if mtpMaxDraft > 1 {
+                                    let phaseChainStart = CFAbsoluteTimeGetCurrent()
+                                    let drc1 = decodeDraft(cand0, nextPos + 1, copyH(dft, 0) ?? pendingH)
+                                    phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainStart
+                                    if drc1 == 0 {
+                                        let phaseChainSampleStart = CFAbsoluteTimeGetCurrent()
+                                        let cand1 = llama_sampler_sample(draftSampler, dft, 0)
+                                        phaseSample += CFAbsoluteTimeGetCurrent() - phaseChainSampleStart
+                                        if cand1 != -1, !llama_vocab_is_eog(vocab, cand1), draftConfidence(cand1) >= MtpSpec.pMin {
+                                            drafts.append(cand1)
+                                        }
+                                    }
+                                }
                             }
                         }
 
                         // No usable draft -> plain single-token target decode.
-                        if !haveDraft {
+                        if drafts.isEmpty {
                             mtpNoDraft += 1
                             let phaseFallbackStart = CFAbsoluteTimeGetCurrent()
                             let fallbackRC = decodeSingleTarget(idLast, nextPos)
@@ -1487,73 +1536,113 @@ final class LlamaInference: @unchecked Sendable {
                             continue
                         }
 
-                        // 2) Verify the draft: decode [idLast, d0] in the target.
+                        // 2) Verify: decode [idLast] + drafts in one target batch.
                         let phaseVerifyStart = CFAbsoluteTimeGetCurrent()
-                        let verifyRC = decodeVerify(idLast, d0, nextPos)
+                        let verifyRC = decodeVerify([idLast] + drafts, nextPos)
                         let phaseVerify = CFAbsoluteTimeGetCurrent() - phaseVerifyStart
                         guard verifyRC == 0 else {
                             recoverFromDecodeFailure(); throw InferenceError.decode
                         }
-                        let vh0 = copyH(context, 0) ?? pendingH
-                        let vh1 = copyH(context, 1) ?? pendingH
 
-                        // 3) Sample the REAL successor of idLast from row 0.
-                        let phaseS0Start = CFAbsoluteTimeGetCurrent()
-                        let s0 = llama_sampler_sample(sampler, context, 0)
-                        if s0 == -1 { finishReason = "sampler_error"; break }
-                        if llama_vocab_is_eog(vocab, s0) { finishReason = "eog"; break }
-                        llama_sampler_accept(sampler, s0)
-                        phaseSample += CFAbsoluteTimeGetCurrent() - phaseS0Start
+                        // 3) Sample every row's real successor WITHOUT accepting;
+                        //    MtpSpeculator decides which become generated tokens.
+                        let phaseSampleStart = CFAbsoluteTimeGetCurrent()
+                        var reals: [llama_token] = []
+                        reals.reserveCapacity(drafts.count + 1)
+                        var firstStopRow: Int? = nil
+                        var sampleFailed = false
+                        for k in 0...drafts.count {
+                            let r = llama_sampler_sample(sampler, context, Int32(k))
+                            if r == -1 { sampleFailed = true; break }
+                            reals.append(r)
+                            if firstStopRow == nil, llama_vocab_is_eog(vocab, r) { firstStopRow = k }
+                        }
+                        phaseSample += CFAbsoluteTimeGetCurrent() - phaseSampleStart
+                        if sampleFailed { finishReason = "sampler_error"; break }
 
-                        // Pure verify decision (accept/reject, position advance,
-                        // rollback position, which hidden state to carry forward).
-                        // See MtpSpeculator for the invariants this enforces.
-                        let step = MtpSpeculator.decide(d0: d0, s0: s0, nextPos: Int(nextPos))
+                        // Pure verify decision (acceptance count, position
+                        // advance, rollback position, which hidden state to
+                        // carry forward). See MtpSpeculator for the invariants.
+                        let step = MtpSpeculator.decide(drafts: drafts, reals: reals,
+                                                        firstStopRow: firstStopRow,
+                                                        nextPos: Int(nextPos))
                         mtpRounds += 1
                         if step.hit { mtpHits += 1 }
+                        mtpAccepted += step.accepted
 
-                        if step.hit {
-                            // HIT: idLast@nextPos and d0(=s0)@nextPos+1 both valid;
-                            // row 1 gives the next token s1 for free.
-                            if !consumeToken(s0) { break }
-                            if generated >= limit { break }
-                            let phaseS1Start = CFAbsoluteTimeGetCurrent()
-                            let s1 = llama_sampler_sample(sampler, context, 1)
-                            if s1 == -1 { finishReason = "sampler_error"; break }
-                            if llama_vocab_is_eog(vocab, s1) { finishReason = "eog"; break }
-                            llama_sampler_accept(sampler, s1)
-                            phaseSample += CFAbsoluteTimeGetCurrent() - phaseS1Start
-                            if !consumeToken(s1) { break }
-                            idLast = s1
-                        } else {
-                            // MISS: drop the mispredicted d0@nextPos+1 from both
-                            // contexts (rollback distance 1 <= n_rs_seq -> cheap RS
-                            // seq_rm even on the hybrid/recurrent target).
-                            if let rb = step.rollbackPos {
-                                if let mem = llama_get_memory(context) {
-                                    _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
-                                }
-                                if let dmem = llama_get_memory(dft) {
-                                    _ = llama_memory_seq_rm(dmem, 0, llama_pos(rb), -1)
-                                }
-                            }
-                            if !consumeToken(s0) { break }
-                            idLast = s0
+                        // 4) Emit the committed reals in order. A stop-string
+                        //    match or the token limit ends generation here; the
+                        //    generation-end clear (below) discards the
+                        //    decoded-but-unemitted rows, so no trim is needed —
+                        //    any future KV-preservation work must trim from
+                        //    nextPos + <emitted> first.
+                        var stopped = false
+                        for k in 0..<step.emitCount {
+                            if generated >= limit { stopped = true; break }
+                            llama_sampler_accept(sampler, reals[k])
+                            if !consumeToken(reals[k]) { stopped = true; break }
                         }
-                        pendingH = (step.carryHFromRow == 1) ? vh1 : vh0
-                        nextPos += llama_pos(step.posAdvance)
-                        phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample)
+
+                        // Roll back rejected drafts from BOTH contexts (rows
+                        // beyond what was emitted; rollback distance <=
+                        // mtpMaxDraft -> cheap RS seq_rm on the hybrid target).
+                        if let rb = step.rollbackPos {
+                            if let mem = llama_get_memory(context) {
+                                _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
+                            }
+                            if let dmem = llama_get_memory(dft) {
+                                _ = llama_memory_seq_rm(dmem, 0, llama_pos(rb), -1)
+                            }
+                        }
+
+                        // Hidden state pairing with the last emitted token
+                        // (carryHFromRow = emitCount - 1) — the input h for the
+                        // next round's draft decode.
+                        let carryH = copyH(context, step.carryHFromRow) ?? pendingH
+
+                        // Catch-up: on a full accept the draft context holds
+                        // inputs only through nextPos+drafts.count-1, while the
+                        // next round decodes at nextPos+emitCount — leaving one
+                        // gap at the last accepted token's position. Feed it
+                        // with the REAL token and the target's hidden state
+                        // (partial accepts are already contiguous: the rollback
+                        // trimmed the rejected tail).
+                        var phaseCatchup: TimeInterval = 0
+                        if !stopped, firstStopRow == nil, step.emitCount == drafts.count + 1 {
+                            let phaseCatchupStart = CFAbsoluteTimeGetCurrent()
+                            _ = decodeDraft(reals[drafts.count - 1],
+                                            nextPos + llama_pos(drafts.count),
+                                            copyH(context, step.carryHFromRow - 1) ?? carryH)
+                            phaseCatchup = CFAbsoluteTimeGetCurrent() - phaseCatchupStart
+                        }
+
+                        phaseStats.record(draft: phaseDraft, verify: phaseVerify,
+                                          sample: phaseSample, catchup: phaseCatchup)
+
+                        if stopped { break }
+                        if firstStopRow != nil {
+                            // An eog real was sampled beyond the emitted set;
+                            // it was never emitted, generation is complete.
+                            finishReason = "eog"
+                            break
+                        }
+
+                        pendingH = carryH
+                        nextPos += llama_pos(step.emitCount)
+                        idLast = reals[step.emitCount - 1]
                     }
                 }
             }
 
-            // Report the draft acceptance rate so the speed-up (or lack of it) can
-            // be attributed: a low hit rate means the draft head is mispredicting;
-            // a high hit rate with no throughput gain means the per-round overhead
-            // (extra lm_head projections) is dominating for this model.
+            // Report the draft acceptance so the speed-up (or lack of it) can
+            // be attributed: a low depth means the draft head is mispredicting
+            // (or pMin is cutting chains); depth near max draft with no
+            // throughput gain means the per-round overhead (extra projections,
+            // wider verify) is dominating for this model.
             let mtpAttempts = mtpRounds + mtpNoDraft
             let hitPct = mtpRounds > 0 ? (mtpHits * 100 / mtpRounds) : 0
-            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
+            let avgDepth = Double(mtpAccepted) / Double(max(1, mtpRounds))
+            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) accepted=\(mtpAccepted) depth=\(String(format: "%.2f", avgDepth)) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
 
             // The two-context speculative path manages KV positions in a way that
             // the cross-call prefix-reuse tracking can't reconstruct, so clear both

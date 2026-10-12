@@ -1,62 +1,119 @@
 import XCTest
 
+/// Generalized verify-round decisions for depth-N MTP speculative decoding.
+/// The depth-1 cases are restated against the new API (every historical
+/// invariant is kept), followed by the depth-2 matrix.
 final class MtpSpeculatorTests: XCTestCase {
 
-    // MARK: - HIT (draft accepted: d0 == s0)
+    // MARK: - Depth-1 equivalents (full accept / miss)
 
-    func testHitAdvancesByTwoAndCarriesRow1() {
-        let d = MtpSpeculator.decide(d0: 42, s0: 42, nextPos: 10)
+    func testDepth1FullAcceptMatchesOldHitInvariants() {
+        let d = MtpSpeculator.decide(drafts: [42], reals: [42, 7], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(d.accepted, 1)
+        XCTAssertEqual(d.emitCount, 2, "idLast + the drafted token")
         XCTAssertTrue(d.hit)
-        XCTAssertEqual(d.posAdvance, 2, "a hit consumes idLast + the drafted token")
-        XCTAssertNil(d.rollbackPos, "nothing to roll back on a hit")
-        XCTAssertEqual(d.carryHFromRow, 1, "hit must carry the row-1 hidden state (pairs with the bonus token)")
+        XCTAssertNil(d.rollbackPos, "nothing to roll back on a full accept")
+        XCTAssertEqual(d.carryHFromRow, 1, "must carry the row-1 hidden state (pairs with the bonus token)")
     }
 
-    func testHitDecisionIsIndependentOfPosition() {
-        let a = MtpSpeculator.decide(d0: 7, s0: 7, nextPos: 0)
-        let b = MtpSpeculator.decide(d0: 7, s0: 7, nextPos: 9999)
-        XCTAssertEqual(a, b)
-        XCTAssertNil(a.rollbackPos)
-    }
-
-    // MARK: - MISS (draft rejected: d0 != s0)
-
-    func testMissAdvancesByOneAndCarriesRow0() {
-        let d = MtpSpeculator.decide(d0: 42, s0: 99, nextPos: 10)
+    func testDepth1MissMatchesOldMissInvariants() {
+        let d = MtpSpeculator.decide(drafts: [42], reals: [99, 7], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(d.accepted, 0)
+        XCTAssertEqual(d.emitCount, 1, "a miss only commits the resampled token")
         XCTAssertFalse(d.hit)
-        XCTAssertEqual(d.posAdvance, 1, "a miss only commits the resampled token")
-        XCTAssertEqual(d.carryHFromRow, 0, "miss must carry the row-0 hidden state (pairs with the resampled token)")
+        XCTAssertEqual(d.rollbackPos, 11, "the drafted token sits at nextPos + 1")
+        XCTAssertEqual(d.carryHFromRow, 0, "must carry the row-0 hidden state (pairs with the resampled token)")
     }
 
-    func testMissRollsBackTheDraftedPosition() {
-        // The drafted token sits at nextPos + 1; that slot must be removed.
-        let d = MtpSpeculator.decide(d0: 1, s0: 2, nextPos: 10)
+    // MARK: - Depth-2 matrix
+
+    func testDepth2FullAcceptEmitsAllThreeAndCarriesRow2() {
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 8, 33], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(d.accepted, 2)
+        XCTAssertEqual(d.emitCount, 3)
+        XCTAssertTrue(d.hit)
+        XCTAssertNil(d.rollbackPos, "every decoded row was consumed")
+        XCTAssertEqual(d.carryHFromRow, 2, "last emitted token is row 2's successor — pairs with reals[2]")
+    }
+
+    func testDepth2PartialAcceptRollsBackExactlyTheUnconsumedRows() {
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 9, 33], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(d.accepted, 1)
+        XCTAssertEqual(d.emitCount, 2)
+        XCTAssertTrue(d.hit)
+        XCTAssertEqual(d.rollbackPos, 12, "nextPos + emitCount — drop the rejected d1 only")
+        XCTAssertEqual(d.carryHFromRow, 1)
+    }
+
+    func testDepth2FirstMissBehavesLikeDepth1Miss() {
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [9, 33, 34], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(d.accepted, 0)
+        XCTAssertEqual(d.emitCount, 1)
+        XCTAssertFalse(d.hit)
         XCTAssertEqual(d.rollbackPos, 11)
+        XCTAssertEqual(d.carryHFromRow, 0)
     }
 
-    func testMissRollbackTracksNextPos() {
-        XCTAssertEqual(MtpSpeculator.decide(d0: 1, s0: 2, nextPos: 0).rollbackPos, 1)
-        XCTAssertEqual(MtpSpeculator.decide(d0: 1, s0: 2, nextPos: 5).rollbackPos, 6)
-        XCTAssertEqual(MtpSpeculator.decide(d0: 1, s0: 2, nextPos: 1000).rollbackPos, 1001)
+    // MARK: - Stop capping (eog sampled as a real; drafts are never eog)
+
+    func testEogAtRow0EmitsNothing() {
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [4444, 33, 34], firstStopRow: 0, nextPos: 10)
+        XCTAssertEqual(d.emitCount, 0, "the eog token is never emitted")
+        XCTAssertEqual(d.rollbackPos, 10, "roll back from nextPos itself")
+        XCTAssertEqual(d.carryHFromRow, 0, "clamped: no emitted row to pair with")
     }
 
-    // MARK: - h/token pairing invariant (the historically inverted bug)
+    func testEogAtRow1CapsAWouldBeFullAccept() {
+        // Invariant: reals.count == drafts.count + 1 (3 entries); eog at row 1.
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 4444, 34], firstStopRow: 1, nextPos: 10)
+        XCTAssertEqual(d.accepted, 1)
+        XCTAssertEqual(d.emitCount, 1, "capped at the first stop row")
+        XCTAssertEqual(d.rollbackPos, 11)
+        XCTAssertEqual(d.carryHFromRow, 0)
+    }
 
-    func testCarryRowDiffersBetweenHitAndMiss() {
-        let hit = MtpSpeculator.decide(d0: 5, s0: 5, nextPos: 3)
-        let miss = MtpSpeculator.decide(d0: 5, s0: 6, nextPos: 3)
-        XCTAssertEqual(hit.carryHFromRow, 1)
-        XCTAssertEqual(miss.carryHFromRow, 0)
-        XCTAssertNotEqual(hit.carryHFromRow, miss.carryHFromRow,
-                          "the hit/miss hidden-state pairing must never collapse to the same row")
+    // MARK: - h/token pairing invariant across every depth (the historically
+    //        inverted bug): carryHFromRow is ALWAYS emitCount - 1.
+
+    func testCarryRowAlwaysPairsWithLastEmittedRow() {
+        let cases: [(drafts: [Int32], reals: [Int32], stop: Int?)] = [
+            ([42], [42, 7], nil),
+            ([42], [99, 7], nil),
+            ([7, 8], [7, 8, 33], nil),
+            ([7, 8], [7, 9, 33], nil),
+            ([7, 8], [9, 33, 34], nil),
+            ([7, 8], [4444, 33, 34], 0),
+            ([7, 8], [7, 4444, 34], 1),
+        ]
+        for c in cases {
+            let d = MtpSpeculator.decide(drafts: c.drafts, reals: c.reals, firstStopRow: c.stop, nextPos: 3)
+            XCTAssertEqual(d.carryHFromRow, Int32(max(0, d.emitCount - 1)),
+                           "carry row must pair with the last emitted row for \(c)")
+        }
+    }
+
+    // MARK: - Rollback tracks nextPos (position independence)
+
+    func testRollbackTracksNextPos() {
+        for p in [0, 10, 1000] {
+            let d = MtpSpeculator.decide(drafts: [7, 8], reals: [9, 33, 34], firstStopRow: nil, nextPos: p)
+            XCTAssertEqual(d.rollbackPos, p + 1)
+        }
+    }
+
+    func testFullConsumeHasNoRollback() {
+        XCTAssertEqual(MtpSpeculator.decide(drafts: [7, 8], reals: [7, 8, 33],
+                                             firstStopRow: nil, nextPos: 999).rollbackPos, nil)
+        XCTAssertEqual(MtpSpeculator.decide(drafts: [7], reals: [7, 33],
+                                             firstStopRow: nil, nextPos: 999).rollbackPos, nil)
     }
 
     // MARK: - Token-value edge cases (decision depends only on equality)
 
-    func testNegativeAndZeroTokenIdsCompareByEquality() {
-        XCTAssertTrue(MtpSpeculator.decide(d0: 0, s0: 0, nextPos: 4).hit)
-        XCTAssertTrue(MtpSpeculator.decide(d0: -1, s0: -1, nextPos: 4).hit)
-        XCTAssertFalse(MtpSpeculator.decide(d0: 0, s0: -1, nextPos: 4).hit)
-        XCTAssertFalse(MtpSpeculator.decide(d0: Int32.max, s0: Int32.min, nextPos: 4).hit)
+    func testExtremeTokenIdsCompareByEquality() {
+        XCTAssertTrue(MtpSpeculator.decide(drafts: [0], reals: [0, 1], firstStopRow: nil, nextPos: 4).hit)
+        XCTAssertTrue(MtpSpeculator.decide(drafts: [-1], reals: [-1, 1], firstStopRow: nil, nextPos: 4).hit)
+        XCTAssertFalse(MtpSpeculator.decide(drafts: [0], reals: [-1, 1], firstStopRow: nil, nextPos: 4).hit)
+        XCTAssertFalse(MtpSpeculator.decide(drafts: [Int32.max], reals: [Int32.min, 1], firstStopRow: nil, nextPos: 4).hit)
     }
 }
