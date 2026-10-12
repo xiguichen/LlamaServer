@@ -212,6 +212,13 @@ final class LlamaInference: @unchecked Sendable {
         var modelParams = llama_model_default_params()
         // Offload everything to Metal GPU when available.
         modelParams.n_gpu_layers = 999
+        // llama.cpp b11557 defaults load_mtp=false and skips the NextN/MTP
+        // tensors at load (TENSOR_SKIP); building an MTP draft context on a
+        // model loaded without them aborts in graph_mtp ("MTP block missing
+        // nextn.eh_proj"). Set it explicitly from the request — with MTP off
+        // this now also skips the nextn weights (lower RSS than b9553, which
+        // always loaded them).
+        modelParams.load_mtp = useMtp
 
         // Durable breadcrumb flushed to disk: if llama.cpp hard-aborts
         // (GGML_ABORT/SIGABRT) on an unsupported architecture or OOMs during
