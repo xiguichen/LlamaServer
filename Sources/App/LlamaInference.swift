@@ -1139,7 +1139,7 @@ final class LlamaInference: @unchecked Sendable {
         // Repetition penalties apply regardless of temperature.
         if params.repeatPenalty != 1.0 || params.frequencyPenalty != 0.0 || params.presencePenalty != 0.0 {
             llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-                params.repeatLastN, params.repeatPenalty,
+                llama_vocab_n_tokens(vocab), params.repeatLastN, params.repeatPenalty,
                 params.frequencyPenalty, params.presencePenalty))
         }
 

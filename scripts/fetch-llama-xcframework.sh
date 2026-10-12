@@ -13,7 +13,7 @@
 # Browse tags at: https://github.com/ggml-org/llama.cpp/releases
 set -euo pipefail
 
-LLAMA_TAG="${LLAMA_TAG:-b9553}"
+LLAMA_TAG="${LLAMA_TAG:-b11557}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$ROOT_DIR/vendor/llama.xcframework"

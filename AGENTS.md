@@ -14,7 +14,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 - `vendor/llama.xcframework` is cached across runs by the release tag + script hash. Only re-downloaded when the tag or `fetch-llama-xcframework.sh` changes.
 - **No Package.swift.** Project is defined in `project.yml` (XcodeGen). Always edit `project.yml`, never the `.xcodeproj` directly.
-- **No local llama.cpp compilation.** `vendor/llama.xcframework` is prebuilt, fetched with `bash scripts/fetch-llama-xcframework.sh`. Pinned to tag `b9553`.
+- **No local llama.cpp compilation.** `vendor/llama.xcframework` is prebuilt, fetched with `bash scripts/fetch-llama-xcframework.sh`. Pinned to tag `b11557`.
 - The `.xcodeproj` is **never committed** (`*.xcodeproj` in `.gitignore`). CI regenerates it on every run.
 
 ## Architecture
