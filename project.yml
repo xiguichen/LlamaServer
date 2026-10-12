@@ -112,6 +112,7 @@ targets:
       - path: Sources/App/ReuseSurvival.swift
         createIntermediateGroups: true
       - path: Sources/App/StartupTimer.swift
+      - path: Sources/App/MtpPhaseStats.swift
         createIntermediateGroups: true
       - path: Sources/App/EngineConfigSpec.swift
         createIntermediateGroups: true

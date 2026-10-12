@@ -1417,6 +1417,11 @@ final class LlamaInference: @unchecked Sendable {
             var mtpRounds = 0      // verify rounds that ran a draft
             var mtpHits = 0        // rounds where the draft token was accepted
             var mtpNoDraft = 0     // rounds with no usable draft (plain fallback)
+            // Per-phase timing for the round, aggregated into the stats line.
+            // Completed rounds record one triplet; a round aborted by eog /
+            // stop-string / sampler error records nothing (same semantics as
+            // mtpRounds, which counts only decided rounds).
+            var phaseStats = MtpPhaseStats()
 
             // Position in the target where the next "idLast" will be (re-)decoded.
             // The prompt occupies [0, promptTokens.count); generation starts there.
@@ -1445,8 +1450,14 @@ final class LlamaInference: @unchecked Sendable {
                         // 1) Draft one token with the draft context.
                         var d0: llama_token = -1
                         var haveDraft = false
-                        if decodeDraft(idLast, nextPos, pendingH) == 0 {
+                        let phaseDraftStart = CFAbsoluteTimeGetCurrent()
+                        let draftRC = decodeDraft(idLast, nextPos, pendingH)
+                        let phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
+                        var phaseSample: TimeInterval = 0
+                        if draftRC == 0 {
+                            let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
                             let cand = llama_sampler_sample(draftSampler, dft, 0)
+                            phaseSample += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
                             if cand != -1 && !llama_vocab_is_eog(vocab, cand) {
                                 d0 = cand
                                 haveDraft = true
@@ -1456,13 +1467,19 @@ final class LlamaInference: @unchecked Sendable {
                         // No usable draft -> plain single-token target decode.
                         if !haveDraft {
                             mtpNoDraft += 1
-                            guard decodeSingleTarget(idLast, nextPos) == 0 else {
+                            let phaseFallbackStart = CFAbsoluteTimeGetCurrent()
+                            let fallbackRC = decodeSingleTarget(idLast, nextPos)
+                            let phaseVerify = CFAbsoluteTimeGetCurrent() - phaseFallbackStart
+                            guard fallbackRC == 0 else {
                                 recoverFromDecodeFailure(); throw InferenceError.decode
                             }
+                            let phaseFallbackSampleStart = CFAbsoluteTimeGetCurrent()
                             let s = llama_sampler_sample(sampler, context, 0)
                             if s == -1 { finishReason = "sampler_error"; break }
                             if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
                             llama_sampler_accept(sampler, s)
+                            phaseSample += CFAbsoluteTimeGetCurrent() - phaseFallbackSampleStart
+                            phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample)
                             pendingH = copyH(context, 0) ?? pendingH
                             idLast = s
                             nextPos += 1
@@ -1471,17 +1488,22 @@ final class LlamaInference: @unchecked Sendable {
                         }
 
                         // 2) Verify the draft: decode [idLast, d0] in the target.
-                        guard decodeVerify(idLast, d0, nextPos) == 0 else {
+                        let phaseVerifyStart = CFAbsoluteTimeGetCurrent()
+                        let verifyRC = decodeVerify(idLast, d0, nextPos)
+                        let phaseVerify = CFAbsoluteTimeGetCurrent() - phaseVerifyStart
+                        guard verifyRC == 0 else {
                             recoverFromDecodeFailure(); throw InferenceError.decode
                         }
                         let vh0 = copyH(context, 0) ?? pendingH
                         let vh1 = copyH(context, 1) ?? pendingH
 
                         // 3) Sample the REAL successor of idLast from row 0.
+                        let phaseS0Start = CFAbsoluteTimeGetCurrent()
                         let s0 = llama_sampler_sample(sampler, context, 0)
                         if s0 == -1 { finishReason = "sampler_error"; break }
                         if llama_vocab_is_eog(vocab, s0) { finishReason = "eog"; break }
                         llama_sampler_accept(sampler, s0)
+                        phaseSample += CFAbsoluteTimeGetCurrent() - phaseS0Start
 
                         // Pure verify decision (accept/reject, position advance,
                         // rollback position, which hidden state to carry forward).
@@ -1495,10 +1517,12 @@ final class LlamaInference: @unchecked Sendable {
                             // row 1 gives the next token s1 for free.
                             if !consumeToken(s0) { break }
                             if generated >= limit { break }
+                            let phaseS1Start = CFAbsoluteTimeGetCurrent()
                             let s1 = llama_sampler_sample(sampler, context, 1)
                             if s1 == -1 { finishReason = "sampler_error"; break }
                             if llama_vocab_is_eog(vocab, s1) { finishReason = "eog"; break }
                             llama_sampler_accept(sampler, s1)
+                            phaseSample += CFAbsoluteTimeGetCurrent() - phaseS1Start
                             if !consumeToken(s1) { break }
                             idLast = s1
                         } else {
@@ -1518,6 +1542,7 @@ final class LlamaInference: @unchecked Sendable {
                         }
                         pendingH = (step.carryHFromRow == 1) ? vh1 : vh0
                         nextPos += llama_pos(step.posAdvance)
+                        phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample)
                     }
                 }
             }
@@ -1528,7 +1553,7 @@ final class LlamaInference: @unchecked Sendable {
             // (extra lm_head projections) is dominating for this model.
             let mtpAttempts = mtpRounds + mtpNoDraft
             let hitPct = mtpRounds > 0 ? (mtpHits * 100 / mtpRounds) : 0
-            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated)")
+            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
 
             // The two-context speculative path manages KV positions in a way that
             // the cross-call prefix-reuse tracking can't reconstruct, so clear both
