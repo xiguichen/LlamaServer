@@ -1491,11 +1491,18 @@ final class LlamaInference: @unchecked Sendable {
                         //    output), which is why gating matters more with
                         //    depth — a low-confidence chain link gets cut.
                         var drafts: [llama_token] = []
+                        // Positions actually written into the draft context this
+                        // round, counting from nextPos. Needed because a gated
+                        // chain-cut still decodes the rejected link's position:
+                        // catch-up below uses this to tell whether the gap is
+                        // already populated.
+                        var draftEntries = 0
                         let phaseDraftStart = CFAbsoluteTimeGetCurrent()
                         let drc0 = decodeDraft(idLast, nextPos, pendingH)
                         var phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
                         var phaseSample: TimeInterval = 0
                         if drc0 == 0 {
+                            draftEntries = 1
                             let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
                             let cand0 = llama_sampler_sample(draftSampler, dft, 0)
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
@@ -1506,6 +1513,7 @@ final class LlamaInference: @unchecked Sendable {
                                     let drc1 = decodeDraft(cand0, nextPos + 1, copyH(dft, 0) ?? pendingH)
                                     phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainStart
                                     if drc1 == 0 {
+                                        draftEntries = 2
                                         let phaseChainSampleStart = CFAbsoluteTimeGetCurrent()
                                         let cand1 = llama_sampler_sample(draftSampler, dft, 0)
                                         phaseSample += CFAbsoluteTimeGetCurrent() - phaseChainSampleStart
@@ -1579,7 +1587,7 @@ final class LlamaInference: @unchecked Sendable {
                         //    generation-end clear (below) discards the
                         //    decoded-but-unemitted rows, so no trim is needed —
                         //    any future KV-preservation work must trim from
-                        //    nextPos + <emitted> first.
+                        //    nextPos + emitted-count first.
                         var stopped = false
                         for k in 0..<step.emitCount {
                             if generated >= limit { stopped = true; break }
@@ -1605,14 +1613,19 @@ final class LlamaInference: @unchecked Sendable {
                         let carryH = copyH(context, step.carryHFromRow) ?? pendingH
 
                         // Catch-up: on a full accept the draft context holds
-                        // inputs only through nextPos+drafts.count-1, while the
+                        // inputs only through nextPos+draftEntries-1, while the
                         // next round decodes at nextPos+emitCount — leaving one
                         // gap at the last accepted token's position. Feed it
                         // with the REAL token and the target's hidden state
                         // (partial accepts are already contiguous: the rollback
-                        // trimmed the rejected tail).
+                        // trimmed the rejected tail). MtpSpeculator.catchupNeeded
+                        // excludes the gated-chain-cut case, whose position is
+                        // already written.
                         var phaseCatchup: TimeInterval = 0
-                        if !stopped, firstStopRow == nil, step.emitCount == drafts.count + 1 {
+                        if !stopped, firstStopRow == nil,
+                           MtpSpeculator.catchupNeeded(emitCount: step.emitCount,
+                                                       draftCount: drafts.count,
+                                                       draftEntries: draftEntries) {
                             let phaseCatchupStart = CFAbsoluteTimeGetCurrent()
                             _ = decodeDraft(reals[drafts.count - 1],
                                             nextPos + llama_pos(drafts.count),

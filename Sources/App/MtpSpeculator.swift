@@ -69,4 +69,28 @@ struct MtpSpeculator {
                         rollbackPos: rollbackPos,
                         carryHFromRow: carryHFromRow)
     }
+
+    /// Whether the draft context needs a catch-up decode after this round.
+    ///
+    /// On a full accept the next round decodes at `nextPos + emitCount` while
+    /// the draft context holds inputs only through `nextPos + draftEntries - 1`
+    /// — leaving a one-position gap at the last accepted token. It only needs
+    /// filling when that position was never written, i.e. every drafted token
+    /// was also decoded (`draftCount == draftEntries`).
+    ///
+    /// A chained draft cut by gating is the exception: it was decoded (so its
+    /// position, `nextPos + 1`, is already populated) but not accepted. Filling
+    /// it would re-decode a consumed position with the target's hidden state
+    /// rather than the chain's, which the recurrent draft context does not
+    /// support.
+    ///
+    /// - Parameters:
+    ///   - emitCount: committed reals this round (from `decide`).
+    ///   - draftCount: accepted+drafted tokens this round.
+    ///   - draftEntries: positions actually written into the draft context,
+    ///     counting from `nextPos` (1 after the initial decode, 2 if the
+    ///     chained decode also succeeded).
+    static func catchupNeeded(emitCount: Int, draftCount: Int, draftEntries: Int) -> Bool {
+        emitCount == draftCount + 1 && draftCount == draftEntries
+    }
 }
