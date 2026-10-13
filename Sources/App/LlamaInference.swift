@@ -67,14 +67,18 @@ final class LlamaInference: @unchecked Sendable {
     /// a hidden state row of this width (the target's post-norm next-token state).
     private var nEmbd = 0
 
-    /// Max speculative draft depth per round. Depth 2 chains a second draft
-    /// through the same MTP head (the model has one MTP block; a second draft
-    /// re-applies it self-conditioned on the draft's own hidden state). The
-    /// target rollback distance stays <= mtpMaxDraft — covered by the
-    /// recurrent-state ring (n_rs_seq, derived from this value) so rejected
-    /// drafts are rolled back with a cheap `seq_rm` (the upstream "RS" path)
-    /// rather than a full-state checkpoint restore.
-    private let mtpMaxDraft = 2
+    /// Max speculative draft depth per round. The round machinery is
+    /// depth-N capable (chained drafts, N-row verify, catch-up), but the
+    /// configured depth is 1: on-device depth-2 measured ~9-13% SLOWER than
+    /// plain decoding, because the draft cost scales with the number of
+    /// sampled verify rows and the sampler (top_p over a ~248K vocab) — not
+    /// model compute — dominates the round. Depth 1 keeps the target
+    /// rollback distance at 1, covered by the recurrent-state ring (n_rs_seq,
+    /// derived from this value) so rejected drafts are rolled back with a
+    /// cheap `seq_rm` (the upstream "RS" path) rather than a full-state
+    /// checkpoint restore. Raising this to 2 requires re-checking the device
+    /// A/B (`ab-device.sh`).
+    private let mtpMaxDraft = 1
 
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model
     /// predicts multiple future tokens per forward pass, which can increase
