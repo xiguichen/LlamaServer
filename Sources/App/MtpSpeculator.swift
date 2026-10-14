@@ -10,8 +10,11 @@ import Foundation
 /// Per round the target context has decoded `[idLast, d0, d1, ...]` — one row
 /// for the last emitted token plus one row per drafted token — and produced
 /// one "next-token" hidden state per row (row k = successor of the token at
-/// `nextPos + k`). The driver samples `reals[k]` from row k WITHOUT accepting
-/// them; drafts are never eog (the driver filters them). The rules:
+/// `nextPos + k`). The driver samples `reals[k]` from row k in order and stops
+/// at the first miss or eog, so every sampled real except an eog is emitted,
+/// or the round ends generation at the limit / a stop string
+/// (`llama_sampler_sample` accepts each token it returns). Drafts are never
+/// eog (the driver filters them). The rules:
 ///
 ///   * `accepted` `a` — the leading drafts that match their sampled reals.
 ///   * `emitCount = min(a + 1, firstStopRow)`: the sampled real at row 0 is

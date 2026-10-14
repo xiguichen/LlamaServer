@@ -63,6 +63,20 @@ final class LlamaInference: @unchecked Sendable {
     /// initialize (e.g. draft context creation fails) and gracefully fall back.
     private var mtpEnabled = false
 
+    /// The prompt tokens the draft context holds at positions [0, count) —
+    /// mirrored from the target on the last generation. Lets the next prompt
+    /// keep the draft's KV for a prefix it shares, instead of leaving the
+    /// draft without the reused part of the prompt. Empty when the draft
+    /// holds no complete prompt.
+    private var draftPromptTokens: [llama_token] = []
+
+    /// Target hidden state h_{end-1} at each prompt-decode boundary `end` of
+    /// that same prompt. When the next prompt keeps the draft prefix
+    /// [0, end), the first newly mirrored row (position `end`) pairs with
+    /// h_{end-1} from here instead of zeros. The hybrid snapshot boundary
+    /// (stableLen) is always one of these ends.
+    private var draftPromptBoundaryH: [Int: [Float]] = [:]
+
     /// The model's embedding width (n_embd). The MTP draft context is seeded with
     /// a hidden state row of this width (the target's post-norm next-token state).
     private var nEmbd = 0
@@ -567,6 +581,8 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.ctx_other = target
         Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
 
+        draftPromptTokens = []
+        draftPromptBoundaryH = [:]
         guard let dft = llama_init_from_model(model, ctxParams) else {
             FileLogger.shared.warn("MTP: draft context creation returned NULL — falling back to plain decoding")
             return false
@@ -577,6 +593,49 @@ final class LlamaInference: @unchecked Sendable {
         cllama_set_embeddings_nextn(UnsafeMutableRawPointer(target), true, false)
         cllama_set_embeddings_nextn(UnsafeMutableRawPointer(dft), true, true)
         self.mtpContext = dft
+        return true
+    }
+
+    /// Mirrors a prompt chunk the target just decoded into the MTP draft
+    /// context, so the draft's attention layer sees the prompt (llama.cpp's
+    /// draft-mtp `process()` hook). Without it the draft context holds only
+    /// generated tokens and drafts from almost no context. Row k pairs token
+    /// x_{start+k} with h_{start+k-1}: the target's unmasked nextn rows shifted
+    /// right by one, with `carryH` (the previous chunk's last h, zeros at the
+    /// start) in row 0. No row requests logits, so no lm_head pass.
+    /// Returns false if the mirror could not be written; drafts then degrade
+    /// but stay correct, since every emitted token comes from the target.
+    private func mirrorPromptChunkIntoDraft(_ tokens: UnsafePointer<llama_token>, start: Int, count: Int,
+                                            carryH: inout [Float]) -> Bool {
+        guard mtpEnabled, let dft = mtpContext, nEmbd > 0, count > 0,
+              let hTgt = cllama_get_embeddings_nextn(UnsafeMutableRawPointer(context))
+        else { return false }
+        var batch = llama_batch_init(Int32(count), Int32(nEmbd), 1)
+        var ownTok: UnsafeMutablePointer<llama_token>? = nil
+        if batch.token == nil {
+            ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: count)
+            batch.token = ownTok
+        }
+        defer {
+            if let ot = ownTok { batch.token = nil; ot.deallocate() }
+            llama_batch_free(batch)
+        }
+        batch.n_tokens = Int32(count)
+        for k in 0..<count {
+            batch.token[k] = tokens[k]
+            batch.pos[k] = llama_pos(start + k)
+            batch.n_seq_id[k] = 1
+            batch.seq_id[k]![0] = 0
+            batch.logits[k] = 0
+        }
+        guard let embd = batch.embd else { return false }
+        carryH.withUnsafeBufferPointer { embd.update(from: $0.baseAddress!, count: nEmbd) }
+        if count > 1 {
+            embd.advanced(by: nEmbd).update(from: hTgt, count: (count - 1) * nEmbd)
+        }
+        let lastH = Array(UnsafeBufferPointer(start: hTgt.advanced(by: (count - 1) * nEmbd), count: nEmbd))
+        guard llama_decode(dft, batch) == 0 else { return false }
+        carryH = lastH
         return true
     }
 
@@ -1215,6 +1274,43 @@ final class LlamaInference: @unchecked Sendable {
         // `lastChunkCount - 1`, not row 0.
         var lastChunkCount = 0
 
+        // MTP: the draft context must see the prompt too (see
+        // mirrorPromptChunkIntoDraft). Skipped when the draft shares the
+        // target's memory (llama.cpp keeps ctx_other only for such models): the
+        // draft then already sees the target's KV, the same `is_mem_shared`
+        // rule as upstream draft-mtp.
+        // The draft KV is kept across generations. When the target reuses a
+        // prefix [0, reuseLen) that the draft also holds (same tokens, per
+        // draftPromptTokens), trim the draft to that prefix and mirror only
+        // the rest. Otherwise start the draft empty: a draft row is only
+        // useful if it was computed from the same tokens.
+        let draftSharesTargetMemory = mtpContext.map {
+            cllama_get_ctx_other(UnsafeMutableRawPointer($0)) == UnsafeMutableRawPointer(context)
+        } ?? false
+        var mirrorPrompt = mtpEnabled && mtpContext != nil && !draftSharesTargetMemory
+        var draftPrefillH = [Float](repeating: 0, count: max(0, nEmbd))
+        let draftMemory = mirrorPrompt ? mtpContext.flatMap { llama_get_memory($0) } : nil
+        // Whether the draft ends up holding the whole prompt from position 0.
+        var draftHoldsPrompt = false
+        if let dmem = draftMemory {
+            var shared = 0
+            let maxShared = min(reuseLen, draftPromptTokens.count)
+            while shared < maxShared && draftPromptTokens[shared] == promptTokens[shared] { shared += 1 }
+            if reuseLen > 0, shared == reuseLen, llama_memory_seq_rm(dmem, 0, llama_pos(reuseLen), -1) {
+                draftHoldsPrompt = true
+                if let h = draftPromptBoundaryH[reuseLen], h.count == draftPrefillH.count { draftPrefillH = h }
+            } else {
+                llama_memory_clear(dmem, true)
+                draftHoldsPrompt = reuseLen == 0
+            }
+        }
+        draftPromptTokens = []
+        draftPromptBoundaryH = [:]
+        var boundaryH: [Int: [Float]] = [:]
+        // Carry the kept prefix's boundary h forward, so it survives a turn
+        // whose decodeRange(reuseLen, stableLen) is empty.
+        if draftHoldsPrompt && reuseLen > 0 { boundaryH[reuseLen] = draftPrefillH }
+
         // Decodes the token range [lo, hi) in n_batch-sized chunks. Throws (after
         // recovery) on a decode failure. Generation always decodes through to
         // `total`, so this is split into two phases only to land a snapshot
@@ -1245,8 +1341,34 @@ final class LlamaInference: @unchecked Sendable {
                     throw InferenceError.decode
                 }
                 lastChunkCount = count
+                if mirrorPrompt {
+                    func mirror() -> Bool {
+                        tokens.withUnsafeBufferPointer { buf in
+                            mirrorPromptChunkIntoDraft(buf.baseAddress!.advanced(by: off), start: off,
+                                                       count: count, carryH: &draftPrefillH)
+                        }
+                    }
+                    var ok = mirror()
+                    if !ok, let dmem = draftMemory {
+                        // Transient decode failure: retry once on an empty
+                        // draft (which accepts any start position).
+                        llama_memory_clear(dmem, true)
+                        draftHoldsPrompt = false
+                        ok = mirror()
+                    }
+                    if !ok {
+                        // Leave the draft EMPTY, never with a gap: a gap makes
+                        // every later draft decode fail the position check, so
+                        // MTP would silently stop drafting for this generation.
+                        FileLogger.shared.warn("MTP: mirroring prompt into the draft context failed at \(off); drafts may degrade")
+                        if let dmem = draftMemory { llama_memory_clear(dmem, true) }
+                        draftHoldsPrompt = false
+                        mirrorPrompt = false
+                    }
+                }
                 off += count
             }
+            if mirrorPrompt && hi > lo { boundaryH[hi] = draftPrefillH }
         }
 
         if !supportsPartialCacheReuse {
@@ -1270,6 +1392,10 @@ final class LlamaInference: @unchecked Sendable {
             }
         } else {
             try decodeRange(reuseLen, total)
+        }
+        if mirrorPrompt && draftHoldsPrompt {
+            draftPromptTokens = promptTokens
+            draftPromptBoundaryH = boundaryH
         }
 
         // Diagnostic: how does the formatted prompt end? It should include the
@@ -1512,7 +1638,6 @@ final class LlamaInference: @unchecked Sendable {
                 finishReason = "eog_immediate"
             } else {
                 firstTokenTime = CFAbsoluteTimeGetCurrent()
-                llama_sampler_accept(sampler, idLast)
                 genTokens += 1
                 if consumeToken(idLast) {
                     while generated < limit {
@@ -1585,7 +1710,6 @@ final class LlamaInference: @unchecked Sendable {
                             let s = llama_sampler_sample(sampler, context, 0)
                             if s == -1 { finishReason = "sampler_error"; break }
                             if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
-                            llama_sampler_accept(sampler, s)
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseFallbackSampleStart
                             phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample)
                             pendingH = copyH(context, 0) ?? pendingH
@@ -1610,6 +1734,11 @@ final class LlamaInference: @unchecked Sendable {
                         //    (a full sampler pass over the vocab each) is pure
                         //    waste. MtpSpeculator decides which become generated
                         //    tokens and accepts the shorter `reals`.
+                        //    llama_sampler_sample also ACCEPTS each token it
+                        //    returns (penalty history). Stopping at the first
+                        //    miss keeps that history to exactly the emitted
+                        //    tokens (plus a final eog), so the driver must not
+                        //    accept them again.
                         let phaseSampleStart = CFAbsoluteTimeGetCurrent()
                         var reals: [llama_token] = []
                         reals.reserveCapacity(drafts.count + 1)
@@ -1644,7 +1773,6 @@ final class LlamaInference: @unchecked Sendable {
                         var stopped = false
                         for k in 0..<step.emitCount {
                             if generated >= limit { stopped = true; break }
-                            llama_sampler_accept(sampler, reals[k])
                             if !consumeToken(reals[k]) { stopped = true; break }
                         }
 
@@ -1711,11 +1839,15 @@ final class LlamaInference: @unchecked Sendable {
             FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) accepted=\(mtpAccepted) depth=\(String(format: "%.2f", avgDepth)) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
 
             // The two-context speculative path manages KV positions in a way that
-            // the cross-call prefix-reuse tracking can't reconstruct, so clear both
-            // caches and reset tracking. Next call re-decodes the prompt (hybrid
-            // models reuse via the on-disk snapshot path instead).
+            // the cross-call prefix-reuse tracking can't reconstruct, so clear the
+            // target and reset tracking. Next call re-decodes the prompt (hybrid
+            // models reuse via the on-disk snapshot path instead). The draft KV
+            // is kept: the next prompt trims it to the reused prefix, which the
+            // draft mirrored this turn (see the prompt-start trim).
             if let mem = llama_get_memory(context) { llama_memory_clear(mem, true) }
-            if let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, true) }
+            // A draft sharing the target's memory is never mirrored or trimmed
+            // at prompt start, so its generation rows must be cleared here.
+            if draftSharesTargetMemory, let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, true) }
             decodedGenerated = 0
         } else {
         while generated < limit {
@@ -1769,7 +1901,7 @@ final class LlamaInference: @unchecked Sendable {
                     }
                     break
                 }
-                llama_sampler_accept(sampler, token)
+                // llama_sampler_sample already accepted `token`.
                 batchTokens.append(token)
             }
 
