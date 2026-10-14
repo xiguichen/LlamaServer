@@ -1209,6 +1209,12 @@ final class LlamaInference: @unchecked Sendable {
         var tokens = promptTokens
         let total = tokens.count
 
+        // Token count of the last prompt chunk decoded. The target's unmasked
+        // nextn hidden states are indexed by token offset WITHIN the last
+        // llama_decode batch, so the last prompt token's h is row
+        // `lastChunkCount - 1`, not row 0.
+        var lastChunkCount = 0
+
         // Decodes the token range [lo, hi) in n_batch-sized chunks. Throws (after
         // recovery) on a decode failure. Generation always decodes through to
         // `total`, so this is split into two phases only to land a snapshot
@@ -1238,6 +1244,7 @@ final class LlamaInference: @unchecked Sendable {
                     recoverFromDecodeFailure()
                     throw InferenceError.decode
                 }
+                lastChunkCount = count
                 off += count
             }
         }
@@ -1351,8 +1358,9 @@ final class LlamaInference: @unchecked Sendable {
         // The prompt has just been decoded into the target with nextn enabled, so
         // the last row's hidden state must be readable; if not, the model/runtime
         // isn't actually producing MTP states — fall back to plain decoding.
+        let lastPromptRow = Int32(max(0, lastChunkCount - 1))
         var usedMtp = mtpEnabled && mtpContext != nil
-        if usedMtp && copyH(context, 0) == nil {
+        if usedMtp && copyH(context, lastPromptRow) == nil {
             FileLogger.shared.warn("MTP: target nextn hidden state unavailable after prompt decode — using plain decoding")
             usedMtp = false
         }
@@ -1374,14 +1382,6 @@ final class LlamaInference: @unchecked Sendable {
             // context is still missing at the end of a round are carried into
             // the next round's draft decode as leading seed rows, so the draft
             // model is read once per round instead of once per row.
-
-            // Greedy sampler for the draft context (the draft only proposes; the
-            // target's real sampler decides what is actually emitted).
-            var draftChainParams = llama_sampler_chain_default_params()
-            draftChainParams.no_perf = true
-            let draftSampler = llama_sampler_chain_init(draftChainParams)
-            llama_sampler_chain_add(draftSampler, llama_sampler_init_greedy())
-            defer { llama_sampler_free(draftSampler) }
 
             // --- decode helpers (explicit positions; single sequence id 0) ---
             func decodeSingleTarget(_ token: llama_token, _ pos: llama_pos) -> Int32 {
@@ -1428,9 +1428,9 @@ final class LlamaInference: @unchecked Sendable {
                     batch.pos[i] = row.pos
                     batch.n_seq_id[i] = 1
                     batch.seq_id[i]![0] = 0
-                    // Only the LAST row exposes logits, so the row the draft is
-                    // sampled from is always output slot 0 however many seed
-                    // rows precede it.
+                    // Only the LAST row exposes logits; read it via index -1
+                    // (last output row). Batch index 0 is a seed row with no
+                    // logits once seed rows precede it.
                     batch.logits[i] = i == rows.count - 1 ? 1 : 0
                 }
                 if let base = batch.embd {
@@ -1448,18 +1448,32 @@ final class LlamaInference: @unchecked Sendable {
                 return rc
             }
 
-            // Softmax probability the draft model assigns to `token` for the
-            // most recent draft decode's output row 0 (the only row a
-            // single-token draft decode produces). Only consulted when
-            // MtpSpec.gateEnabled — i.e. for depth>1 chain links, to cut a link
-            // before the deeper one is decoded. At depth 1 the gate is disabled
-            // so a computed draft is always verified, and this vocab-wide
-            // softmax (248K exps) is never evaluated.
+            // The most recent draft decode's logits row. Index -1 (the last
+            // OUTPUT row), never 0: a non-negative index is a BATCH token index,
+            // and once seed rows precede the draft row, batch row 0 has no
+            // logits — llama_get_logits_ith returns NULL and
+            // llama_sampler_sample would GGML_ASSERT on it.
+            let vocabSize = Int(llama_vocab_n_tokens(vocab))
+            func draftLogits() -> UnsafeBufferPointer<Float>? {
+                guard let logits = llama_get_logits_ith(dft, -1) else { return nil }
+                return UnsafeBufferPointer(start: logits, count: vocabSize)
+            }
+
+            // The draft only proposes (the target's real sampler decides what
+            // is emitted), so it is a plain greedy argmax. -1 if no logits.
+            func sampleDraft() -> llama_token {
+                guard let row = draftLogits() else { return -1 }
+                return MtpSpec.argmax(row: row)
+            }
+
+            // Softmax probability the draft model assigns to `token`. Only
+            // consulted when MtpSpec.gateEnabled — i.e. for depth>1 chain
+            // links, to cut a link before the deeper one is decoded. At depth 1
+            // the gate is disabled so a computed draft is always verified, and
+            // this vocab-wide softmax (248K exps) is never evaluated.
             func draftConfidence(_ token: llama_token) -> Float {
-                guard let logits = llama_get_logits_ith(dft, 0) else { return 0 }
-                let vocabSize = Int(llama_vocab_n_tokens(vocab))
-                return MtpSpec.draftConfidence(row: UnsafeBufferPointer(start: logits, count: vocabSize),
-                                               token: token)
+                guard let row = draftLogits() else { return 0 }
+                return MtpSpec.draftConfidence(row: row, token: token)
             }
 
             // Draft acceptance instrumentation. A round proposes up to
@@ -1489,7 +1503,7 @@ final class LlamaInference: @unchecked Sendable {
             var idLast = llama_sampler_sample(sampler, context, -1)
             // h at the last prompt position (predicts idLast's successor) — pairs
             // with idLast to seed the draft (MTP head input: token x_p + h_{p-1}).
-            var pendingH = copyH(context, 0) ?? [Float](repeating: 0, count: nEmbd)
+            var pendingH = copyH(context, lastPromptRow) ?? [Float](repeating: 0, count: nEmbd)
 
             if idLast == -1 {
                 finishReason = "sampler_error"
@@ -1533,7 +1547,7 @@ final class LlamaInference: @unchecked Sendable {
                         if drc0 == 0 {
                             draftEntries = 1
                             let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
-                            let cand0 = llama_sampler_sample(draftSampler, dft, 0)
+                            let cand0 = sampleDraft()
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
                             if cand0 != -1, !llama_vocab_is_eog(vocab, cand0), (!MtpSpec.gateEnabled || draftConfidence(cand0) >= MtpSpec.pMin) {
                                 drafts.append(cand0)
@@ -1548,7 +1562,7 @@ final class LlamaInference: @unchecked Sendable {
                                     if drc1 == 0 {
                                         draftEntries = 2
                                         let phaseChainSampleStart = CFAbsoluteTimeGetCurrent()
-                                        let cand1 = llama_sampler_sample(draftSampler, dft, 0)
+                                        let cand1 = sampleDraft()
                                         phaseSample += CFAbsoluteTimeGetCurrent() - phaseChainSampleStart
                                         if cand1 != -1, !llama_vocab_is_eog(vocab, cand1), (!MtpSpec.gateEnabled || draftConfidence(cand1) >= MtpSpec.pMin) {
                                             drafts.append(cand1)
@@ -1589,8 +1603,13 @@ final class LlamaInference: @unchecked Sendable {
                             recoverFromDecodeFailure(); throw InferenceError.decode
                         }
 
-                        // 3) Sample every row's real successor WITHOUT accepting;
-                        //    MtpSpeculator decides which become generated tokens.
+                        // 3) Sample each row's real successor in order, stopping
+                        //    at the first row that can't extend the accepted
+                        //    prefix (a real that misses its draft, or eog): the
+                        //    rows after it are never emitted, so sampling them
+                        //    (a full sampler pass over the vocab each) is pure
+                        //    waste. MtpSpeculator decides which become generated
+                        //    tokens and accepts the shorter `reals`.
                         let phaseSampleStart = CFAbsoluteTimeGetCurrent()
                         var reals: [llama_token] = []
                         reals.reserveCapacity(drafts.count + 1)
@@ -1600,7 +1619,8 @@ final class LlamaInference: @unchecked Sendable {
                             let r = llama_sampler_sample(sampler, context, Int32(k))
                             if r == -1 { sampleFailed = true; break }
                             reals.append(r)
-                            if firstStopRow == nil, llama_vocab_is_eog(vocab, r) { firstStopRow = k }
+                            if llama_vocab_is_eog(vocab, r) { firstStopRow = k; break }
+                            if k < drafts.count, r != drafts[k] { break }
                         }
                         phaseSample += CFAbsoluteTimeGetCurrent() - phaseSampleStart
                         if sampleFailed { finishReason = "sampler_error"; break }

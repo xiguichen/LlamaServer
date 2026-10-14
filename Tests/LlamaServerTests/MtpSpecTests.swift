@@ -70,4 +70,34 @@ final class MtpSpecTests: XCTestCase {
             XCTAssertEqual(MtpSpec.draftConfidence(row: row, token: -1), 0)
         }
     }
+
+    // MARK: - Greedy draft argmax
+
+    func testArgmaxPicksLargestLogit() {
+        let logits: [Float] = [-3, 0.5, 7, 2]
+        logits.withUnsafeBufferPointer { row in
+            XCTAssertEqual(MtpSpec.argmax(row: row), 2)
+        }
+    }
+
+    func testArgmaxPicksFirstOnTieLikeGreedySampler() {
+        let logits: [Float] = [1, 9, 4, 9]
+        logits.withUnsafeBufferPointer { row in
+            XCTAssertEqual(MtpSpec.argmax(row: row), 1)
+        }
+    }
+
+    func testArgmaxHandlesAllNegativeLogits() {
+        let logits: [Float] = [-8, -2, -5]
+        logits.withUnsafeBufferPointer { row in
+            XCTAssertEqual(MtpSpec.argmax(row: row), 1)
+        }
+    }
+
+    func testArgmaxOfEmptyRowIsMinusOne() {
+        let logits: [Float] = []
+        logits.withUnsafeBufferPointer { row in
+            XCTAssertEqual(MtpSpec.argmax(row: row), -1)
+        }
+    }
 }

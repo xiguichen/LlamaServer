@@ -48,10 +48,14 @@ struct MtpSpeculator {
     /// Resolve one speculative verify round.
     /// - Parameters:
     ///   - drafts: the drafted tokens proposed this round (never eog).
-    ///   - reals: sampled successors from every verify row; the driver
-    ///     guarantees `reals.count == drafts.count + 1` (defensive clamping
-    ///     keeps a shorter array from indexing out of bounds).
-    ///   - firstStopRow: index of the first real that is eog, or nil.
+    ///   - reals: sampled successors of the verify rows, in row order. The
+    ///     driver samples lazily: it stops after the first real that misses
+    ///     its draft or is eog, so `reals` may be shorter than
+    ///     `drafts.count + 1`. Rows past that point can never be emitted, so
+    ///     the decision is the same as with every row sampled. The
+    ///     `reals.count` bounds below are what make a short `reals` safe.
+    ///   - firstStopRow: index of the first eog among the SAMPLED reals, or
+    ///     nil (an eog after the first miss is never sampled).
     ///   - nextPos: target write position where `idLast` was (re)decoded.
     static func decide(drafts: [Int32], reals: [Int32], firstStopRow: Int?, nextPos: Int) -> Decision {
         let stopRow = min(firstStopRow ?? drafts.count + 1, reals.count)

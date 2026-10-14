@@ -1,7 +1,8 @@
+import Accelerate
 import Foundation
 
-/// Pure MTP configuration decisions — output-slot sizing and draft-confidence
-/// gating. No llama C API lives here (the caller passes the GGUF-derived
+/// Pure MTP configuration decisions — output-slot sizing, draft-confidence
+/// gating, and the greedy draft argmax. No llama C API lives here (the caller passes the GGUF-derived
 /// head count and the raw logits row), so both are unit-testable without a
 /// model file, exactly like `KVCacheSpec`/`MtpSpeculator`.
 enum MtpSpec {
@@ -60,5 +61,17 @@ enum MtpSpec {
         for value in row { expSum += exp(value - maxValue) }
         guard expSum > 0, expSum.isFinite else { return 0 }
         return exp(row[Int(token)] - maxValue) / expSum
+    }
+
+    /// Greedy draft token: the index of the largest logit (first one on a
+    /// tie, like llama.cpp's greedy sampler), or -1 for an empty row. One
+    /// vectorized pass over the row, with no 248K-entry candidate array to
+    /// build as `llama_sampler_sample` does.
+    static func argmax(row: UnsafeBufferPointer<Float>) -> Int32 {
+        guard let base = row.baseAddress, !row.isEmpty else { return -1 }
+        var maxValue: Float = 0
+        var maxIndex: vDSP_Length = 0
+        vDSP_maxvi(base, 1, &maxValue, &maxIndex, vDSP_Length(row.count))
+        return Int32(maxIndex)
     }
 }

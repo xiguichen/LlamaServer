@@ -153,4 +153,40 @@ final class MtpSpeculatorTests: XCTestCase {
         XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 1, draftEntries: 2), 1..<1)
         XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 2, draftEntries: 2), 1..<1)
     }
+
+    // MARK: - Lazy verify sampling (driver stops after the first miss / eog)
+
+    func testDepth1MissWithOnlyRow0SampledMatchesFullSampling() {
+        let lazy = MtpSpeculator.decide(drafts: [42], reals: [99], firstStopRow: nil, nextPos: 10)
+        let full = MtpSpeculator.decide(drafts: [42], reals: [99, 7], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(lazy, full)
+    }
+
+    func testDepth2PartialAcceptWithRow2UnsampledMatchesFullSampling() {
+        let lazy = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 9], firstStopRow: nil, nextPos: 10)
+        let full = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 9, 33], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(lazy, full)
+    }
+
+    func testDepth2MissAtRow0WithOnlyRow0SampledMatchesFullSampling() {
+        let lazy = MtpSpeculator.decide(drafts: [7, 8], reals: [5], firstStopRow: nil, nextPos: 10)
+        let full = MtpSpeculator.decide(drafts: [7, 8], reals: [5, 8, 33], firstStopRow: nil, nextPos: 10)
+        XCTAssertEqual(lazy, full)
+        XCTAssertEqual(lazy.emitCount, 1)
+        XCTAssertEqual(lazy.rollbackPos, 11)
+    }
+
+    func testDepth2AcceptThenEogStopsBeforeTheEog() {
+        let d = MtpSpeculator.decide(drafts: [7, 8], reals: [7, 2], firstStopRow: 1, nextPos: 10)
+        XCTAssertEqual(d.accepted, 1)
+        XCTAssertEqual(d.emitCount, 1, "the eog real at row 1 is never emitted")
+        XCTAssertEqual(d.rollbackPos, 11)
+        XCTAssertEqual(d.carryHFromRow, 0)
+    }
+
+    func testEogAtRow0WithLaterRowsUnsampledMatchesFullSampling() {
+        let lazy = MtpSpeculator.decide(drafts: [42], reals: [2], firstStopRow: 0, nextPos: 10)
+        let full = MtpSpeculator.decide(drafts: [42], reals: [2, 7], firstStopRow: 0, nextPos: 10)
+        XCTAssertEqual(lazy, full)
+    }
 }
