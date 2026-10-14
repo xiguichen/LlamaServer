@@ -70,27 +70,30 @@ struct MtpSpeculator {
                         carryHFromRow: carryHFromRow)
     }
 
-    /// Whether the draft context needs a catch-up decode after this round.
+    /// Indices into a round's sampled `reals` whose draft-context rows are
+    /// missing once the round is committed, and which the next round must
+    /// decode as a prefix of its own draft row so the draft KV stays contiguous
+    /// with the emitted sequence.
     ///
-    /// On a full accept the next round decodes at `nextPos + emitCount` while
-    /// the draft context holds inputs only through `nextPos + draftEntries - 1`
-    /// — leaving a one-position gap at the last accepted token. It only needs
-    /// filling when that position was never written, i.e. every drafted token
-    /// was also decoded (`draftCount == draftEntries`).
-    ///
-    /// A chained draft cut by gating is the exception: it was decoded (so its
-    /// position, `nextPos + 1`, is already populated) but not accepted. Filling
-    /// it would re-decode a consumed position with the target's hidden state
-    /// rather than the chain's, which the recurrent draft context does not
-    /// support.
+    /// The draft context wrote positions `nextPos ... nextPos + draftEntries - 1`
+    /// this round, while the emitted tokens occupy
+    /// `nextPos ... nextPos + emitCount - 1` (`reals[i]` sits at
+    /// `nextPos + i + 1`). The missing tail is therefore `reals[draftEntries - 1
+    /// ... emitCount - 2]` — every emitted token except the last, which the next
+    /// round decodes as its own input row.
     ///
     /// - Parameters:
     ///   - emitCount: committed reals this round (from `decide`).
-    ///   - draftCount: accepted+drafted tokens this round.
     ///   - draftEntries: positions actually written into the draft context,
     ///     counting from `nextPos` (1 after the initial decode, 2 if the
-    ///     chained decode also succeeded).
-    static func catchupNeeded(emitCount: Int, draftCount: Int, draftEntries: Int) -> Bool {
-        emitCount == draftCount + 1 && draftCount == draftEntries
+    ///     chained decode also succeeded). A chained link that was decoded and
+    ///     then cut has already written its position, so the start bound skips
+    ///     it — the recurrent draft context must not rewrite a consumed
+    ///     position, and a re-decode would carry the target's h rather than the
+    ///     chain's.
+    static func draftSeedIndices(emitCount: Int, draftEntries: Int) -> Range<Int> {
+        let start = max(0, draftEntries - 1)
+        let end = max(start, emitCount - 1)
+        return start..<end
     }
 }

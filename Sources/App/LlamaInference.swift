@@ -1370,9 +1370,10 @@ final class LlamaInference: @unchecked Sendable {
             // draft can only cost a round (no speed-up) — never corrupt output.
             // A computed draft is always verified: its decode is already paid
             // for, and the verify row is cheaper than the plain decode it would
-            // otherwise be replaced by (see MtpSpec.pMin). A full accept
-            // catch-up-decodes the bonus token into the draft context so its
-            // KV stays contiguous with the target's accepted sequence.
+            // otherwise be replaced by (see MtpSpec.pMin). Positions the draft
+            // context is still missing at the end of a round are carried into
+            // the next round's draft decode as leading seed rows, so the draft
+            // model is read once per round instead of once per row.
 
             // Greedy sampler for the draft context (the draft only proposes; the
             // target's real sampler decides what is actually emitted).
@@ -1410,26 +1411,37 @@ final class LlamaInference: @unchecked Sendable {
                 llama_batch_free(batch)
                 return rc
             }
-            func decodeDraft(_ token: llama_token, _ pos: llama_pos, _ h: [Float]) -> Int32 {
-                // MTP needs BOTH a token and an embd row; llama_batch_init only
-                // allocates one of them, so allocate the token buffer if missing.
-                var batch = llama_batch_init(1, Int32(nEmbd), 1)
+            func decodeDraft(_ rows: [(token: llama_token, pos: llama_pos, h: [Float])]) -> Int32 {
+                // MTP needs BOTH a token and an embd row per position;
+                // llama_batch_init only allocates one of them, so allocate the
+                // token buffer if missing.
+                let n = Int32(rows.count)
+                var batch = llama_batch_init(n, Int32(nEmbd), 1)
                 var ownTok: UnsafeMutablePointer<llama_token>? = nil
                 if batch.token == nil {
-                    ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: 1)
+                    ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: Int(n))
                     batch.token = ownTok
                 }
-                batch.token[0] = token
-                batch.n_tokens = 1
-                h.withUnsafeBufferPointer { hb in
-                    if let base = batch.embd, let src = hb.baseAddress {
-                        base.update(from: src, count: nEmbd)
+                batch.n_tokens = n
+                for (i, row) in rows.enumerated() {
+                    batch.token[i] = row.token
+                    batch.pos[i] = row.pos
+                    batch.n_seq_id[i] = 1
+                    batch.seq_id[i]![0] = 0
+                    // Only the LAST row exposes logits, so the row the draft is
+                    // sampled from is always output slot 0 however many seed
+                    // rows precede it.
+                    batch.logits[i] = i == rows.count - 1 ? 1 : 0
+                }
+                if let base = batch.embd {
+                    for (i, row) in rows.enumerated() {
+                        row.h.withUnsafeBufferPointer { hb in
+                            if let src = hb.baseAddress {
+                                base.advanced(by: i * nEmbd).update(from: src, count: nEmbd)
+                            }
+                        }
                     }
                 }
-                batch.pos[0] = pos
-                batch.n_seq_id[0] = 1
-                batch.seq_id[0]![0] = 0
-                batch.logits[0] = 1
                 let rc = llama_decode(dft, batch)
                 if let ot = ownTok { batch.token = nil; ot.deallocate() }
                 llama_batch_free(batch)
@@ -1468,6 +1480,11 @@ final class LlamaInference: @unchecked Sendable {
             // The prompt occupies [0, promptTokens.count); generation starts there.
             var nextPos = llama_pos(promptTokens.count)
 
+            // Emitted tokens the draft context is still missing, carried from
+            // the previous round and decoded as a prefix of this round's draft
+            // decode instead of a separate one-row decode of their own.
+            var pendingDraftSeed: [(token: llama_token, pos: llama_pos, h: [Float])] = []
+
             // Sample the first generated token from the prompt's last-row logits.
             var idLast = llama_sampler_sample(sampler, context, -1)
             // h at the last prompt position (predicts idLast's successor) — pairs
@@ -1496,13 +1513,21 @@ final class LlamaInference: @unchecked Sendable {
                         //    and the computed draft is always verified.
                         var drafts: [llama_token] = []
                         // Positions actually written into the draft context this
-                        // round, counting from nextPos. Needed because a gated
-                        // chain-cut still decodes the rejected link's position:
-                        // catch-up below uses this to tell whether the gap is
-                        // already populated.
+                        // round, counting from nextPos. A gated chain-cut still
+                        // decodes the rejected link's position, so this — not
+                        // `drafts.count` — tells the seed plan below whether a
+                        // gap is already populated. Seed rows carried in from a
+                        // previous round sit BEFORE nextPos and are not counted.
                         var draftEntries = 0
                         let phaseDraftStart = CFAbsoluteTimeGetCurrent()
-                        let drc0 = decodeDraft(idLast, nextPos, pendingH)
+                        // Seed rows deferred by the previous round (positions
+                        // before `nextPos`) plus this round's own input row, in
+                        // ONE draft decode: the draft model is weight-bound, so
+                        // two rows cost one weight pass, not two.
+                        var draftRows = pendingDraftSeed
+                        pendingDraftSeed = []
+                        draftRows.append((idLast, nextPos, pendingH))
+                        let drc0 = decodeDraft(draftRows)
                         var phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
                         var phaseSample: TimeInterval = 0
                         if drc0 == 0 {
@@ -1514,7 +1539,11 @@ final class LlamaInference: @unchecked Sendable {
                                 drafts.append(cand0)
                                 if mtpMaxDraft > 1 {
                                     let phaseChainStart = CFAbsoluteTimeGetCurrent()
-                                    let drc1 = decodeDraft(cand0, nextPos + 1, copyH(dft, 0) ?? pendingH)
+                                    // Self-conditioning: the draft's own h for
+                                    // the row it just decoded (the last row of
+                                    // the batch, not row 0 once seeds precede it).
+                                    let chainH = copyH(dft, Int32(draftRows.count - 1)) ?? pendingH
+                                    let drc1 = decodeDraft([(cand0, nextPos + 1, chainH)])
                                     phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainStart
                                     if drc1 == 0 {
                                         draftEntries = 2
@@ -1616,29 +1645,25 @@ final class LlamaInference: @unchecked Sendable {
                         // next round's draft decode.
                         let carryH = copyH(context, step.carryHFromRow) ?? pendingH
 
-                        // Catch-up: on a full accept the draft context holds
-                        // inputs only through nextPos+draftEntries-1, while the
-                        // next round decodes at nextPos+emitCount — leaving one
-                        // gap at the last accepted token's position. Feed it
-                        // with the REAL token and the target's hidden state
-                        // (partial accepts are already contiguous: the rollback
-                        // trimmed the rejected tail). MtpSpeculator.catchupNeeded
-                        // excludes the gated-chain-cut case, whose position is
-                        // already written.
-                        var phaseCatchup: TimeInterval = 0
-                        if !stopped, firstStopRow == nil,
-                           MtpSpeculator.catchupNeeded(emitCount: step.emitCount,
-                                                       draftCount: drafts.count,
-                                                       draftEntries: draftEntries) {
-                            let phaseCatchupStart = CFAbsoluteTimeGetCurrent()
-                            _ = decodeDraft(reals[drafts.count - 1],
-                                            nextPos + llama_pos(drafts.count),
-                                            copyH(context, step.carryHFromRow - 1) ?? carryH)
-                            phaseCatchup = CFAbsoluteTimeGetCurrent() - phaseCatchupStart
+                        // Seed the draft context with this round's committed
+                        // tokens except the last — that one is the next round's
+                        // own input row, so the draft KV ends up contiguous with
+                        // the emitted sequence. Deferred to the next round's
+                        // draft decode (which prefixes these rows) rather than
+                        // decoded here, so both rows share one weight pass.
+                        // Skipped when the round stops: the draft KV is not used
+                        // again, and the generation-end clear discards it.
+                        if !stopped, firstStopRow == nil {
+                            for i in MtpSpeculator.draftSeedIndices(emitCount: step.emitCount,
+                                                                    draftEntries: draftEntries) {
+                                pendingDraftSeed.append((reals[i],
+                                                         nextPos + llama_pos(i + 1),
+                                                         copyH(context, Int32(i)) ?? pendingH))
+                            }
                         }
 
                         phaseStats.record(draft: phaseDraft, verify: phaseVerify,
-                                          sample: phaseSample, catchup: phaseCatchup)
+                                          sample: phaseSample)
 
                         if stopped { break }
                         if firstStopRow != nil {

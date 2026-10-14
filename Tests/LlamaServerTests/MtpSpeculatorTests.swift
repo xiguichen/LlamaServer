@@ -117,38 +117,40 @@ final class MtpSpeculatorTests: XCTestCase {
         XCTAssertFalse(MtpSpeculator.decide(drafts: [Int32.max], reals: [Int32.min, 1], firstStopRow: nil, nextPos: 4).hit)
     }
 
-    // MARK: - Catch-up decode eligibility (draft-context gap)
+    // MARK: - Draft seed rows (draft-context gap)
 
-    /// Depth-1 full accept: only nextPos was written, so the gap at nextPos+1
-    /// still needs filling.
-    func testCatchupNeededOnDepth1FullAccept() {
-        XCTAssertTrue(MtpSpeculator.catchupNeeded(emitCount: 2, draftCount: 1, draftEntries: 1))
+    /// Depth-1 full accept: the draft wrote only `nextPos`, so the position of
+    /// `reals[0]` (`nextPos + 1`) is the single row the next round must decode
+    /// as a seed.
+    func testDraftSeedCoversTheGapLeftByADepth1FullAccept() {
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 2, draftEntries: 1), 0..<1)
     }
 
-    /// Depth-2 full accept: nextPos and nextPos+1 were written; the gap at
-    /// nextPos+2 is still unwritten.
-    func testCatchupNeededOnDepth2FullAccept() {
-        XCTAssertTrue(MtpSpeculator.catchupNeeded(emitCount: 3, draftCount: 2, draftEntries: 2))
+    /// Depth-2 full accept: `nextPos` and `nextPos + 1` were written, so only
+    /// `reals[1]` (position `nextPos + 2`) still needs seeding — the last
+    /// emitted token is the next round's own input row, not a seed.
+    func testDraftSeedCoversOnlyTheUnwrittenTailAtDepth2() {
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 3, draftEntries: 2), 1..<2)
     }
 
-    /// Gated chain cut: the rejected second draft was still DECODED (so its
-    /// position nextPos+1 is populated). Catch-up must NOT re-decode it — the
-    /// recurrent draft context does not support rewriting a consumed position,
-    /// and the re-decode would carry the target's h, not the chain's.
-    func testNoCatchupWhenGatedChainLinkAlreadyWritten() {
-        XCTAssertFalse(MtpSpeculator.catchupNeeded(emitCount: 2, draftCount: 1, draftEntries: 2))
+    /// Gated chain cut: the rejected second draft was still DECODED (its
+    /// position `nextPos + 1` is populated), so nothing is missing — the
+    /// recurrent draft context must not rewrite a consumed position, and a
+    /// re-decode would carry the target's h rather than the chain's.
+    func testNoDraftSeedWhenAGatedChainLinkAlreadyWroteItsPosition() {
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 2, draftEntries: 2), 1..<1)
     }
 
-    /// Chain decode failed (position nextPos+1 never written): the gap still
+    /// Chain decode failed (position `nextPos + 1` never written): the gap still
     /// needs filling even though only one draft survives.
-    func testCatchupNeededWhenChainDecodeFailed() {
-        XCTAssertTrue(MtpSpeculator.catchupNeeded(emitCount: 2, draftCount: 1, draftEntries: 1))
+    func testDraftSeedFillsTheGapWhenChainDecodeFailed() {
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 2, draftEntries: 1), 0..<1)
     }
 
-    /// Partial accept and miss roll back instead of catching up.
-    func testNoCatchupOnPartialAcceptOrMiss() {
-        XCTAssertFalse(MtpSpeculator.catchupNeeded(emitCount: 1, draftCount: 1, draftEntries: 1))
-        XCTAssertFalse(MtpSpeculator.catchupNeeded(emitCount: 1, draftCount: 2, draftEntries: 2))
-        XCTAssertFalse(MtpSpeculator.catchupNeeded(emitCount: 2, draftCount: 2, draftEntries: 2))
+    /// Partial accept and miss roll the tail back instead of seeding it.
+    func testNoDraftSeedOnAPartialAcceptOrMiss() {
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 1, draftEntries: 1), 0..<0)
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 1, draftEntries: 2), 1..<1)
+        XCTAssertEqual(MtpSpeculator.draftSeedIndices(emitCount: 2, draftEntries: 2), 1..<1)
     }
 }
