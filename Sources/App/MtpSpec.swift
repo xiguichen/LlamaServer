@@ -6,11 +6,22 @@ import Foundation
 /// model file, exactly like `KVCacheSpec`/`MtpSpeculator`.
 enum MtpSpec {
 
-    /// Minimum probability a draft token must carry to be worth verifying
-    /// (llama.cpp's `--spec-p-min` default). Below this the round falls back
-    /// to plain single-token decoding instead of spending a multi-row verify
-    /// on a draft the draft model itself doesn't believe.
-    static let pMin: Float = 0.6
+    /// Minimum probability a *computed* draft token must carry to survive the
+    /// confidence gate. Zero disables discarding entirely — upstream's
+    /// `--spec-draft-p-min` default is 0.00, and here it must stay that way:
+    /// the draft decode has already run by the time the gate is consulted, so
+    /// its cost is sunk. The alternative to verifying a computed draft is a
+    /// plain single-token decode of the same position, which costs nearly the
+    /// same (one fewer target row) and can never yield a bonus token. A gate
+    /// above zero therefore only ever throws away work. Upstream's p_min is
+    /// used to cut deeper chain links *before* they are decoded; at depth 1
+    /// (`mtpMaxDraft == 1`) there are no chain links to cut.
+    static let pMin: Float = 0.0
+
+    /// Whether the confidence gate can ever discard a computed draft. When
+    /// false, callers must not pay for `draftConfidence`'s vocab-wide softmax
+    /// (a full 248K-entry exp pass per draft on device).
+    static var gateEnabled: Bool { pMin > 0 }
 
     /// How many output rows the MTP-enabled contexts must expose.
     ///

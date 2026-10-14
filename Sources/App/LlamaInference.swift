@@ -1364,10 +1364,13 @@ final class LlamaInference: @unchecked Sendable {
             //   target = `context` (source of truth, normal logits + h_nextn)
             //   draft  = `dft`     (LLAMA_CONTEXT_TYPE_MTP, ctx_other = target)
             // Each round chains up to mtpMaxDraft drafts through the single MTP
-            // head — each gated by the draft model's own confidence >= pMin —
-            // and the target verifies [idLast] + drafts in one batch. EVERY
-            // emitted token is sampled from the TARGET, so a bad draft can only
-            // cost a round (no speed-up) — never corrupt output. A full accept
+            // head — a low-confidence chain link is cut before the deeper link
+            // is decoded — and the target verifies [idLast] + drafts in one
+            // batch. EVERY emitted token is sampled from the TARGET, so a bad
+            // draft can only cost a round (no speed-up) — never corrupt output.
+            // A computed draft is always verified: its decode is already paid
+            // for, and the verify row is cheaper than the plain decode it would
+            // otherwise be replaced by (see MtpSpec.pMin). A full accept
             // catch-up-decodes the bonus token into the draft context so its
             // KV stays contiguous with the target's accepted sequence.
 
@@ -1435,10 +1438,11 @@ final class LlamaInference: @unchecked Sendable {
 
             // Softmax probability the draft model assigns to `token` for the
             // most recent draft decode's output row 0 (the only row a
-            // single-token draft decode produces). Gates drafting at
-            // MtpSpec.pMin: below the threshold the round falls back to plain
-            // decoding instead of spending a multi-row verify on a draft the
-            // draft model itself doesn't believe.
+            // single-token draft decode produces). Only consulted when
+            // MtpSpec.gateEnabled — i.e. for depth>1 chain links, to cut a link
+            // before the deeper one is decoded. At depth 1 the gate is disabled
+            // so a computed draft is always verified, and this vocab-wide
+            // softmax (248K exps) is never evaluated.
             func draftConfidence(_ token: llama_token) -> Float {
                 guard let logits = llama_get_logits_ith(dft, 0) else { return 0 }
                 let vocabSize = Int(llama_vocab_n_tokens(vocab))
@@ -1459,13 +1463,6 @@ final class LlamaInference: @unchecked Sendable {
             // string / limit); fallback rounds record after a completed
             // decode+sample; rounds aborting before either record nothing.
             var phaseStats = MtpPhaseStats()
-
-            // TEMPORARY SPEED PROBE — remove before shipping. When true, the
-            // per-draft confidence gate is bypassed and every decoded verify row
-            // is committed (forced full accept), so the speculative round's
-            // 100%-acceptance ceiling can be measured. Emitted output is not
-            // valid; only the timing is meaningful.
-            let probeForceAccept = true
 
             // Position in the target where the next "idLast" will be (re-)decoded.
             // The prompt occupies [0, promptTokens.count); generation starts there.
@@ -1492,11 +1489,11 @@ final class LlamaInference: @unchecked Sendable {
                         genTokens += 1
 
                         // 1) Draft: chain up to mtpMaxDraft tokens through the
-                        //    MTP head, each gated by the draft model's own
-                        //    confidence (pMin). The chained draft is
-                        //    self-conditioned (its h comes from the draft's own
-                        //    output), which is why gating matters more with
-                        //    depth — a low-confidence chain link gets cut.
+                        //    MTP head. The chained draft is self-conditioned
+                        //    (its h comes from the draft's own output), so a
+                        //    low-confidence link is cut before the deeper link
+                        //    is decoded (MtpSpec.pMin); at depth 1 pMin is 0
+                        //    and the computed draft is always verified.
                         var drafts: [llama_token] = []
                         // Positions actually written into the draft context this
                         // round, counting from nextPos. Needed because a gated
@@ -1506,27 +1503,25 @@ final class LlamaInference: @unchecked Sendable {
                         var draftEntries = 0
                         let phaseDraftStart = CFAbsoluteTimeGetCurrent()
                         let drc0 = decodeDraft(idLast, nextPos, pendingH)
-                        llama_synchronize(dft)
                         var phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
                         var phaseSample: TimeInterval = 0
                         if drc0 == 0 {
                             draftEntries = 1
                             let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
                             let cand0 = llama_sampler_sample(draftSampler, dft, 0)
-                            phaseDraft += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
-                            if cand0 != -1, !llama_vocab_is_eog(vocab, cand0), (probeForceAccept || draftConfidence(cand0) >= MtpSpec.pMin) {
+                            phaseSample += CFAbsoluteTimeGetCurrent() - phaseDraftSampleStart
+                            if cand0 != -1, !llama_vocab_is_eog(vocab, cand0), (!MtpSpec.gateEnabled || draftConfidence(cand0) >= MtpSpec.pMin) {
                                 drafts.append(cand0)
                                 if mtpMaxDraft > 1 {
                                     let phaseChainStart = CFAbsoluteTimeGetCurrent()
                                     let drc1 = decodeDraft(cand0, nextPos + 1, copyH(dft, 0) ?? pendingH)
-                                    llama_synchronize(dft)
                                     phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainStart
                                     if drc1 == 0 {
                                         draftEntries = 2
                                         let phaseChainSampleStart = CFAbsoluteTimeGetCurrent()
                                         let cand1 = llama_sampler_sample(draftSampler, dft, 0)
-                                        phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainSampleStart
-                                        if cand1 != -1, !llama_vocab_is_eog(vocab, cand1), (probeForceAccept || draftConfidence(cand1) >= MtpSpec.pMin) {
+                                        phaseSample += CFAbsoluteTimeGetCurrent() - phaseChainSampleStart
+                                        if cand1 != -1, !llama_vocab_is_eog(vocab, cand1), (!MtpSpec.gateEnabled || draftConfidence(cand1) >= MtpSpec.pMin) {
                                             drafts.append(cand1)
                                         }
                                     }
@@ -1539,7 +1534,6 @@ final class LlamaInference: @unchecked Sendable {
                             mtpNoDraft += 1
                             let phaseFallbackStart = CFAbsoluteTimeGetCurrent()
                             let fallbackRC = decodeSingleTarget(idLast, nextPos)
-                            llama_synchronize(context)
                             let phaseVerify = CFAbsoluteTimeGetCurrent() - phaseFallbackStart
                             guard fallbackRC == 0 else {
                                 recoverFromDecodeFailure(); throw InferenceError.decode
@@ -1561,7 +1555,6 @@ final class LlamaInference: @unchecked Sendable {
                         // 2) Verify: decode [idLast] + drafts in one target batch.
                         let phaseVerifyStart = CFAbsoluteTimeGetCurrent()
                         let verifyRC = decodeVerify([idLast] + drafts, nextPos)
-                        llama_synchronize(context)
                         let phaseVerify = CFAbsoluteTimeGetCurrent() - phaseVerifyStart
                         guard verifyRC == 0 else {
                             recoverFromDecodeFailure(); throw InferenceError.decode
@@ -1586,21 +1579,9 @@ final class LlamaInference: @unchecked Sendable {
                         // Pure verify decision (acceptance count, position
                         // advance, rollback position, which hidden state to
                         // carry forward). See MtpSpeculator for the invariants.
-                        // TEMPORARY SPEED PROBE: when enabled, commit every
-                        // decoded verify row (forced full accept) so the round's
-                        // 100%-acceptance ceiling is measured. Remove before
-                        // shipping.
-                        let step: MtpSpeculator.Decision
-                        if probeForceAccept, firstStopRow == nil {
-                            step = MtpSpeculator.Decision(accepted: drafts.count,
-                                                          emitCount: drafts.count + 1,
-                                                          rollbackPos: nil,
-                                                          carryHFromRow: Int32(drafts.count))
-                        } else {
-                            step = MtpSpeculator.decide(drafts: drafts, reals: reals,
+                        let step = MtpSpeculator.decide(drafts: drafts, reals: reals,
                                                         firstStopRow: firstStopRow,
                                                         nextPos: Int(nextPos))
-                        }
                         mtpRounds += 1
                         if step.hit { mtpHits += 1 }
                         mtpAccepted += step.accepted
@@ -1682,8 +1663,7 @@ final class LlamaInference: @unchecked Sendable {
             let mtpAttempts = mtpRounds + mtpNoDraft
             let hitPct = mtpRounds > 0 ? (mtpHits * 100 / mtpRounds) : 0
             let avgDepth = Double(mtpAccepted) / Double(max(1, mtpRounds))
-            let probeTag = probeForceAccept ? " [PROBE force-accept]" : ""
-            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) accepted=\(mtpAccepted) depth=\(String(format: "%.2f", avgDepth)) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())\(probeTag)")
+            FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) accepted=\(mtpAccepted) depth=\(String(format: "%.2f", avgDepth)) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
 
             // The two-context speculative path manages KV positions in a way that
             // the cross-call prefix-reuse tracking can't reconstruct, so clear both

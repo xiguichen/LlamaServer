@@ -24,6 +24,19 @@ final class MtpSpecTests: XCTestCase {
         XCTAssertEqual(MtpSpec.resolveOutputSlots(headsFromGGUF: -3, explicitHeads: 0, maxDraft: 1), 2)
     }
 
+    // MARK: - draft gate (pMin)
+
+    func testDraftGateIsDisabledByDefaultSoAComputedDraftIsAlwaysVerified() {
+        // A draft decode has already paid for its proposal by the time the gate
+        // is consulted, so discarding it costs a full plain decode and yields
+        // nothing. Upstream's `--spec-draft-p-min` default is 0.00 (never
+        // discard); p_min only cuts deeper chain links before they are decoded,
+        // which is also why `gateEnabled` must be false so callers never pay
+        // for `draftConfidence`'s vocab-wide softmax.
+        XCTAssertEqual(MtpSpec.pMin, 0.0, "a computed draft is always worth the verify row")
+        XCTAssertFalse(MtpSpec.gateEnabled)
+    }
+
     // MARK: - draftConfidence (softmax over one vocab row)
 
     func testDraftConfidenceOfUniformLogitsIsOneOverVocab() {
