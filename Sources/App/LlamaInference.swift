@@ -435,7 +435,7 @@ final class LlamaInference: @unchecked Sendable {
         // size-independent pipeline objects, so what warms here is what the large
         // context needs). Best-effort: failure just means we skip the warmup.
         let ctxCreateStart = Date()
-        if batchSize >= KVCacheSpec.prewarmUbatchContextSize {
+        if KVCacheSpec.needsMetalPrewarm(contextSize: effective) {
             Self.prewarmMetal(model: loadedModel, ctxParams: ctxParams)
         }
 

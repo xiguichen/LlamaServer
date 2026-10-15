@@ -91,6 +91,14 @@ enum KVCacheSpec {
         return contextSize >= prewarmUbatchContextSize ? 1024 : 512
     }
 
+    /// Whether a context of `contextSize` tokens needs the Metal pre-warm
+    /// before it is built. Gated on the CONTEXT size, never the micro-batch:
+    /// `ubatchSize` only ever returns 512 or 1024, so a batch compared with
+    /// this 32k threshold can never pass and the pre-warm never runs.
+    static func needsMetalPrewarm(contextSize: Int) -> Bool {
+        contextSize >= prewarmUbatchContextSize
+    }
+
     // MARK: Hybrid-model layer counts
 
     /// The number of layers that actually keep a KV cache.

@@ -205,6 +205,18 @@ final class KVCacheSpecTests: XCTestCase {
         XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 8_192, kvSlackBytes: slack), 512)
     }
 
+    func testMetalPrewarmIsGatedOnContextSize() {
+        XCTAssertTrue(KVCacheSpec.needsMetalPrewarm(contextSize: 131_072))
+        XCTAssertTrue(KVCacheSpec.needsMetalPrewarm(contextSize: 32_768),
+                      "the threshold itself is pre-warmed")
+        XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: 32_767))
+        // Regression: the gate once compared the micro-batch, which never
+        // exceeds 1024, so the pre-warm never ran for any context.
+        let slack = 1024 * 1024 * 1024
+        let batch = KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: slack)
+        XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: batch))
+    }
+
     // MARK: - YaRN constants
 
     func testYarnRecipeMatchesQwenValidatedScaling() {
