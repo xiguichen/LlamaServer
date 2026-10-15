@@ -1949,6 +1949,10 @@ final class LlamaInference: @unchecked Sendable {
                 }
             }
             if earlyStop { break }
+            // At the token limit nothing reads the next decode's logits, so
+            // skip it. As with a stop-string break, decodedGenerated stays
+            // behind, so cachedTokenIds excludes these undecoded tokens.
+            if generated >= limit { break }
 
             // Decode all batch tokens in a single forward pass. Must set logits
             // explicitly (not via llama_batch_get_one) for MTP context type.
