@@ -1410,7 +1410,17 @@ final class LlamaInference: @unchecked Sendable {
         let promptTail = String(prompt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
         FileLogger.shared.verbose("prompt tail: …\(promptTail)")
 
+        // The prompt's last llama_decode returns before its GPU work is done;
+        // the first output read would wait for it, which the plain path does
+        // after starting the gen clock and the MTP path before. Wait here
+        // instead, so prefill owns its whole GPU time and the gen clock starts
+        // at the same point for both paths. The draft's prompt mirror is
+        // prefill work too. Expect plain gen t/s to rise and prefill t/s to
+        // drop to their true values: that is the correction, not a regression.
+        llama_synchronize(context)
+        if mirrorPrompt, let dft = mtpContext { llama_synchronize(dft) }
         let prefillEnd = CFAbsoluteTimeGetCurrent()
+        let firstTokenTime = prefillEnd
         // Reset MTP tracking for a fresh generation (closed over by the
         // while-loop below, which has closure capture for its mutable state).
         mtpHeadsActive = false
@@ -1443,7 +1453,6 @@ final class LlamaInference: @unchecked Sendable {
 
         let mtpCount = mtpOutputCount
         let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
-        var firstTokenTime: CFAbsoluteTime?
 
         // Shared per-token consumer used by the MTP speculative path. Streams the
         // token's text, applies stop strings, and returns false when generation
@@ -1644,7 +1653,6 @@ final class LlamaInference: @unchecked Sendable {
             } else if llama_vocab_is_eog(vocab, idLast) {
                 finishReason = "eog_immediate"
             } else {
-                firstTokenTime = CFAbsoluteTimeGetCurrent()
                 genTokens += 1
                 if consumeToken(idLast) {
                     while generated < limit {
@@ -1863,9 +1871,6 @@ final class LlamaInference: @unchecked Sendable {
             let nCtxUsed = promptTokens.count + generated
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
 
-            if firstTokenTime == nil {
-                firstTokenTime = CFAbsoluteTimeGetCurrent()
-            }
             genTokens += 1
 
             // Probe available output rows. After prompt decode only the main
@@ -2006,7 +2011,7 @@ final class LlamaInference: @unchecked Sendable {
 
         let genEnd = CFAbsoluteTimeGetCurrent()
         let prefillSecs = prefillEnd - genStart
-        let genSecs = genEnd - (firstTokenTime ?? genEnd)
+        let genSecs = genEnd - firstTokenTime
         let prefillTokPerSec = prefillSecs > 0 ? Double(promptTokens.count) / prefillSecs : 0
         let genTokPerSec = genSecs > 0 ? Double(generated) / genSecs : 0
         let tpms = genTokPerSec * 60
