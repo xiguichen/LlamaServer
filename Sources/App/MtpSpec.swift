@@ -74,4 +74,15 @@ enum MtpSpec {
         vDSP_maxvi(base, 1, &maxValue, &maxIndex, vDSP_Length(row.count))
         return Int32(maxIndex)
     }
+
+    /// Whether the target's sampler chain is pure greedy: the greedy sampler
+    /// alone, with no penalty sampler (the one stateful stage `generate` can
+    /// add) in front of it. Mirrors the chain construction in `generate`.
+    /// Only then can `argmax` replace `llama_sampler_sample` bit-identically:
+    /// greedy's `accept` is a no-op and its strict `>` scan keeps the first
+    /// maximum, as `argmax` does.
+    static func isPureGreedy(temperature: Float, repeatPenalty: Float,
+                             frequencyPenalty: Float, presencePenalty: Float) -> Bool {
+        temperature <= 0 && repeatPenalty == 1.0 && frequencyPenalty == 0.0 && presencePenalty == 0.0
+    }
 }

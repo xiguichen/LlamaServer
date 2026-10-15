@@ -100,4 +100,32 @@ final class MtpSpecTests: XCTestCase {
             XCTAssertEqual(MtpSpec.argmax(row: row), -1)
         }
     }
+
+    // MARK: - Pure-greedy fast path
+
+    func testZeroTemperatureWithoutPenaltiesIsPureGreedy() {
+        XCTAssertTrue(MtpSpec.isPureGreedy(temperature: 0, repeatPenalty: 1.0,
+                                           frequencyPenalty: 0, presencePenalty: 0))
+        XCTAssertTrue(MtpSpec.isPureGreedy(temperature: -1, repeatPenalty: 1.0,
+                                           frequencyPenalty: 0, presencePenalty: 0),
+                      "any temperature <= 0 builds the greedy chain")
+    }
+
+    func testPositiveTemperatureIsNotPureGreedy() {
+        XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0.8, repeatPenalty: 1.0,
+                                            frequencyPenalty: 0, presencePenalty: 0))
+        XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0.0001, repeatPenalty: 1.0,
+                                            frequencyPenalty: 0, presencePenalty: 0))
+    }
+
+    func testAnyPenaltyDisablesPureGreedy() {
+        // The penalty sampler keeps token history, so greedy plus a penalty
+        // is not an argmax over the raw logits.
+        XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0, repeatPenalty: 1.1,
+                                            frequencyPenalty: 0, presencePenalty: 0))
+        XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0, repeatPenalty: 1.0,
+                                            frequencyPenalty: 0.5, presencePenalty: 0))
+        XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0, repeatPenalty: 1.0,
+                                            frequencyPenalty: 0, presencePenalty: -0.5))
+    }
 }

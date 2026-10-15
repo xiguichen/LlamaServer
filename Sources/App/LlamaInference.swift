@@ -1245,6 +1245,23 @@ final class LlamaInference: @unchecked Sendable {
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(params.seed))
         }
 
+        // Pure greedy (no penalties): take the vDSP argmax of the logits row
+        // instead of llama_sampler_sample, which copies all n_vocab logits
+        // into a candidate array and scans them in scalar code. Same token,
+        // first maximum on a tie, and greedy's accept is a no-op, so the
+        // output is bit-identical (MtpSpec.isPureGreedy). A row without
+        // logits yields -1 (sampler_error) instead of being sampled.
+        let pureGreedy = MtpSpec.isPureGreedy(temperature: params.temperature,
+                                              repeatPenalty: params.repeatPenalty,
+                                              frequencyPenalty: params.frequencyPenalty,
+                                              presencePenalty: params.presencePenalty)
+        let vocabSize = Int(llama_vocab_n_tokens(vocab))
+        func sampleTarget(_ idx: Int32) -> llama_token {
+            guard pureGreedy else { return llama_sampler_sample(sampler, context, idx) }
+            guard let logits = llama_get_logits_ith(context, idx) else { return -1 }
+            return MtpSpec.argmax(row: UnsafeBufferPointer(start: logits, count: vocabSize))
+        }
+
         // Cache and error recovery: if anything below fails, the llama context's
         // internal position counter and KV cache may be in an undefined state
         // (partial prompt decode and/or partial generation).  Invalidate the
@@ -1595,7 +1612,6 @@ final class LlamaInference: @unchecked Sendable {
             // and once seed rows precede the draft row, batch row 0 has no
             // logits — llama_get_logits_ith returns NULL and
             // llama_sampler_sample would GGML_ASSERT on it.
-            let vocabSize = Int(llama_vocab_n_tokens(vocab))
             func draftLogits() -> UnsafeBufferPointer<Float>? {
                 guard let logits = llama_get_logits_ith(dft, -1) else { return nil }
                 return UnsafeBufferPointer(start: logits, count: vocabSize)
@@ -1642,7 +1658,7 @@ final class LlamaInference: @unchecked Sendable {
             var pendingDraftSeed: [(token: llama_token, pos: llama_pos, h: [Float])] = []
 
             // Sample the first generated token from the prompt's last-row logits.
-            var idLast = llama_sampler_sample(sampler, context, -1)
+            var idLast = sampleTarget(-1)
             // h at the last prompt position (predicts idLast's successor) — pairs
             // with idLast to seed the draft (MTP head input: token x_p + h_{p-1}).
             var pendingH = copyH(context, lastPromptRow) ?? [Float](repeating: 0, count: nEmbd)
@@ -1722,7 +1738,7 @@ final class LlamaInference: @unchecked Sendable {
                                 recoverFromDecodeFailure(); throw InferenceError.decode
                             }
                             let phaseFallbackSampleStart = CFAbsoluteTimeGetCurrent()
-                            let s = llama_sampler_sample(sampler, context, 0)
+                            let s = sampleTarget(0)
                             if s == -1 { finishReason = "sampler_error"; break }
                             if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseFallbackSampleStart
@@ -1760,7 +1776,7 @@ final class LlamaInference: @unchecked Sendable {
                         var firstStopRow: Int? = nil
                         var sampleFailed = false
                         for k in 0...drafts.count {
-                            let r = llama_sampler_sample(sampler, context, Int32(k))
+                            let r = sampleTarget(Int32(k))
                             if r == -1 { sampleFailed = true; break }
                             reals.append(r)
                             if llama_vocab_is_eog(vocab, r) { firstStopRow = k; break }
@@ -1900,7 +1916,7 @@ final class LlamaInference: @unchecked Sendable {
                 let logitsIdx = Int32(i - availableOutputs)
                 guard llama_get_logits_ith(context, logitsIdx) != nil else { break }
 
-                let token = llama_sampler_sample(sampler, context, logitsIdx)
+                let token = sampleTarget(logitsIdx)
                 guard token != -1 else {
                     if batchTokens.isEmpty {
                         finishReason = "sampler_error"
@@ -1915,7 +1931,8 @@ final class LlamaInference: @unchecked Sendable {
                     }
                     break
                 }
-                // llama_sampler_sample already accepted `token`.
+                // sampleTarget already accepted `token` (via
+                // llama_sampler_sample; pure greedy has nothing to accept).
                 batchTokens.append(token)
             }
 
