@@ -2002,7 +2002,9 @@ final class LlamaInference: @unchecked Sendable {
         let genTokPerSec = genSecs > 0 ? Double(generated) / genSecs : 0
         let tpms = genTokPerSec * 60
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
-        FileLogger.shared.info("generated \(generated) tokens (prefill=\(Int(prefillSecs))s \(Int(prefillTokPerSec))t/s, gen=\(Int(genSecs))s \(Int(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
+        // Two decimals: Int() truncation hid every change under ~4% at ~28 t/s.
+        func f2(_ x: Double) -> String { String(format: "%.2f", x) }
+        FileLogger.shared.info("generated \(generated) tokens (prefill=\(f2(prefillSecs))s \(f2(prefillTokPerSec))t/s, gen=\(f2(genSecs))s \(f2(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,
