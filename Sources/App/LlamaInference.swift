@@ -1047,10 +1047,17 @@ final class LlamaInference: @unchecked Sendable {
     /// tokens now resident in the cache (so the caller decodes only the suffix).
     /// Returns 0 (after clearing the cache) when the snapshot can't be applied.
     /// Only valid for hybrid/recurrent models, which have no seq_rm trim.
+    ///
+    /// Every `llama_memory_clear` in this file passes `data: false`: it resets
+    /// the cell metadata but skips zeroing the buffers (~39 ms for the 2 GiB
+    /// q8_0 KV on device). Nothing reads the stale bytes: cleared KV cells
+    /// are masked out of attention, and a fresh recurrent cell is sourced
+    /// from the `rs_z` cell, which the graph zeroes itself (b11557
+    /// llama-memory-recurrent.cpp find_slot, llama-graph.cpp build_rs).
     private func restorePromptSnapshot(for promptTokens: [llama_token],
                                        memory: OpaquePointer) -> Int {
         guard hasSnapshot, !snapshotTokens.isEmpty else {
-            llama_memory_clear(memory, true)
+            llama_memory_clear(memory, false)
             return 0
         }
         // Longest common token prefix of the snapshot and the new prompt.
@@ -1062,19 +1069,19 @@ final class LlamaInference: @unchecked Sendable {
         // prompt to contain it entirely AND leave >= 1 token to decode for fresh
         // logits. Anything less can't use the snapshot — re-decode from scratch.
         guard lcp == snapshotTokens.count, snapshotTokens.count < promptTokens.count else {
-            llama_memory_clear(memory, true)
+            llama_memory_clear(memory, false)
             FileLogger.shared.debug("KV snapshot unusable (lcp \(lcp)/\(snapshotTokens.count), prompt \(promptTokens.count)); full decode")
             return 0
         }
         // Start from a clean cache, then load the saved prompt state into seq 0.
-        llama_memory_clear(memory, true)
+        llama_memory_clear(memory, false)
         var loaded = [llama_token](repeating: 0, count: snapshotTokens.count)
         var nOut = 0
         let nread = llama_state_seq_load_file(context, snapshotPath, 0,
                                               &loaded, snapshotTokens.count, &nOut)
         guard nread > 0, nOut == snapshotTokens.count else {
             FileLogger.shared.warn("KV snapshot load failed (nread \(nread), nOut \(nOut)); full decode")
-            llama_memory_clear(memory, true)
+            llama_memory_clear(memory, false)
             hasSnapshot = false
             return 0
         }
@@ -1178,7 +1185,7 @@ final class LlamaInference: @unchecked Sendable {
                 if lcp >= promptTokens.count { lcp = promptTokens.count - 1 }
 
                 if lcp <= 0 {
-                    llama_memory_clear(memory, true)
+                    llama_memory_clear(memory, false)
                     FileLogger.shared.debug("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count))")
                 } else if lcp == cachedTokenIds.count {
                     // The whole cache is a prefix of the new prompt — keep it all.
@@ -1188,7 +1195,7 @@ final class LlamaInference: @unchecked Sendable {
                     // Hybrid/recurrent model: partial suffix removal is impossible,
                     // so don't attempt seq_rm (it would fail every time). Clear the
                     // whole cache and re-decode the prompt from scratch.
-                    llama_memory_clear(memory, true)
+                    llama_memory_clear(memory, false)
                     FileLogger.shared.debug("KV cache cleared (model has no partial-reuse; last cached \(cachedTokenIds.count))")
                 } else if llama_memory_seq_rm(memory, 0, llama_pos(lcp), -1) {
                     // Drop the diverging suffix [lcp, end); keep prefix [0, lcp).
@@ -1201,7 +1208,7 @@ final class LlamaInference: @unchecked Sendable {
                     // which is the only documented reason seq_rm returns false here.
                     let posMin = Int(llama_memory_seq_pos_min(memory, 0))
                     let posMax = Int(llama_memory_seq_pos_max(memory, 0))
-                    llama_memory_clear(memory, true)
+                    llama_memory_clear(memory, false)
                     FileLogger.shared.warn("KV cache partial-rm failed at lcp \(lcp) [seq_pos_min \(posMin), seq_pos_max \(posMax)]; cleared (last cached \(cachedTokenIds.count))")
                 }
             }
@@ -1300,7 +1307,7 @@ final class LlamaInference: @unchecked Sendable {
                 draftHoldsPrompt = true
                 if let h = draftPromptBoundaryH[reuseLen], h.count == draftPrefillH.count { draftPrefillH = h }
             } else {
-                llama_memory_clear(dmem, true)
+                llama_memory_clear(dmem, false)
                 draftHoldsPrompt = reuseLen == 0
             }
         }
@@ -1352,7 +1359,7 @@ final class LlamaInference: @unchecked Sendable {
                     if !ok, let dmem = draftMemory {
                         // Transient decode failure: retry once on an empty
                         // draft (which accepts any start position).
-                        llama_memory_clear(dmem, true)
+                        llama_memory_clear(dmem, false)
                         draftHoldsPrompt = false
                         ok = mirror()
                     }
@@ -1361,7 +1368,7 @@ final class LlamaInference: @unchecked Sendable {
                         // every later draft decode fail the position check, so
                         // MTP would silently stop drafting for this generation.
                         FileLogger.shared.warn("MTP: mirroring prompt into the draft context failed at \(off); drafts may degrade")
-                        if let dmem = draftMemory { llama_memory_clear(dmem, true) }
+                        if let dmem = draftMemory { llama_memory_clear(dmem, false) }
                         draftHoldsPrompt = false
                         mirrorPrompt = false
                     }
@@ -1843,11 +1850,13 @@ final class LlamaInference: @unchecked Sendable {
             // target and reset tracking. Next call re-decodes the prompt (hybrid
             // models reuse via the on-disk snapshot path instead). The draft KV
             // is kept: the next prompt trims it to the reused prefix, which the
-            // draft mirrored this turn (see the prompt-start trim).
-            if let mem = llama_get_memory(context) { llama_memory_clear(mem, true) }
+            // draft mirrored this turn (see the prompt-start trim). Metadata
+            // only (data: false, see restorePromptSnapshot): this runs inside
+            // the timed generation window.
+            if let mem = llama_get_memory(context) { llama_memory_clear(mem, false) }
             // A draft sharing the target's memory is never mirrored or trimmed
             // at prompt start, so its generation rows must be cleared here.
-            if draftSharesTargetMemory, let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, true) }
+            if draftSharesTargetMemory, let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, false) }
             decodedGenerated = 0
         } else {
         while generated < limit {
