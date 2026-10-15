@@ -75,14 +75,20 @@ enum MtpSpec {
         return Int32(maxIndex)
     }
 
+    /// Whether `generate` adds the penalty sampler to the chain: any
+    /// repeat/frequency/presence penalty that is not a no-op value.
+    static func hasPenalties(repeatPenalty: Float, frequencyPenalty: Float,
+                             presencePenalty: Float) -> Bool {
+        repeatPenalty != 1.0 || frequencyPenalty != 0.0 || presencePenalty != 0.0
+    }
+
     /// Whether the target's sampler chain is pure greedy: the greedy sampler
-    /// alone, with no penalty sampler (the one stateful stage `generate` can
-    /// add) in front of it. Mirrors the chain construction in `generate`.
-    /// Only then can `argmax` replace `llama_sampler_sample` bit-identically:
-    /// greedy's `accept` is a no-op and its strict `>` scan keeps the first
-    /// maximum, as `argmax` does.
-    static func isPureGreedy(temperature: Float, repeatPenalty: Float,
-                             frequencyPenalty: Float, presencePenalty: Float) -> Bool {
-        temperature <= 0 && repeatPenalty == 1.0 && frequencyPenalty == 0.0 && presencePenalty == 0.0
+    /// alone (temperature <= 0), with no penalty sampler (the one stateful
+    /// stage `generate` can add) in front of it. `generate` passes the same
+    /// `hasPenalties` result it builds the chain from. Only then can `argmax`
+    /// replace `llama_sampler_sample` bit-identically: greedy's `accept` is a
+    /// no-op and its strict `>` scan keeps the first maximum, as `argmax` does.
+    static func isPureGreedy(temperature: Float, hasPenalties: Bool) -> Bool {
+        temperature <= 0 && !hasPenalties
     }
 }

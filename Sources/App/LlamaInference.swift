@@ -429,8 +429,9 @@ final class LlamaInference: @unchecked Sendable {
         Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
 
         // Force Metal's async shader-set initialization to completion BEFORE
-        // building the large context, when that context will use the 1024
-        // micro-batch. ggml_metal finishes loading its pipelines asynchronously;
+        // building the large context, whenever the context size is >= 32k
+        // (KVCacheSpec.needsMetalPrewarm; such contexts get the 1024
+        // micro-batch when KV slack allows). ggml_metal finishes loading its pipelines asynchronously;
         // a >=32k context created on a cold backend hits a null-deref in
         // ggml_metal_buffer_is_shared. A tiny decode waits that out (kernels are
         // size-independent pipeline objects, so what warms here is what the large
@@ -551,7 +552,9 @@ final class LlamaInference: @unchecked Sendable {
             return
         }
         defer { llama_free(ctx) }
-        var token = llama_vocab_bos(llama_model_get_vocab(model))
+        // Any valid id warms the same kernels; some vocabs have no BOS (-1).
+        let bos = llama_vocab_bos(llama_model_get_vocab(model))
+        var token: llama_token = bos >= 0 ? bos : 0
         let batch = llama_batch_get_one(&token, 1)
         if llama_decode(ctx, batch) != 0 {
             FileLogger.shared.warn("metal pre-warm: decode failed; skipping warmup")
@@ -1224,8 +1227,13 @@ final class LlamaInference: @unchecked Sendable {
         let sampler = llama_sampler_chain_init(samplerParams)
         defer { llama_sampler_free(sampler) }
 
-        // Repetition penalties apply regardless of temperature.
-        if params.repeatPenalty != 1.0 || params.frequencyPenalty != 0.0 || params.presencePenalty != 0.0 {
+        // Repetition penalties apply regardless of temperature. The same
+        // decision feeds pureGreedy below, so the chain and the greedy fast
+        // path cannot drift apart.
+        let addPenalties = MtpSpec.hasPenalties(repeatPenalty: params.repeatPenalty,
+                                                frequencyPenalty: params.frequencyPenalty,
+                                                presencePenalty: params.presencePenalty)
+        if addPenalties {
             llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
                 llama_vocab_n_tokens(vocab), params.repeatLastN, params.repeatPenalty,
                 params.frequencyPenalty, params.presencePenalty))
@@ -1253,9 +1261,7 @@ final class LlamaInference: @unchecked Sendable {
         // output is bit-identical (MtpSpec.isPureGreedy). A row without
         // logits yields -1 (sampler_error) instead of being sampled.
         let pureGreedy = MtpSpec.isPureGreedy(temperature: params.temperature,
-                                              repeatPenalty: params.repeatPenalty,
-                                              frequencyPenalty: params.frequencyPenalty,
-                                              presencePenalty: params.presencePenalty)
+                                              hasPenalties: addPenalties)
         let vocabSize = Int(llama_vocab_n_tokens(vocab))
         func sampleTarget(_ idx: Int32) -> llama_token {
             guard pureGreedy else { return llama_sampler_sample(sampler, context, idx) }
@@ -1470,7 +1476,6 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         let mtpCount = mtpOutputCount
-        let firstTokenTimerStart = CFAbsoluteTimeGetCurrent()
 
         // Shared per-token consumer used by the MTP speculative path. Streams the
         // token's text, applies stop strings, and returns false when generation
