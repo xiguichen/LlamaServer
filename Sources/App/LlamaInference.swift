@@ -84,9 +84,10 @@ final class LlamaInference: @unchecked Sendable {
     /// Max speculative draft depth per round. The round machinery is
     /// depth-N capable (chained drafts, N-row verify, catch-up), but the
     /// configured depth is 1: on-device depth-2 measured ~9-13% SLOWER than
-    /// plain decoding, because the draft cost scales with the number of
-    /// sampled verify rows and the sampler (top_p over a ~248K vocab) — not
-    /// model compute — dominates the round. Depth 1 keeps the target
+    /// plain decoding. That run's "sample" phase, once read as sampler cost,
+    /// was really the draft and verify GPU time (async decode, waited on at
+    /// the first logits read); the phases are now split (MtpPhaseStats
+    /// draft-gpu / verify-gpu). Depth 1 keeps the target
     /// rollback distance at 1, covered by the recurrent-state ring (n_rs_seq,
     /// derived from this value) so rejected drafts are rolled back with a
     /// cheap `seq_rm` (the upstream "RS" path) rather than a full-state
@@ -1642,7 +1643,7 @@ final class LlamaInference: @unchecked Sendable {
             var mtpAccepted = 0    // total drafted tokens verified as real
             var mtpNoDraft = 0     // rounds with no usable draft (plain fallback)
             // Per-phase timing for the round, aggregated into the stats line.
-            // A drafted round records its quadruplet whenever the verify
+            // A drafted round records its phases whenever the verify
             // decision ran (including rounds that then stop on eog / stop
             // string / limit); fallback rounds record after a completed
             // decode+sample; rounds aborting before either record nothing.
@@ -1674,6 +1675,7 @@ final class LlamaInference: @unchecked Sendable {
                     while generated < limit {
                         if Int(nextPos) + mtpMaxDraft + 1 >= contextSize { finishReason = "context_full"; break }
                         genTokens += 1
+                        let roundStart = CFAbsoluteTimeGetCurrent()
 
                         // 1) Draft: chain up to mtpMaxDraft tokens through the
                         //    MTP head. The chained draft is self-conditioned
@@ -1700,7 +1702,14 @@ final class LlamaInference: @unchecked Sendable {
                         let drc0 = decodeDraft(draftRows)
                         var phaseDraft = CFAbsoluteTimeGetCurrent() - phaseDraftStart
                         var phaseSample: TimeInterval = 0
+                        // Wait for the draft's GPU work explicitly (free: the
+                        // logits read below would wait anyway) so it is billed
+                        // to draft-gpu, not to sample.
+                        var phaseDraftGpu: TimeInterval = 0
                         if drc0 == 0 {
+                            let phaseDraftGpuStart = CFAbsoluteTimeGetCurrent()
+                            llama_synchronize(dft)
+                            phaseDraftGpu += CFAbsoluteTimeGetCurrent() - phaseDraftGpuStart
                             draftEntries = 1
                             let phaseDraftSampleStart = CFAbsoluteTimeGetCurrent()
                             let cand0 = sampleDraft()
@@ -1716,6 +1725,9 @@ final class LlamaInference: @unchecked Sendable {
                                     let drc1 = decodeDraft([(cand0, nextPos + 1, chainH)])
                                     phaseDraft += CFAbsoluteTimeGetCurrent() - phaseChainStart
                                     if drc1 == 0 {
+                                        let phaseChainGpuStart = CFAbsoluteTimeGetCurrent()
+                                        llama_synchronize(dft)
+                                        phaseDraftGpu += CFAbsoluteTimeGetCurrent() - phaseChainGpuStart
                                         draftEntries = 2
                                         let phaseChainSampleStart = CFAbsoluteTimeGetCurrent()
                                         let cand1 = sampleDraft()
@@ -1737,16 +1749,24 @@ final class LlamaInference: @unchecked Sendable {
                             guard fallbackRC == 0 else {
                                 recoverFromDecodeFailure(); throw InferenceError.decode
                             }
+                            let phaseFallbackGpuStart = CFAbsoluteTimeGetCurrent()
+                            llama_synchronize(context)
+                            let phaseVerifyGpu = CFAbsoluteTimeGetCurrent() - phaseFallbackGpuStart
                             let phaseFallbackSampleStart = CFAbsoluteTimeGetCurrent()
                             let s = sampleTarget(0)
                             if s == -1 { finishReason = "sampler_error"; break }
                             if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseFallbackSampleStart
-                            phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample)
                             pendingH = copyH(context, 0) ?? pendingH
                             idLast = s
                             nextPos += 1
-                            if !consumeToken(s) { break }
+                            let phaseEmitStart = CFAbsoluteTimeGetCurrent()
+                            let keepGoing = consumeToken(s)
+                            let roundEnd = CFAbsoluteTimeGetCurrent()
+                            phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample,
+                                              draftGpu: phaseDraftGpu, verifyGpu: phaseVerifyGpu,
+                                              emit: roundEnd - phaseEmitStart, wall: roundEnd - roundStart)
+                            if !keepGoing { break }
                             continue
                         }
 
@@ -1757,6 +1777,11 @@ final class LlamaInference: @unchecked Sendable {
                         guard verifyRC == 0 else {
                             recoverFromDecodeFailure(); throw InferenceError.decode
                         }
+                        // Explicit wait (free: the first row's logits read
+                        // would wait anyway), billed to verify-gpu, not sample.
+                        let phaseVerifyGpuStart = CFAbsoluteTimeGetCurrent()
+                        llama_synchronize(context)
+                        let phaseVerifyGpu = CFAbsoluteTimeGetCurrent() - phaseVerifyGpuStart
 
                         // 3) Sample each row's real successor in order, stopping
                         //    at the first row that can't extend the accepted
@@ -1802,10 +1827,12 @@ final class LlamaInference: @unchecked Sendable {
                         //    any future KV-preservation work must trim from
                         //    nextPos + emitted-count first.
                         var stopped = false
+                        let phaseEmitStart = CFAbsoluteTimeGetCurrent()
                         for k in 0..<step.emitCount {
                             if generated >= limit { stopped = true; break }
                             if !consumeToken(reals[k]) { stopped = true; break }
                         }
+                        let phaseEmit = CFAbsoluteTimeGetCurrent() - phaseEmitStart
 
                         // Roll back rejected drafts from BOTH contexts (rows
                         // beyond what was emitted; rollback distance <=
@@ -1841,8 +1868,9 @@ final class LlamaInference: @unchecked Sendable {
                             }
                         }
 
-                        phaseStats.record(draft: phaseDraft, verify: phaseVerify,
-                                          sample: phaseSample)
+                        phaseStats.record(draft: phaseDraft, verify: phaseVerify, sample: phaseSample,
+                                          draftGpu: phaseDraftGpu, verifyGpu: phaseVerifyGpu,
+                                          emit: phaseEmit, wall: CFAbsoluteTimeGetCurrent() - roundStart)
 
                         if stopped { break }
                         if firstStopRow != nil {
@@ -1883,11 +1911,25 @@ final class LlamaInference: @unchecked Sendable {
             if draftSharesTargetMemory, let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, false) }
             decodedGenerated = 0
         } else {
+        var plainStats = PlainStepStats()
         while generated < limit {
             let nCtxUsed = promptTokens.count + generated
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
 
             genTokens += 1
+
+            // One step: wait for the previous decode's GPU work, sample, then
+            // text/emit and the next decode's enqueue (PlainStepStats). The
+            // explicit wait is free: the first logits read below would wait
+            // anyway, and this bills it to gpu-wait instead of sample.
+            let stepStart = CFAbsoluteTimeGetCurrent()
+            llama_synchronize(context)
+            let stepGpuWait = CFAbsoluteTimeGetCurrent() - stepStart
+            var stepSample: TimeInterval = 0
+            defer {
+                plainStats.record(gpuWait: stepGpuWait, sample: stepSample,
+                                  wall: CFAbsoluteTimeGetCurrent() - stepStart)
+            }
 
             // Probe available output rows. After prompt decode only the main
             // head produces output (n_outputs=1); MTP heads — if the model
@@ -1935,6 +1977,8 @@ final class LlamaInference: @unchecked Sendable {
                 // llama_sampler_sample; pure greedy has nothing to accept).
                 batchTokens.append(token)
             }
+
+            stepSample = CFAbsoluteTimeGetCurrent() - stepStart - stepGpuWait
 
             if batchTokens.isEmpty { break }
 
@@ -1998,6 +2042,7 @@ final class LlamaInference: @unchecked Sendable {
             // All decoded tokens are now resident in the KV cache.
             decodedGenerated = generated
         }
+        FileLogger.shared.info("plain stats: emitted=\(generated); \(plainStats.summary())")
         } // end plain (non-MTP) generation path
 
         // Flush any trailing bytes (lossy) and any held-back text, unless a stop
