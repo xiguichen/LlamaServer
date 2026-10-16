@@ -797,7 +797,7 @@ final class LlamaInference: @unchecked Sendable {
             // content may be nil (e.g. an assistant turn that only has
             // tool_calls). strdup(nil) returns nil → never pass nil to the
             // template engine; reconstruct text from tool_calls instead.
-            guard let contentPtr = strdup(effectiveContent(of: message)) else {
+            guard let contentPtr = strdup(message.promptText) else {
                 return fallbackPrompt(messages: messages)
             }
             allocated.append(contentPtr)
@@ -812,7 +812,7 @@ final class LlamaInference: @unchecked Sendable {
         // First call to size the buffer.
         var bufferSize = 0
         for message in messages {
-            let contentText = effectiveContent(of: message)
+            let contentText = message.promptText
             bufferSize += message.role.utf8.count + contentText.utf8.count + 16
         }
         bufferSize = max(bufferSize * 2, 1024)
@@ -854,26 +854,10 @@ final class LlamaInference: @unchecked Sendable {
     private func fallbackPrompt(messages: [ChatMessage]) -> String {
         var out = ""
         for message in messages {
-            out += "<|im_start|>\(message.role)\n\(effectiveContent(of: message))<|im_end|>\n"
+            out += "<|im_start|>\(message.role)\n\(message.promptText)<|im_end|>\n"
         }
         out += "<|im_start|>assistant\n"
         return out
-    }
-
-    /// The text to feed the chat template for a message. Normally this is the
-    /// message content, but an assistant turn may carry only `tool_calls` with
-    /// `content: nil`; reconstruct the `<tool_call>` envelope so multi-turn tool
-    /// conversations present a consistent history to the model.
-    private func effectiveContent(of message: ChatMessage) -> String {
-        if let content = message.content?.textValue, !content.isEmpty {
-            return content
-        }
-        guard let toolCalls = message.tool_calls, !toolCalls.isEmpty else {
-            return message.content?.textValue ?? ""
-        }
-        return toolCalls.map { call in
-            "<tool_call>{\"name\": \"\(call.function.name)\", \"arguments\": \(call.function.arguments)}</tool_call>"
-        }.joined(separator: "\n")
     }
 
     // MARK: - Tokenization

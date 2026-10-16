@@ -167,6 +167,40 @@ final class OpenAIModelsTests: XCTestCase {
         XCTAssertEqual(msg.tool_calls?[0].function.name, "fn")
     }
 
+    // MARK: - promptText
+
+    func testPromptTextRendersContentAndToolCallsTogether() throws {
+        // pi sends the model's prose preamble and the tool call it made in the
+        // same turn; both must survive into the next prompt, or the model loses
+        // the only "prose + <tool_call>" example and learns to announce a tool
+        // without emitting it.
+        let msg = ChatMessage(
+            role: "assistant",
+            content: "Let me check the current MTP implementation:",
+            tool_calls: [ToolCall(id: "call_1", type: "function",
+                                  function: ToolCallFunction(name: "read",
+                                                             arguments: #"{"path":"Sources/App/MtpSpeculator.swift"}"#))])
+        XCTAssertEqual(msg.promptText,
+            "Let me check the current MTP implementation:\n" +
+            #"<tool_call>{"name": "read", "arguments": {"path":"Sources/App/MtpSpeculator.swift"}}</tool_call>"#)
+    }
+
+    func testPromptTextToolCallsWithoutContent() throws {
+        let msg = ChatMessage(
+            role: "assistant",
+            content: nil,
+            tool_calls: [ToolCall(id: "call_2", type: "function",
+                                  function: ToolCallFunction(name: "bash",
+                                                             arguments: #"{"command":"ls"}"#))])
+        XCTAssertEqual(msg.promptText,
+            #"<tool_call>{"name": "bash", "arguments": {"command":"ls"}}</tool_call>"#)
+    }
+
+    func testPromptTextContentWithoutToolCalls() throws {
+        let msg = ChatMessage(role: "assistant", content: "hello")
+        XCTAssertEqual(msg.promptText, "hello")
+    }
+
     // MARK: - CompletionRequest
 
     func testDecodeCompletionRequestString() throws {

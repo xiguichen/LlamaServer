@@ -55,6 +55,28 @@ struct ChatMessage: Codable {
     }
 }
 
+extension ChatMessage {
+    /// The text fed to the chat template for this message.
+    ///
+    /// An assistant turn may carry `tool_calls` with `content: nil`; reconstruct
+    /// the `<tool_call>` envelope so multi-turn tool conversations present a
+    /// consistent history to the model. It may ALSO carry prose `content`
+    /// *together with* `tool_calls` — pi sends the model's "Let me check X:"
+    /// preamble alongside the call it made in the same turn. Both must be
+    /// rendered: dropping the envelope on those turns removes the only example
+    /// of "prose + `<tool_call>`" from the history, and the model learns to
+    /// announce a tool without ever emitting it (observed on device: the turn
+    /// ends right after "Let me check …:" with no call).
+    var promptText: String {
+        let text = content?.textValue ?? ""
+        guard let toolCalls = tool_calls, !toolCalls.isEmpty else { return text }
+        let envelopes = toolCalls.map { call in
+            "<tool_call>{\"name\": \"\(call.function.name)\", \"arguments\": \(call.function.arguments)}</tool_call>"
+        }.joined(separator: "\n")
+        return text.isEmpty ? envelopes : text + "\n" + envelopes
+    }
+}
+
 struct ToolDefinition: Codable {
     let type: String
     let function: ToolFunctionDefinition
