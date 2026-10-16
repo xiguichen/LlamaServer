@@ -510,18 +510,6 @@ final class LlamaHTTPServer {
                 keepAliveSource.cancel()
             }
 
-            // Tool-call streaming state: text before the first <tool_call> is
-            // streamed incrementally; text inside <tool_call>…</tool_call> is
-            // buffered; text after a complete tool call resumes streaming.
-            // This keeps the client's SSE parser alive during long generations
-            // while still allowing reliable tool call envelope parsing.
-            enum ToolStreamState: Equatable {
-                case idle
-                case inToolCall
-                case afterToolCall
-            }
-            var toolStreamState: ToolStreamState = .idle
-            var toolStreamBuffer = ""
             var didStreamContentDuringToolGen = false
             var lastChunkTime = CFAbsoluteTimeGetCurrent()
 
@@ -567,9 +555,14 @@ final class LlamaHTTPServer {
             var generationSucceeded = false
             var lastTokenTime = CFAbsoluteTimeGetCurrent()
             let generationStartTime = CFAbsoluteTimeGetCurrent()
-            // Strips <think> reasoning from the streamed (non-tool) content so
-            // clients receive only the final answer, not the chain-of-thought.
+            // Strips <think> reasoning from the streamed content so clients
+            // receive only the final answer, not the chain-of-thought. Runs for
+            // tool generations too, so a reasoning block emitted on a tool turn
+            // is never streamed as visible content.
             let thinkFilter = ReasoningStreamFilter()
+            // Buffers <tool_call>…</tool_call> envelopes out of the streamed
+            // tool-generation content while prose around them flows through.
+            let toolStreamFilter = ToolStreamFilter()
             var finishReasonSent = false
 
             do {
@@ -609,47 +602,21 @@ final class LlamaHTTPServer {
                     // <tool_call> envelope), then buffer the envelope, then
                     // resume streaming after </tool_call>. This keeps the
                     // client's SSE connection alive during long generations.
+                    // The text is run through the reasoning filter first so a
+                    // <think> block emitted on a tool turn is stripped rather
+                    // than streamed (which would also suppress the cleaned
+                    // content below via didStreamContentDuringToolGen).
                     guard !toolsActive else {
-                        let token = ToolCallParser.stripANSI(text)
-                        toolStreamBuffer += token
-                        switch toolStreamState {
-                        case .idle:
-                            if let range = toolStreamBuffer.range(of: "<tool_call>") {
-                                toolStreamState = .inToolCall
-                                let textBefore = String(toolStreamBuffer[..<range.lowerBound])
-                                if !textBefore.isEmpty {
-                                    didStreamContentDuringToolGen = true
-                                    FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(textBefore)<<<")
-                                    sendChunk(delta: Delta(role: nil, content: textBefore), finishReason: nil)
-                                }
-                                toolStreamBuffer = String(toolStreamBuffer[range.lowerBound...])
-                            } else {
-                                didStreamContentDuringToolGen = true
-                                FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(toolStreamBuffer)<<<")
-                                sendChunk(delta: Delta(role: nil, content: toolStreamBuffer), finishReason: nil)
-                                toolStreamBuffer = ""
-                            }
-                        case .inToolCall:
-                            if toolStreamBuffer.range(of: "</tool_call>") != nil {
-                                toolStreamState = .afterToolCall
-                                toolStreamBuffer = ""
-                            }
-                        case .afterToolCall:
-                            if let range = toolStreamBuffer.range(of: "<tool_call>") {
-                                toolStreamState = .inToolCall
-                                let textBefore = String(toolStreamBuffer[..<range.lowerBound])
-                                if !textBefore.isEmpty {
-                                    didStreamContentDuringToolGen = true
-                                    FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(textBefore)<<<")
-                                    sendChunk(delta: Delta(role: nil, content: textBefore), finishReason: nil)
-                                }
-                                toolStreamBuffer = String(toolStreamBuffer[range.lowerBound...])
-                            } else {
-                                didStreamContentDuringToolGen = true
-                                FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(toolStreamBuffer)<<<")
-                                sendChunk(delta: Delta(role: nil, content: toolStreamBuffer), finishReason: nil)
-                                toolStreamBuffer = ""
-                            }
+                        let visible = thinkFilter.feed(ToolCallParser.stripANSI(text))
+                        guard !visible.isEmpty else {
+                            flushKeepAliveIfNeeded()
+                            return true
+                        }
+                        let emit = toolStreamFilter.feed(visible)
+                        if !emit.isEmpty {
+                            didStreamContentDuringToolGen = true
+                            FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(emit)<<<")
+                            sendChunk(delta: Delta(role: nil, content: emit), finishReason: nil)
                         }
                         flushKeepAliveIfNeeded()
                         return true
@@ -667,11 +634,20 @@ final class LlamaHTTPServer {
                 if FileLogger.shared.logPromptContent {
                     FileLogger.shared.verbose("streaming #\(currentRequest): FULL RAW OUTPUT >>>\n\(genResult.text)\n<<<")
                 }
-                // Flush any content the reasoning filter held back (non-tool path).
-                if !toolsActive {
-                    let tail = thinkFilter.flush()
-                    if !tail.isEmpty {
-                        sendChunk(delta: Delta(role: nil, content: tail), finishReason: nil)
+                // Flush any content the reasoning filter held back. On the tool
+                // path the flushed text still has to pass the tool filter, so a
+                // held-back tail is streamed while an envelope remains buffered.
+                let thinkTail = thinkFilter.flush()
+                if !thinkTail.isEmpty {
+                    if toolsActive {
+                        let emit = toolStreamFilter.feed(thinkTail)
+                        if !emit.isEmpty {
+                            didStreamContentDuringToolGen = true
+                            FileLogger.shared.verbose("streaming #\(currentRequest): tool-text >>>\(emit)<<<")
+                            sendChunk(delta: Delta(role: nil, content: emit), finishReason: nil)
+                        }
+                    } else {
+                        sendChunk(delta: Delta(role: nil, content: thinkTail), finishReason: nil)
                     }
                 }
                 // Periodic context flush. The recreate re-allocates the KV

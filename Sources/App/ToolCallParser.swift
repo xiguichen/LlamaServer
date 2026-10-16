@@ -389,3 +389,57 @@ final class ReasoningStreamFilter {
         return 0
     }
 }
+
+/// Splits a streamed tool-generation into visible prose and buffered
+/// `<tool_call> … </tool_call>` envelopes. Text outside an envelope is returned
+/// immediately (the caller streams it to keep the SSE connection alive);
+/// envelope bodies are swallowed so the client never sees raw JSON mid-stream —
+/// they are re-emitted as structured `tool_calls` once generation ends
+/// (`ToolCallParser.parse`). Prose on both sides of the envelope is preserved,
+/// so nothing after a `</tool_call>` is lost when it shares a chunk with the tag.
+///
+/// Mirrors `ReasoningStreamFilter`: feed each decoded piece through `feed` and
+/// emit only what it returns. Compose it AFTER the reasoning filter so both an
+/// envelope and a `<think>` block can be buffered at once. Envelope tags are
+/// matched as whole literals, so a tag split across chunks is not recognised
+/// (the same assumption the streaming server made).
+final class ToolStreamFilter {
+    private enum State { case idle, inToolCall, afterToolCall }
+    private var state: State = .idle
+    private var buffer = ""
+
+    private static let openTag = "<tool_call>"
+    private static let closeTag = "</tool_call>"
+
+    /// Consumes a streamed piece, returning the text safe to emit now. Text
+    /// inside an envelope (from `<tool_call>` up to and including `</tool_call>`)
+    /// is dropped; the caller recovers the calls from the finished response.
+    func feed(_ text: String) -> String {
+        buffer += text
+        var output = ""
+        scan: while !buffer.isEmpty {
+            switch state {
+            case .idle, .afterToolCall:
+                if let r = buffer.range(of: Self.openTag) {
+                    output += buffer[buffer.startIndex..<r.lowerBound]
+                    buffer = String(buffer[r.lowerBound...])
+                    state = .inToolCall
+                } else {
+                    output += buffer
+                    buffer = ""
+                }
+            case .inToolCall:
+                // Drop the envelope body; anything after </tool_call> resumes
+                // streaming (possibly in the same chunk).
+                if let r = buffer.range(of: Self.closeTag) {
+                    buffer = String(buffer[r.upperBound...])
+                    state = .afterToolCall
+                } else {
+                    // Envelope still open — keep buffering, emit nothing.
+                    break scan
+                }
+            }
+        }
+        return output
+    }
+}

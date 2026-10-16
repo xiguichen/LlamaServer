@@ -214,4 +214,66 @@ final class ToolCallParserTests: XCTestCase {
         let filter = ReasoningStreamFilter()
         XCTAssertEqual(filter.feed("<think>r1</think>ok<think>r2</think>end"), "okend")
     }
+
+    // MARK: - ToolStreamFilter
+
+    func testToolStreamFilterPassesPlainTextThrough() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(filter.feed("Let me check "), "Let me check ")
+        XCTAssertEqual(filter.feed("the metrics"), "the metrics")
+    }
+
+    func testToolStreamFilterBuffersEnvelope() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(filter.feed(#"Checking now.<tool_call>{"name":"fn","arguments":{}}</tool_call>"#),
+                       "Checking now.")
+        // The envelope body is never streamed as content.
+    }
+
+    func testToolStreamFilterEnvelopeSplitAcrossChunks() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(filter.feed("before<tool_call>"), "before")
+        XCTAssertEqual(filter.feed(#"{"name":"fn","arguments":{"x":1}}"#), "")
+        XCTAssertEqual(filter.feed("</tool_call>"), "")
+        XCTAssertEqual(filter.feed("after"), "after")
+    }
+
+    func testToolStreamFilterKeepsProseAfterEnvelopeInSameChunk() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(
+            filter.feed(#"pre<tool_call>{"name":"fn"}</tool_call>post"#),
+            "prepost")
+    }
+
+    func testToolStreamFilterMultipleEnvelopes() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(
+            filter.feed(#"<tool_call>{"name":"a"}</tool_call>mid<tool_call>{"name":"b"}</tool_call>end"#),
+            "midend")
+    }
+
+    func testToolStreamFilterDropUnclosedEnvelope() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(filter.feed(#"text<tool_call>{"name":"fn""#), "text")
+        // Unterminated envelope stays buffered (never streamed as content).
+    }
+
+    // MARK: - ReasoningStreamFilter + ToolStreamFilter composition (tool turns)
+
+    /// Regression: a tool turn must not stream a `<think>` block to the client.
+    /// The server runs the decoded text through the reasoning filter BEFORE the
+    /// tool filter; previously the tool path bypassed the reasoning filter
+    /// entirely, leaking the chain-of-thought as `content` and suppressing the
+    /// cleaned content that would otherwise have replaced it.
+    func testToolTurnStripsThinkAndKeepsProseAndEnvelope() {
+        let think = ReasoningStreamFilter()
+        let tool = ToolStreamFilter()
+        var emitted = ""
+        for chunk in ["<think>let me", " reason", "</think>Calling ", #"it.<tool_call>{"name":"fn"}</tool_call>"#] {
+            emitted += tool.feed(think.feed(chunk))
+        }
+        XCTAssertEqual(emitted, "Calling it.")
+        XCTAssertFalse(emitted.contains("think"))
+        XCTAssertFalse(emitted.contains("reason"))
+    }
 }
