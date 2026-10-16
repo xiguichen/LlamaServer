@@ -95,6 +95,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/OpenAIModels.swift
         createIntermediateGroups: true
+      - path: Sources/App/ToolPrompt.swift
+        createIntermediateGroups: true
       - path: Sources/App/MtpProbe.swift
         createIntermediateGroups: true
       - path: Sources/App/MtpSpeculator.swift

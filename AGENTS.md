@@ -54,7 +54,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **`unload()`** must be called before discarding `LlamaInference` — otherwise ARC runs `deinit` and the (multi-GB) Metal/CPU allocation stays resident, causing next `llama_model_load_from_file` to return NULL (OOM).
 - **LLAMA_TAG** in `scripts/fetch-llama-xcframework.sh` must point to a llama.cpp release that publishes an `xcframework.zip` asset. Changing it may require adapting `Sources/App/LlamaInference.swift` for API drift.
 - **Stop field** in API: OpenAI sends `stop` as string or array of strings — decoded via `StopField` enum (handles both).
-- **Tool calls** are implemented via system prompt injection (`injectToolDefs`), not GBNF grammar. Model wraps tool calls in `<tool_call>{json}</tool_call>` envelopes. `ToolCallParser.parse()` extracts them post-generation. On the next request, `ChatMessage.promptText` must replay an assistant turn's prose `content` **and** its `tool_calls` into the prompt — dropping the envelope when prose is present removes the only "prose + `<tool_call>`" example from the history and trains the model to announce a tool and then stop without calling it.
+- **Tool calls** are implemented via system prompt injection (`ToolPrompt.inject`, a pure tested builder in `ToolPrompt.swift`), not GBNF grammar. Model wraps tool calls in `<tool_call>{json}</tool_call>` envelopes. The instruction tells the model to NEVER announce a tool call without emitting the envelope in the same message — a model that answers "let me use the X tool" and stops never calls anything (observed on device). `ToolCallParser.parse()` extracts them post-generation. On the next request, `ChatMessage.promptText` must replay an assistant turn's prose `content` **and** its `tool_calls` into the prompt — dropping the envelope when prose is present removes the only "prose + `<tool_call>`" example from the history and trains the model to announce a tool and then stop without calling it.
 - **Tool streaming filters compose**: a tool turn runs each decoded piece through `ReasoningStreamFilter` **then** `ToolStreamFilter` (both in `ToolCallParser.swift`), so a `<think>` block emitted on a tool turn is stripped rather than streamed (it used to bypass the reasoning filter, leak the chain-of-thought as `content`, and — via `didStreamContentDuringToolGen` — suppress the cleaned content). `ToolStreamFilter` streams prose outside `<tool_call>…</tool_call>` and buffers the envelope; envelope tags are matched as whole literals (assumes the tokenizer emits `<tool_call>`/`</tool_call>` as single tokens).
 - **`<think>` reasoning** blocks are stripped from streamed content by `ReasoningStreamFilter` (character-by-character state machine, NSRegularExpression for final parse).
 - **`resolvedMaxTokens`** precedence: `n_predict` > `max_completion_tokens` > `max_tokens` for chat, `n_predict` > `max_tokens` for `/v1/completions`.
@@ -67,8 +67,8 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 ## Tests
 
-- Two test files: `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing) and `ToolCallParserTests` (regex parsing, think-block stripping, streaming filter state machine).
-- Both are pure Swift — no model file, no inference. They run on simulator in CI.
+- Three test files: `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines) and `ToolPromptTests` (tool-instruction wording and injection).
+- All are pure Swift — no model file, no inference. They run on simulator in CI.
 - Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
 
 ## Style conventions

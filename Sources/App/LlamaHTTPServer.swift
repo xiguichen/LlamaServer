@@ -566,8 +566,8 @@ final class LlamaHTTPServer {
             var finishReasonSent = false
 
             do {
-                let msgs = self.injectToolDefs(messages: body.messages, tools: body.tools,
-                                               toolChoice: body.tool_choice)
+                let msgs = ToolPrompt.inject(messages: body.messages, tools: body.tools,
+                                             toolChoice: body.tool_choice)
                 let basePrompt = self.inference.formatPrompt(messages: msgs)
                 let prompt = self.applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
                 FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
@@ -862,8 +862,8 @@ final class LlamaHTTPServer {
         var failure: Error?
         inferenceQueue.sync {
             do {
-                let msgs = injectToolDefs(messages: body.messages, tools: body.tools,
-                                          toolChoice: body.tool_choice)
+                let msgs = ToolPrompt.inject(messages: body.messages, tools: body.tools,
+                                             toolChoice: body.tool_choice)
                 let basePrompt = inference.formatPrompt(messages: msgs)
                 let prompt = applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
                 if FileLogger.shared.logPromptContent {
@@ -972,49 +972,6 @@ final class LlamaHTTPServer {
             "Access-Control-Allow-Origin": "*"
         ], body: data)
         return resp
-    }
-
-    /// Serializes tool definitions into the system message so the model knows
-    /// which tools are available and how to call them via <tool_call> tags.
-    /// Honors `tool_choice`: "none" skips injection entirely; "required" / a
-    /// named function strengthens the instruction so the model must emit a call.
-    private func injectToolDefs(messages: [ChatMessage],
-                               tools: [ToolDefinition]?,
-                               toolChoice: ToolChoiceField?) -> [ChatMessage] {
-        guard let tools = tools, !tools.isEmpty else { return messages }
-        if toolChoice?.disablesTools == true { return messages }
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let toolsData = try? encoder.encode(tools),
-              let toolsStr = String(data: toolsData, encoding: .utf8) else {
-            return messages
-        }
-
-        var instruction = """
-        You have access to the following tools. When you want to use a tool, respond with EXACTLY this format (no markdown, no extra text around it):
-
-        <tool_call>{"name": "tool_name", "arguments": {"param1": "val1", "param2": "val2"}}</tool_call>
-
-        IMPORTANT: The `arguments` object MUST include ALL required parameters listed in the tool's JSON schema. Never omit a required parameter.
-        """
-
-        if let forced = toolChoice?.forcedFunctionName {
-            instruction += "\n\nYou MUST call the function named \"\(forced)\" with a <tool_call> and nothing else."
-        } else if toolChoice?.requiresTool == true {
-            instruction += "\n\nYou MUST respond with a <tool_call> and nothing else."
-        }
-
-        instruction += "\n\nAvailable tools:\n\(toolsStr)"
-
-        var modified = messages
-        if let idx = modified.firstIndex(where: { $0.role == "system" }) {
-            let existing = modified[idx].content?.textValue ?? ""
-            modified[idx] = ChatMessage(role: "system", content: instruction + "\n\n" + existing)
-        } else {
-            modified.insert(ChatMessage(role: "system", content: instruction), at: 0)
-        }
-        return modified
     }
 
     /// Suppresses reasoning by PREFILLING an already-closed, empty think block

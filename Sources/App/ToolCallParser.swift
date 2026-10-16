@@ -1,6 +1,6 @@
 import Foundation
 
-/// Parses the `<tool_call>{…}</tool_call>` text our `injectToolDefs` system
+/// Parses the `<tool_call>{…}</tool_call>` text our `ToolPrompt` system
 /// prompt asks the model to emit, turning it back into the structured
 /// `tool_calls` array that OpenAI clients expect.
 ///
