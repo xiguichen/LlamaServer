@@ -67,11 +67,35 @@ extension ChatMessage {
     /// of "prose + `<tool_call>`" from the history, and the model learns to
     /// announce a tool without ever emitting it (observed on device: the turn
     /// ends right after "Let me check …:" with no call).
-    var promptText: String {
+    var promptText: String { promptText(format: .jsonHermes) }
+
+    /// Format-aware `promptText`; the envelope syntax follows `format` (see
+    /// `ToolWireFormat`). The Qwen branch reproduces its template exactly: a
+    /// blank line before the first envelope when prose precedes it, a single
+    /// newline before later ones.
+    func promptText(format: ToolWireFormat) -> String {
         let text = content?.textValue ?? ""
         guard let toolCalls = tool_calls, !toolCalls.isEmpty else { return text }
+
+        if format == .qwenXML {
+            var out = text
+            for (index, call) in toolCalls.enumerated() {
+                let envelope = ToolPrompt.toolEnvelope(name: call.function.name,
+                                                       argumentsJSON: call.function.arguments,
+                                                       format: format)
+                if index == 0 {
+                    out += text.isEmpty ? envelope : "\n\n" + envelope
+                } else {
+                    out += "\n" + envelope
+                }
+            }
+            return out
+        }
+
         let envelopes = toolCalls.map { call in
-            "<tool_call>{\"name\": \"\(call.function.name)\", \"arguments\": \(call.function.arguments)}</tool_call>"
+            ToolPrompt.toolEnvelope(name: call.function.name,
+                                    argumentsJSON: call.function.arguments,
+                                    format: format)
         }.joined(separator: "\n")
         return text.isEmpty ? envelopes : text + "\n" + envelopes
     }

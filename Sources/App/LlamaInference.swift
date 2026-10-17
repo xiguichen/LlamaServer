@@ -116,6 +116,11 @@ final class LlamaInference: @unchecked Sendable {
     /// logging a warning for) a removal that can never succeed.
     private var supportsPartialCacheReuse = true
 
+    /// The model's GGUF chat template (raw Jinja), set once after load. The
+    /// server reads it to pick the tool wire-format (`ToolWireFormat.detect`)
+    /// so it can emulate the template's `tools` branch.
+    private(set) var chatTemplateString: String?
+
     /// The effective context size actually used (may be smaller than requested
     /// after clamping to the device's memory budget and the model's train window).
     let contextSize: Int
@@ -256,6 +261,13 @@ final class LlamaInference: @unchecked Sendable {
         let modelLoadSeconds = Date().timeIntervalSince(modelLoadStart)
         FileLogger.shared.info("model loaded OK: '\(self.modelName)'")
         self.model = loadedModel
+        // The model's own Jinja chat template decides the tool wire-format
+        // (see `ToolWireFormat.detect`). Read it once here so the server can
+        // emulate its `tools` branch instead of guessing.
+        if let tmpl = llama_model_chat_template(loadedModel, nil) {
+            self.chatTemplateString = String(cString: tmpl)
+            FileLogger.shared.debug("chat template loaded (\(self.chatTemplateString?.count ?? 0) chars), tool format=\(ToolWireFormat.detect(template: self.chatTemplateString))")
+        }
 
         guard let loadedVocab = llama_model_get_vocab(loadedModel) else {
             llama_model_free(loadedModel)
@@ -779,7 +791,7 @@ final class LlamaInference: @unchecked Sendable {
 
     /// Applies the model's built-in chat template (when present) to a list of
     /// messages, falling back to a generic ChatML-style layout.
-    func formatPrompt(messages: [ChatMessage]) -> String {
+    func formatPrompt(messages: [ChatMessage], format: ToolWireFormat = .jsonHermes) -> String {
         // Build C array of llama_chat_message with strdup'd strings.
         var cMessages: [llama_chat_message] = []
         var allocated: [UnsafeMutablePointer<CChar>] = []
@@ -791,14 +803,14 @@ final class LlamaInference: @unchecked Sendable {
             // strdup returns nil only on allocation failure — fall back safely
             // instead of force-unwrapping (which would crash).
             guard let rolePtr = strdup(message.role) else {
-                return fallbackPrompt(messages: messages)
+                return fallbackPrompt(messages: messages, format: format)
             }
             allocated.append(rolePtr)
             // content may be nil (e.g. an assistant turn that only has
             // tool_calls). strdup(nil) returns nil → never pass nil to the
             // template engine; reconstruct text from tool_calls instead.
-            guard let contentPtr = strdup(message.promptText) else {
-                return fallbackPrompt(messages: messages)
+            guard let contentPtr = strdup(message.promptText(format: format)) else {
+                return fallbackPrompt(messages: messages, format: format)
             }
             allocated.append(contentPtr)
             cMessages.append(
@@ -812,7 +824,7 @@ final class LlamaInference: @unchecked Sendable {
         // First call to size the buffer.
         var bufferSize = 0
         for message in messages {
-            let contentText = message.promptText
+            let contentText = message.promptText(format: format)
             bufferSize += message.role.utf8.count + contentText.utf8.count + 16
         }
         bufferSize = max(bufferSize * 2, 1024)
@@ -830,7 +842,7 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         if written < 0 {
-            return fallbackPrompt(messages: messages)
+            return fallbackPrompt(messages: messages, format: format)
         }
 
         if Int(written) >= buffer.count {
@@ -843,7 +855,7 @@ final class LlamaInference: @unchecked Sendable {
                 llama_chat_apply_template(tmpl, ptr.baseAddress, ptr.count, true,
                                           &buffer, Int32(buffer.count))
             }
-            if retry < 0 { return fallbackPrompt(messages: messages) }
+            if retry < 0 { return fallbackPrompt(messages: messages, format: format) }
             return String(cString: buffer)
         }
 
@@ -851,10 +863,10 @@ final class LlamaInference: @unchecked Sendable {
         return String(cString: buffer)
     }
 
-    private func fallbackPrompt(messages: [ChatMessage]) -> String {
+    private func fallbackPrompt(messages: [ChatMessage], format: ToolWireFormat = .jsonHermes) -> String {
         var out = ""
         for message in messages {
-            out += "<|im_start|>\(message.role)\n\(message.promptText)<|im_end|>\n"
+            out += "<|im_start|>\(message.role)\n\(message.promptText(format: format))<|im_end|>\n"
         }
         out += "<|im_start|>assistant\n"
         return out

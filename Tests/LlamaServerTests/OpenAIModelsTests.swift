@@ -201,6 +201,46 @@ final class OpenAIModelsTests: XCTestCase {
         XCTAssertEqual(msg.promptText, "hello")
     }
 
+    /// The Qwen3.5 template replays an assistant `tool_calls` turn as XML nested
+    /// inside `<tool_call>`, with a blank line before it when prose precedes it.
+    func testPromptTextRendersQwenXMLToolCalls() throws {
+        let msg = ChatMessage(
+            role: "assistant",
+            content: "Let me check:",
+            tool_calls: [ToolCall(id: "call_1", type: "function",
+                                  function: ToolCallFunction(name: "read",
+                                                             arguments: #"{"path":"x.swift"}"#))])
+        XCTAssertEqual(msg.promptText(format: .qwenXML), """
+        Let me check:
+
+        <tool_call>
+        <function=read>
+        <parameter=path>
+        x.swift
+        </parameter>
+        </function>
+        </tool_call>
+        """)
+    }
+
+    func testPromptTextQwenXMLToolCallsWithoutContent() throws {
+        let msg = ChatMessage(
+            role: "assistant",
+            content: nil,
+            tool_calls: [ToolCall(id: "call_2", type: "function",
+                                  function: ToolCallFunction(name: "bash",
+                                                             arguments: #"{"command":"ls"}"#))])
+        XCTAssertEqual(msg.promptText(format: .qwenXML), """
+        <tool_call>
+        <function=bash>
+        <parameter=command>
+        ls
+        </parameter>
+        </function>
+        </tool_call>
+        """)
+    }
+
     // MARK: - CompletionRequest
 
     func testDecodeCompletionRequestString() throws {

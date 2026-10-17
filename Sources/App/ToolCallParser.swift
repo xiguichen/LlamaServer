@@ -41,6 +41,36 @@ enum ToolCallParser {
         pattern: #"<tool_call>\s*(\{.*\})"#,
         options: [.dotMatchesLineSeparators])
 
+    /// Qwen3.5-native call (see `ToolWireFormat.qwenXML`):
+    /// `<tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n</tool_call>`.
+    /// Our JSON regex never matched this form, so a model following its own
+    /// template produced calls the server silently dropped.
+    private static let xmlCallRegex = try! NSRegularExpression(
+        pattern: #"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s*</tool_call>"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// Unterminated Qwen call (the model stopped before `</tool_call>`).
+    private static let xmlUnclosedCallRegex = try! NSRegularExpression(
+        pattern: #"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// A single `<parameter=K>V</parameter>` inside a Qwen call body.
+    private static let xmlParamRegex = try! NSRegularExpression(
+        pattern: #"<parameter=([^>\n]+)>\s*(.*?)\s*</parameter>"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// Any `<tool_call>…</tool_call>` envelope, whatever its inner syntax, for
+    /// stripping from the client-visible content.
+    private static let anyEnvelopeRegex = try! NSRegularExpression(
+        pattern: #"<tool_call>.*?</tool_call>"#,
+        options: [.dotMatchesLineSeparators])
+
+    /// Leftover `<function=…>`/`<parameter=…>` tags from an unrecoverable Qwen
+    /// envelope, stripped so raw tags never reach the client as `content`.
+    private static let xmlFragmentRegex = try! NSRegularExpression(
+        pattern: #"</?(?:function|parameter)[^>]*>"#,
+        options: [])
+
     /// A well-formed `<think> … </think>` reasoning block. Models like QwOpus
     /// wrap their chain-of-thought in these tags; clients (e.g. OpenCode) expect
     /// only the final answer as `content`, so the reasoning is stripped out.
@@ -74,10 +104,17 @@ enum ToolCallParser {
                 toolCalls.append(call)
             }
         }
+        toolCalls.append(contentsOf: xmlToolCalls(in: stripped))
 
-        // Remove the envelopes and any <think> reasoning from visible content.
-        let cleaned = toolCallRegex.stringByReplacingMatches(
+        // Remove the envelopes (either syntax) and any <think> reasoning from
+        // the client-visible content. Any `<tool_call>` left after removing the
+        // closed envelopes is an unterminated one (the model stopped early), so
+        // truncate at it — the call itself was already recovered above.
+        var cleaned = anyEnvelopeRegex.stringByReplacingMatches(
             in: stripped, options: [], range: fullRange, withTemplate: "")
+        if let open = cleaned.range(of: "<tool_call>") {
+            cleaned = String(cleaned[cleaned.startIndex..<open.lowerBound])
+        }
 
         if !toolCalls.isEmpty {
             let trimmed = stripReasoning(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -99,10 +136,15 @@ enum ToolCallParser {
         for remnant in ["<tool_call>", "</tool_call>", "</arg"] {
             noFragments = noFragments.replacingOccurrences(of: remnant, with: "")
         }
+        noFragments = xmlFragmentRegex.stringByReplacingMatches(
+            in: noFragments, options: [],
+            range: NSRange(noFragments.startIndex..<noFragments.endIndex, in: noFragments),
+            withTemplate: "")
         let trimmed = stripReasoning(noFragments).trimmingCharacters(in: .whitespacesAndNewlines)
         let hadEnvelope = stripped.contains("<tool_call>")
             || stripped.contains("</tool_call>")
             || stripped.contains("</arg")
+            || stripped.contains("<function=")
         return ParseResult(cleanedContent: trimmed, toolCalls: [],
                            hasUnrecoveredEnvelope: hadEnvelope)
     }
@@ -203,6 +245,55 @@ enum ToolCallParser {
             id: "call_\(UUID().uuidString.prefix(24))",
             type: "function",
             function: ToolCallFunction(name: name, arguments: argumentsString))
+    }
+
+    /// Extracts Qwen-native `<function=NAME>…<parameter=K>V</parameter>…</function>`
+    /// calls. The model emits parameter values as plain text, so each is carried
+    /// through as a JSON string (matching OpenAI's `arguments` contract).
+    private static func xmlToolCalls(in text: String) -> [ToolCall] {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        var matches = xmlCallRegex.matches(in: text, options: [], range: range)
+        if matches.isEmpty {
+            matches = xmlUnclosedCallRegex.matches(in: text, options: [], range: range)
+        }
+        var calls: [ToolCall] = []
+        for match in matches {
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: text),
+                  let bodyRange = Range(match.range(at: 2), in: text) else { continue }
+            let name = String(text[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            let arguments = parseXMLParameters(String(text[bodyRange]))
+            let argumentsString: String
+            if arguments.isEmpty {
+                argumentsString = "{}"
+            } else if let data = try? JSONSerialization.data(withJSONObject: arguments),
+                      let string = String(data: data, encoding: .utf8) {
+                argumentsString = string
+            } else {
+                argumentsString = "{}"
+            }
+            calls.append(ToolCall(
+                id: "call_\(UUID().uuidString.prefix(24))",
+                type: "function",
+                function: ToolCallFunction(name: name, arguments: argumentsString)))
+        }
+        return calls
+    }
+
+    /// Parses the `<parameter=K>V</parameter>` pairs in a Qwen call body.
+    private static func parseXMLParameters(_ body: String) -> [String: String] {
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        var out: [String: String] = [:]
+        for match in xmlParamRegex.matches(in: body, options: [], range: range) {
+            guard match.numberOfRanges >= 3,
+                  let keyRange = Range(match.range(at: 1), in: body),
+                  let valueRange = Range(match.range(at: 2), in: body) else { continue }
+            let key = String(body[keyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            out[key] = String(body[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return out
     }
 
     /// Returns the substring of the first complete brace-balanced JSON object in

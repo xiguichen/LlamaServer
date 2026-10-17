@@ -177,6 +177,70 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertFalse(result.hasUnrecoveredEnvelope)
     }
 
+    // MARK: - parse (Qwen3.5 native XML)
+
+    private let xmlCall = """
+    <tool_call>
+    <function=notes>
+    <parameter=operation>
+    write
+    </parameter>
+    <parameter=path>
+    checkpoint.md
+    </parameter>
+    </function>
+    </tool_call>
+    """
+
+    /// The model's own template emits `<function=…>/<parameter=…>`; before this
+    /// the parser only matched the JSON envelope and silently dropped it.
+    func testParseQwenXMLToolCall() {
+        let result = ToolCallParser.parse(xmlCall)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls[0].function.name, "notes")
+        XCTAssertEqual(result.cleanedContent, "")
+        XCTAssertFalse(result.hasUnrecoveredEnvelope)
+    }
+
+    func testParseQwenXMLArgumentsAreJSONStrings() throws {
+        let result = ToolCallParser.parse(xmlCall)
+        let args = try XCTUnwrap(result.toolCalls.first?.function.arguments)
+        let decoded = try JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: String]
+        XCTAssertEqual(decoded?["operation"], "write")
+        XCTAssertEqual(decoded?["path"], "checkpoint.md")
+    }
+
+    func testParseQwenXMLWithProsePreamble() {
+        let text = "I'll save that.\n\n" + xmlCall
+        let result = ToolCallParser.parse(text)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.cleanedContent, "I'll save that.")
+    }
+
+    func testParseQwenXMLMultipleCalls() {
+        let second = xmlCall.replacingOccurrences(of: "notes", with: "read")
+        let result = ToolCallParser.parse(xmlCall + "\n" + second)
+        XCTAssertEqual(result.toolCalls.count, 2)
+        XCTAssertEqual(result.toolCalls[0].function.name, "notes")
+        XCTAssertEqual(result.toolCalls[1].function.name, "read")
+    }
+
+    /// The model sometimes stops right after `</function>` (EOG) — recover it.
+    func testParseQwenXMLUnclosed() {
+        let text = "Go.<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>"
+        let result = ToolCallParser.parse(text)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls[0].function.name, "bash")
+        XCTAssertEqual(result.cleanedContent, "Go.")
+    }
+
+    func testParseQwenXMLNoParametersYieldsEmptyArguments() {
+        let text = "<tool_call>\n<function=ping>\n</function>\n</tool_call>"
+        let result = ToolCallParser.parse(text)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls[0].function.arguments, "{}")
+    }
+
     // MARK: - ReasoningStreamFilter
 
     func testReasoningFilterPassesThroughNormalText() {

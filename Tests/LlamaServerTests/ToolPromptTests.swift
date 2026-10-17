@@ -43,12 +43,86 @@ final class ToolPromptTests: XCTestCase {
         XCTAssertFalse(text.contains("MUST respond with a <tool_call>"))
     }
 
+    // MARK: - wire format detection
+
+    /// The QwOpus3.5/Qwen3.5 GGUF template carries the XML call grammar; we
+    /// must inject that, not the JSON envelope (matched on device: the JSON form
+    /// made the model narrate instead of call).
+    func testDetectQwenXMLFromTemplate() {
+        let template = "<tool_call>\n<function=example_function_name>\n<parameter=x>\n"
+        XCTAssertEqual(ToolWireFormat.detect(template: template), .qwenXML)
+    }
+
+    func testDetectFallsBackToJSONForNilOrOtherTemplates() {
+        XCTAssertEqual(ToolWireFormat.detect(template: nil), .jsonHermes)
+        XCTAssertEqual(ToolWireFormat.detect(template: "{% for m in messages %}{{ m }}{% endfor %}"), .jsonHermes)
+    }
+
+    // MARK: - native (Qwen XML) block
+
+    func testQwenBlockUsesNativeToolGrammar() {
+        let block = ToolPrompt.block(toolsJSON: #"{"function":{"name":"search"}}"#,
+                                     toolChoice: nil, format: .qwenXML)
+        XCTAssertTrue(block.hasPrefix("# Tools"))
+        XCTAssertTrue(block.contains("<tools>"))
+        XCTAssertTrue(block.contains(#"{"function":{"name":"search"}}"#))
+        XCTAssertTrue(block.contains("<function=example_function_name>"))
+        XCTAssertTrue(block.contains("<parameter=example_parameter_1>"))
+        XCTAssertFalse(block.contains("\"arguments\""),
+                       "the XML format must not advertise a JSON arguments object")
+    }
+
+    func testQwenBlockAddsForcedFunctionLine() {
+        let block = ToolPrompt.block(toolsJSON: "{}", toolChoice: .function("search"), format: .qwenXML)
+        XCTAssertTrue(block.contains("\"search\""))
+        XCTAssertTrue(block.contains("MUST call the function"))
+    }
+
+    // MARK: - tool_calls replay envelopes
+
+    func testQwenToolEnvelopeRendersXML() {
+        let env = ToolPrompt.toolEnvelope(name: "notes",
+                                          argumentsJSON: #"{"path":"a.md","op":"write"}"#,
+                                          format: .qwenXML)
+        XCTAssertEqual(env, """
+        <tool_call>
+        <function=notes>
+        <parameter=op>
+        write
+        </parameter>
+        <parameter=path>
+        a.md
+        </parameter>
+        </function>
+        </tool_call>
+        """)
+    }
+
+    func testJSONToolEnvelopeUnchanged() {
+        let env = ToolPrompt.toolEnvelope(name: "read", argumentsJSON: #"{"path":"x"}"#, format: .jsonHermes)
+        XCTAssertEqual(env, #"<tool_call>{"name": "read", "arguments": {"path":"x"}}</tool_call>"#)
+    }
+
+    // MARK: - tool results
+
+    /// The Qwen template renders tool results as a `<tool_response>` user turn;
+    /// leaving `role: "tool"` would put the result somewhere the model never saw.
+    func testNormalizeToolResultsWrapsInToolResponse() {
+        let out = ToolPrompt.normalizeToolResults([
+            ChatMessage(role: "assistant", content: "hi"),
+            ChatMessage(role: "tool", content: "file contents", tool_call_id: "call_1"),
+        ])
+        XCTAssertEqual(out[0].role, "assistant")
+        XCTAssertEqual(out[1].role, "user")
+        XCTAssertEqual(out[1].content?.textValue, "<tool_response>\nfile contents\n</tool_response>")
+    }
+
     // MARK: - inject
 
     func testInjectInsertsSystemMessageWhenAbsent() {
         let out = ToolPrompt.inject(messages: [ChatMessage(role: "user", content: "hi")],
                                     tools: [tool("search")], toolChoice: nil)
-        XCTAssertEqual(out.count, 3)   // system + user + trailing reminder
+        XCTAssertEqual(out.count, 2)   // system + user
         XCTAssertEqual(out.first?.role, "system")
         XCTAssertTrue((out.first?.content?.textValue ?? "").contains("Available tools"))
     }
@@ -57,31 +131,22 @@ final class ToolPromptTests: XCTestCase {
         let msgs = [ChatMessage(role: "system", content: "be terse"),
                     ChatMessage(role: "user", content: "hi")]
         let out = ToolPrompt.inject(messages: msgs, tools: [tool("search")], toolChoice: nil)
-        XCTAssertEqual(out.count, 3)
+        XCTAssertEqual(out.count, 2)
         let sys = out.first?.content?.textValue ?? ""
         XCTAssertTrue(sys.hasPrefix("You have access to the following tools"))
         XCTAssertTrue(sys.hasSuffix("be terse"))
     }
 
-    /// Observed on device: pi prepends a Superpowers user message that tells the
-    /// model to "announce Using [skill] to [purpose]". A small model announces
-    /// and then stops, never calling a tool — the tool instruction at the top of
-    /// the system message is too far from where generation starts. Repeating a
-    /// short reminder AFTER every user/tool message restores the call.
-    func testInjectAppendsReminderAfterAllMessages() {
+    /// The native format injects the `# Tools` block and must NOT append a
+    /// trailing reminder — the earlier reminder was a workaround for the wrong
+    /// (JSON) format.
+    func testInjectQwenXMLNativeBlockAndNoReminder() {
         let out = ToolPrompt.inject(messages: [ChatMessage(role: "user", content: "hi")],
-                                    tools: [tool("search")], toolChoice: nil)
-        XCTAssertEqual(out.count, 3, "system + user + trailing reminder")
+                                    tools: [tool("search")], toolChoice: nil, format: .qwenXML)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertTrue((out.first?.content?.textValue ?? "").hasPrefix("# Tools"))
         XCTAssertEqual(out.last?.role, "user")
-        let reminder = out.last?.content?.textValue ?? ""
-        XCTAssertTrue(reminder.contains("<tool_call>"))
-        XCTAssertTrue(reminder.contains("If a tool is needed"))
-    }
-
-    /// The reminder must not push the model into calling a tool when the answer
-    /// needs none (verified on device: "What is 2+2?" answers "4").
-    func testReminderAllowsAnsweringWithoutATool() {
-        XCTAssertTrue(ToolPrompt.reminder.contains("If no tool is needed"))
+        XCTAssertEqual(out.last?.content?.textValue, "hi")
     }
 
     func testInjectLeavesMessagesUnchangedWithoutTools() {
