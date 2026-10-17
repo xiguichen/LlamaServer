@@ -904,13 +904,13 @@ final class LlamaInference: @unchecked Sendable {
     }
 
     private func fallbackPrompt(messages: [ChatMessage], format: ToolWireFormat = .jsonHermes) -> String {
-        // The Qwen3.5 family's template is not applicable by the vendored
-        // `llama_chat_apply_template` (it returns < 0), so its message loop is
-        // reproduced faithfully here — including the `<think>` scaffold on
-        // assistant turns after the last user query. See `QwenPrompt`.
-        if format == .qwenXML {
-            return QwenPrompt.render(messages: messages, format: format)
-        }
+        // Only reached when `llama_chat_apply_template` declines the model's
+        // template (or the model has none) — for this family it does not: on
+        // device the model's own template renders, and it produces this same
+        // plain ChatML layout (same bytes as the logged FULL PROMPT). So keep
+        // this byte-compatible with that render: one `<|im_start|>role` turn per
+        // message plus a bare assistant primer. `promptText(format:)` supplies
+        // the replayed tool-call envelopes and the `|trim` the template applies.
         var out = ""
         for message in messages {
             out += "<|im_start|>\(message.role)\n\(message.promptText(format: format))<|im_end|>\n"
