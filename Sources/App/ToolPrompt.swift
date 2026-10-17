@@ -29,10 +29,21 @@ enum ToolPrompt {
         return instruction
     }
 
+    /// A short reminder appended AFTER every user/tool message. Observed on
+    /// device: pi prepends a Superpowers user message telling the model to
+    /// "announce Using [skill] to [purpose]"; a small model (4B) announces and
+    /// then ends the turn with EOG, never emitting a tool call. The tool
+    /// instruction at the top of the system message is too far from where
+    /// generation starts, so the requirement is repeated next to it. It is
+    /// conditional ("if a tool is needed") so a question that needs no tool is
+    /// still answered directly (verified: "What is 2+2?" → "4").
+    static let reminder = "If a tool is needed to proceed, you MUST emit the <tool_call> block in this message — do not reply with only a sentence announcing what you will do. If no tool is needed, answer normally."
+
     /// Returns `messages` with the tool instruction injected — prepended to an
     /// existing system message, or inserted as a new system message at the
-    /// front. Returns `messages` unchanged when no tools are offered or
-    /// `tool_choice` disables them.
+    /// front — and a short `reminder` appended as the last message so it sits
+    /// next to the generation point. Returns `messages` unchanged when no tools
+    /// are offered or `tool_choice` disables them.
     static func inject(messages: [ChatMessage],
                        tools: [ToolDefinition]?,
                        toolChoice: ToolChoiceField?) -> [ChatMessage] {
@@ -56,6 +67,7 @@ enum ToolPrompt {
         } else {
             modified.insert(ChatMessage(role: "system", content: instruction), at: 0)
         }
+        modified.append(ChatMessage(role: "user", content: reminder))
         return modified
     }
 }

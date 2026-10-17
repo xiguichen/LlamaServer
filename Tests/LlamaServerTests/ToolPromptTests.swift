@@ -48,7 +48,7 @@ final class ToolPromptTests: XCTestCase {
     func testInjectInsertsSystemMessageWhenAbsent() {
         let out = ToolPrompt.inject(messages: [ChatMessage(role: "user", content: "hi")],
                                     tools: [tool("search")], toolChoice: nil)
-        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out.count, 3)   // system + user + trailing reminder
         XCTAssertEqual(out.first?.role, "system")
         XCTAssertTrue((out.first?.content?.textValue ?? "").contains("Available tools"))
     }
@@ -57,10 +57,31 @@ final class ToolPromptTests: XCTestCase {
         let msgs = [ChatMessage(role: "system", content: "be terse"),
                     ChatMessage(role: "user", content: "hi")]
         let out = ToolPrompt.inject(messages: msgs, tools: [tool("search")], toolChoice: nil)
-        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out.count, 3)
         let sys = out.first?.content?.textValue ?? ""
         XCTAssertTrue(sys.hasPrefix("You have access to the following tools"))
         XCTAssertTrue(sys.hasSuffix("be terse"))
+    }
+
+    /// Observed on device: pi prepends a Superpowers user message that tells the
+    /// model to "announce Using [skill] to [purpose]". A small model announces
+    /// and then stops, never calling a tool — the tool instruction at the top of
+    /// the system message is too far from where generation starts. Repeating a
+    /// short reminder AFTER every user/tool message restores the call.
+    func testInjectAppendsReminderAfterAllMessages() {
+        let out = ToolPrompt.inject(messages: [ChatMessage(role: "user", content: "hi")],
+                                    tools: [tool("search")], toolChoice: nil)
+        XCTAssertEqual(out.count, 3, "system + user + trailing reminder")
+        XCTAssertEqual(out.last?.role, "user")
+        let reminder = out.last?.content?.textValue ?? ""
+        XCTAssertTrue(reminder.contains("<tool_call>"))
+        XCTAssertTrue(reminder.contains("If a tool is needed"))
+    }
+
+    /// The reminder must not push the model into calling a tool when the answer
+    /// needs none (verified on device: "What is 2+2?" answers "4").
+    func testReminderAllowsAnsweringWithoutATool() {
+        XCTAssertTrue(ToolPrompt.reminder.contains("If no tool is needed"))
     }
 
     func testInjectLeavesMessagesUnchangedWithoutTools() {
