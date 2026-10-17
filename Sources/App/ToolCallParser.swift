@@ -89,7 +89,7 @@ enum ToolCallParser {
         options: [])
 
     /// Scans a finished completion for tool-call envelopes.
-    static func parse(_ text: String) -> ParseResult {
+    static func parse(_ text: String, tools: [ToolDefinition]? = nil) -> ParseResult {
         let stripped = stripANSI(text)
 
         let fullRange = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
@@ -104,7 +104,7 @@ enum ToolCallParser {
                 toolCalls.append(call)
             }
         }
-        toolCalls.append(contentsOf: xmlToolCalls(in: stripped))
+        toolCalls.append(contentsOf: xmlToolCalls(in: stripped, schema: parameterKinds(from: tools)))
 
         // Remove the envelopes (either syntax) and any <think> reasoning from
         // the client-visible content. Any `<tool_call>` left after removing the
@@ -247,10 +247,71 @@ enum ToolCallParser {
             function: ToolCallFunction(name: name, arguments: argumentsString))
     }
 
+    /// How a parameter's value should be typed, taken from the tool's JSON
+    /// schema. llama.cpp's own Qwen parser is schema-aware: a string-typed
+    /// parameter stays a literal string, everything else is JSON-normalized
+    /// (`common/chat-peg-parser.cpp`, `is_arg_string_value`).
+    private enum ParamKind { case string, typed, unknown }
+
+    /// function name -> parameter name -> kind. Params absent from the schema
+    /// (or with no tools supplied) are `.unknown` and typed heuristically.
+    private static func parameterKinds(from tools: [ToolDefinition]?) -> [String: [String: ParamKind]] {
+        guard let tools else { return [:] }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var out: [String: [String: ParamKind]] = [:]
+        for tool in tools {
+            guard let data = try? encoder.encode(tool),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let function = root["function"] as? [String: Any],
+                  let name = function["name"] as? String else { continue }
+            var kinds: [String: ParamKind] = [:]
+            if let params = function["parameters"] as? [String: Any],
+               let properties = params["properties"] as? [String: Any] {
+                for (key, raw) in properties {
+                    guard let property = raw as? [String: Any] else { continue }
+                    kinds[key] = isStringSchema(property) ? .string : .typed
+                }
+            }
+            out[name] = kinds
+        }
+        return out
+    }
+
+    /// True when the property is declared as a string (directly, or via an
+    /// `anyOf` that includes a string variant — e.g. const-string enums).
+    private static func isStringSchema(_ property: [String: Any]) -> Bool {
+        if let type = property["type"] as? String { return type == "string" }
+        if let anyOf = property["anyOf"] as? [[String: Any]] {
+            return anyOf.contains { ($0["type"] as? String) == "string" }
+        }
+        return false
+    }
+
+    /// Types a raw parameter value: string-typed params stay strings; others are
+    /// JSON-normalized (so `["a","b"]` becomes a real array, `5` a number);
+    /// unknown params only get container values promoted, never scalar coercion.
+    private static func typedParameterValue(_ raw: String, kind: ParamKind) -> Any {
+        switch kind {
+        case .string:
+            return raw
+        case .typed:
+            return jsonValue(raw) ?? raw
+        case .unknown:
+            if let value = jsonValue(raw), value is [Any] || value is [String: Any] { return value }
+            return raw
+        }
+    }
+
+    private static func jsonValue(_ raw: String) -> Any? {
+        guard let data = raw.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    }
+
     /// Extracts Qwen-native `<function=NAME>…<parameter=K>V</parameter>…</function>`
-    /// calls. The model emits parameter values as plain text, so each is carried
-    /// through as a JSON string (matching OpenAI's `arguments` contract).
-    private static func xmlToolCalls(in text: String) -> [ToolCall] {
+    /// calls. Parameter values are typed against the tool schema (see
+    /// `parameterKinds`), matching llama.cpp's Qwen parser.
+    private static func xmlToolCalls(in text: String, schema: [String: [String: ParamKind]]) -> [ToolCall] {
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         var matches = xmlCallRegex.matches(in: text, options: [], range: range)
         if matches.isEmpty {
@@ -263,7 +324,7 @@ enum ToolCallParser {
                   let bodyRange = Range(match.range(at: 2), in: text) else { continue }
             let name = String(text[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
-            let arguments = parseXMLParameters(String(text[bodyRange]))
+            let arguments = parseXMLParameters(String(text[bodyRange]), function: name, schema: schema)
             let argumentsString: String
             if arguments.isEmpty {
                 argumentsString = "{}"
@@ -281,17 +342,22 @@ enum ToolCallParser {
         return calls
     }
 
-    /// Parses the `<parameter=K>V</parameter>` pairs in a Qwen call body.
-    private static func parseXMLParameters(_ body: String) -> [String: String] {
+    /// Parses the `<parameter=K>V</parameter>` pairs in a Qwen call body, typing
+    /// each value against the function's schema.
+    private static func parseXMLParameters(_ body: String,
+                                           function: String,
+                                           schema: [String: [String: ParamKind]]) -> [String: Any] {
         let range = NSRange(body.startIndex..<body.endIndex, in: body)
-        var out: [String: String] = [:]
+        let kinds = schema[function] ?? [:]
+        var out: [String: Any] = [:]
         for match in xmlParamRegex.matches(in: body, options: [], range: range) {
             guard match.numberOfRanges >= 3,
                   let keyRange = Range(match.range(at: 1), in: body),
                   let valueRange = Range(match.range(at: 2), in: body) else { continue }
             let key = String(body[keyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else { continue }
-            out[key] = String(body[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = String(body[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            out[key] = typedParameterValue(raw, kind: kinds[key] ?? .unknown)
         }
         return out
     }

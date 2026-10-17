@@ -241,6 +241,45 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls[0].function.arguments, "{}")
     }
 
+    // MARK: - parse (schema-aware typing, mirrors llama.cpp's Qwen parser)
+
+    private func tool(_ name: String, _ properties: [String: Any]) -> ToolDefinition {
+        ToolDefinition(type: "function",
+                       function: ToolFunctionDefinition(
+                        name: name, description: nil,
+                        parameters: ["type": AnyCodable("object"),
+                                     "properties": AnyCodable(properties)]))
+    }
+
+    func testParseQwenXMLArrayParameterBecomesJSONArray() throws {
+        let tools = [tool("web_search", ["queries": ["type": "array", "items": ["type": "string"]]])]
+        let text = "<tool_call>\n<function=web_search>\n<parameter=queries>\n[\"a b\", \"c d\"]\n</parameter>\n</function>\n</tool_call>"
+        let result = ToolCallParser.parse(text, tools: tools)
+        let args = try XCTUnwrap(result.toolCalls.first?.function.arguments)
+        let obj = try JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["queries"] as? [String], ["a b", "c d"])
+    }
+
+    /// A string-typed param must stay a string even when the text looks numeric.
+    func testParseQwenXMLStringParameterStaysString() throws {
+        let tools = [tool("notes", ["path": ["type": "string"]])]
+        let text = "<tool_call>\n<function=notes>\n<parameter=path>\n123\n</parameter>\n</function>\n</tool_call>"
+        let result = ToolCallParser.parse(text, tools: tools)
+        let args = try XCTUnwrap(result.toolCalls.first?.function.arguments)
+        let obj = try JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["path"] as? String, "123")
+    }
+
+    /// A non-string typed scalar is promoted to a JSON number.
+    func testParseQwenXMLTypedNumberBecomesNumber() throws {
+        let tools = [tool("read", ["limit": ["type": "number"]])]
+        let text = "<tool_call>\n<function=read>\n<parameter=limit>\n5\n</parameter>\n</function>\n</tool_call>"
+        let result = ToolCallParser.parse(text, tools: tools)
+        let args = try XCTUnwrap(result.toolCalls.first?.function.arguments)
+        let obj = try JSONSerialization.jsonObject(with: Data(args.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["limit"] as? Int, 5)
+    }
+
     // MARK: - ReasoningStreamFilter
 
     func testReasoningFilterPassesThroughNormalText() {

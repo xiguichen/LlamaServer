@@ -681,7 +681,7 @@ final class LlamaHTTPServer {
                     } else {
                         cleanText = genText
                     }
-                    let parsed = ToolCallParser.parse(cleanText)
+                    let parsed = ToolCallParser.parse(cleanText, tools: body.tools)
                     // The incomplete tool call stripped everything, or the
                     // parser couldn't salvage an envelope (unparseable JSON /
                     // blank name): the model failed to produce a usable
@@ -914,7 +914,7 @@ final class LlamaHTTPServer {
         // strip ANSI escapes from the human-visible content. When the model
         // requested a tool, OpenAI clients expect `tool_calls` on the message
         // and `finish_reason: "tool_calls"` (mirrors llama-server behavior).
-        let parsed = ToolCallParser.parse(result.text)
+        let parsed = ToolCallParser.parse(result.text, tools: body.tools)
         // One honest policy for all paths: length only for real max-token
         // cutoffs; dropped envelopes / context_full become an explicit error
         // (see FinishReasonPolicy).
