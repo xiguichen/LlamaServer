@@ -820,6 +820,13 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         let tmpl = llama_model_chat_template(model, nil) // default template, if any
+        if tmpl == nil {
+            // Without a GGUF template `llama_chat_apply_template` silently
+            // applies its built-in ChatML recipe instead of anything the model
+            // was trained on. Say so, so a missing template is never mistaken
+            // for a successful render.
+            FileLogger.shared.debug("chat template: model has no GGUF template — falling back to generic layout")
+        }
 
         // First call to size the buffer.
         var bufferSize = 0
@@ -842,6 +849,7 @@ final class LlamaInference: @unchecked Sendable {
         }
 
         if written < 0 {
+            FileLogger.shared.debug("chat template: llama_chat_apply_template failed (written=\(written)) — rendering with the built-in \(format) layout")
             return fallbackPrompt(messages: messages, format: format)
         }
 
@@ -855,7 +863,10 @@ final class LlamaInference: @unchecked Sendable {
                 llama_chat_apply_template(tmpl, ptr.baseAddress, ptr.count, true,
                                           &buffer, Int32(buffer.count))
             }
-            if retry < 0 { return fallbackPrompt(messages: messages, format: format) }
+            if retry < 0 {
+                FileLogger.shared.debug("chat template: llama_chat_apply_template failed on retry (written=\(retry)) — rendering with the built-in \(format) layout")
+                return fallbackPrompt(messages: messages, format: format)
+            }
             return String(cString: buffer)
         }
 
@@ -864,6 +875,13 @@ final class LlamaInference: @unchecked Sendable {
     }
 
     private func fallbackPrompt(messages: [ChatMessage], format: ToolWireFormat = .jsonHermes) -> String {
+        // The Qwen3.5 family's template is not applicable by the vendored
+        // `llama_chat_apply_template` (it returns < 0), so its message loop is
+        // reproduced faithfully here — including the `<think>` scaffold on
+        // assistant turns after the last user query. See `QwenPrompt`.
+        if format == .qwenXML {
+            return QwenPrompt.render(messages: messages, format: format)
+        }
         var out = ""
         for message in messages {
             out += "<|im_start|>\(message.role)\n\(message.promptText(format: format))<|im_end|>\n"

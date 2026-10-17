@@ -570,7 +570,7 @@ final class LlamaHTTPServer {
                 let msgs = ToolPrompt.inject(messages: body.messages, tools: body.tools,
                                              toolChoice: body.tool_choice, format: wireFormat)
                 let basePrompt = self.inference.formatPrompt(messages: msgs, format: wireFormat)
-                let prompt = self.applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
+                let prompt = self.applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled, format: wireFormat)
                 FileLogger.shared.info("streaming #\(currentRequest): prompt built (\(prompt.count) chars), starting generation")
                 FileLogger.shared.debug("streaming #\(currentRequest): thinking=\(body.thinkingEnabled)")
                 if FileLogger.shared.logPromptContent {
@@ -867,7 +867,7 @@ final class LlamaHTTPServer {
                 let msgs = ToolPrompt.inject(messages: body.messages, tools: body.tools,
                                              toolChoice: body.tool_choice, format: wireFormat)
                 let basePrompt = inference.formatPrompt(messages: msgs, format: wireFormat)
-                let prompt = applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled)
+                let prompt = applyThinkingSwitch(prompt: basePrompt, enabled: body.thinkingEnabled, format: wireFormat)
                 if FileLogger.shared.logPromptContent {
                     FileLogger.shared.verbose("chat request #\(currentRequest): FULL PROMPT >>>\n\(prompt)\n<<<")
                 }
@@ -987,8 +987,20 @@ final class LlamaHTTPServer {
     /// their whole token budget on reasoning and get truncated (finish=length)
     /// before producing the answer, which breaks strict clients. When the client
     /// opts in (`enable_thinking: true`) the prompt is returned unchanged.
-    private func applyThinkingSwitch(prompt: String, enabled: Bool) -> String {
-        enabled ? prompt : prompt + "<think>\n\n</think>\n\n"
+    ///
+    /// For the Qwen wire format the prompt already ends with the template's
+    /// generation prompt *including* the `<think>` opener (`QwenPrompt` — the
+    /// template's `enable_thinking`-undefined branch), so the "off" case only
+    /// fills that block in and closes it. Guarded on the suffix, so a prompt
+    /// that already carries the switch (e.g. produced by
+    /// `llama_chat_apply_template`, which applies it itself) passes through
+    /// untouched.
+    private func applyThinkingSwitch(prompt: String, enabled: Bool, format: ToolWireFormat) -> String {
+        if format == .qwenXML {
+            guard prompt.hasSuffix(QwenPrompt.generationPrompt) else { return prompt }
+            return enabled ? prompt : prompt + "\n</think>\n\n"
+        }
+        return enabled ? prompt : prompt + "<think>\n\n</think>\n\n"
     }
 
 

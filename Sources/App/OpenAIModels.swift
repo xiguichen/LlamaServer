@@ -78,13 +78,20 @@ extension ChatMessage {
         guard let toolCalls = tool_calls, !toolCalls.isEmpty else { return text }
 
         if format == .qwenXML {
-            var out = text
+            // The template applies `|trim` to the message content *before* it
+            // appends the call envelope (`content = render_content(...)|trim`,
+            // then `'\n\n<tool_call>'`), so trailing newlines in a client's
+            // assistant prose must not push extra blank lines in front of the
+            // envelope. pi replays the model's prose verbatim and the turn
+            // usually ends with a newline, which put four newlines there.
+            let prose = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var out = prose
             for (index, call) in toolCalls.enumerated() {
                 let envelope = ToolPrompt.toolEnvelope(name: call.function.name,
                                                        argumentsJSON: call.function.arguments,
                                                        format: format)
                 if index == 0 {
-                    out += text.isEmpty ? envelope : "\n\n" + envelope
+                    out += prose.isEmpty ? envelope : "\n\n" + envelope
                 } else {
                     out += "\n" + envelope
                 }

@@ -97,6 +97,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/ToolPrompt.swift
         createIntermediateGroups: true
+      - path: Sources/App/QwenPrompt.swift
+        createIntermediateGroups: true
       - path: Sources/App/MtpProbe.swift
         createIntermediateGroups: true
       - path: Sources/App/MtpSpeculator.swift
