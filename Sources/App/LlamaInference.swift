@@ -37,7 +37,7 @@ final class LlamaInference: @unchecked Sendable {
             case .modelLoad(let p):      return "Failed to load model \((p as NSString).lastPathComponent). The architecture may be unsupported by this llama.cpp build."
             case .contextInit:           return "Failed to create llama context."
             case .tokenize:              return "Failed to tokenize input."
-            case .decode:                return "llama_decode failed (context may be full)."
+            case .decode:                return "llama_decode failed: the Metal backend hit a GPU error and the engine context was reset. Retry the request."
             case .insufficientMemory(let m): return m
             case .contextTooFull(let m):    return m
             }
@@ -178,6 +178,11 @@ final class LlamaInference: @unchecked Sendable {
             guard let text else { return }
             let msg = String(cString: text).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !msg.isEmpty else { return }
+            // Keep a short tail of native lines: this is the only record of *why*
+            // a decode failed, and recoverFromDecodeFailure dumps it at error level.
+            LlamaInference.nativeLogRing.withLock { (lines: inout [String]) in
+                NativeLogRing.append(msg, to: &lines)
+            }
             FileLogger.shared.debug("[llama] \(msg)")
         }, nil)
 
@@ -712,20 +717,44 @@ final class LlamaInference: @unchecked Sendable {
         }
     }
 
+    /// Last llama.cpp native log lines, for post-mortem dumps (see
+    /// `recoverFromDecodeFailure`). Static because the `llama_log_set` callback
+    /// must be a C function pointer and therefore cannot capture anything.
+    private static let nativeLogRing = OSAllocatedUnfairLock(initialState: [String]())
+
     /// Recovers after a `llama_decode` returns non-zero. On hybrid attention/SSM
     /// and recurrent models (can_shift == false) a single failed decode leaves
     /// the context's recurrent state permanently wedged, so EVERY later decode
-    /// also fails — misleadingly reported as "context may be full" even though
-    /// the context is nearly empty. Recreating the context discards that broken
-    /// state so the next request can succeed. Best-effort: logs if recreation
-    /// itself fails (a genuinely unrecoverable condition).
+    /// also fails — surfacing as a generic decode failure even though the context
+    /// is nearly empty. On device the trigger is the GPU discarding our command
+    /// buffers (`kIOGPUCommandBufferCallbackErrorInnocentVictim`, i.e. a GPU reset
+    /// caused outside this process), after which llama.cpp itself asks us to
+    /// "recreate the backend to recover". Recreating the context does exactly
+    /// that, so the next generation (the retry — see `DecodeRetry`) can succeed.
+    /// Best-effort: logs if recreation itself fails (a genuinely unrecoverable
+    /// condition).
     private func recoverFromDecodeFailure() {
         FileLogger.shared.error("llama_decode failed — recreating context to recover")
+        // The reason lives only in llama.cpp's own log, routed at `.debug`, so a
+        // default-level device log shows nothing but the return code. Dump the
+        // tail at error level (always written, mirrored to the in-app panel).
+        for line in NativeLogRing.dump(Self.nativeLogRing.withLock { $0 }) {
+            FileLogger.shared.error(line)
+        }
         do {
             try recreateContext()
         } catch {
             FileLogger.shared.error("context recreation after decode failure FAILED: \(error.localizedDescription)")
         }
+    }
+
+    /// True when `error` is the backend decode failure `recoverFromDecodeFailure()`
+    /// rebuilds the context for — as opposed to a client/input error such as
+    /// `.contextTooFull`, or an engine that is beyond recovery.
+    private static func isRecoverableDecodeFailure(_ error: Error) -> Bool {
+        guard let engineError = error as? InferenceError else { return false }
+        if case .decode = engineError { return true }
+        return false
     }
 
     /// Tracks whether MTP head outputs have ever been confirmed available
@@ -1129,9 +1158,52 @@ final class LlamaInference: @unchecked Sendable {
         return n
     }
 
-    /// Generates a completion for the given (already chat-formatted) prompt.
-    /// `onToken` is called for each decoded piece; return `false` to stop early.
+    /// Generates a completion for the given (already chat-formatted) prompt,
+    /// retrying once when the engine's Metal backend fails mid-decode.
+    ///
+    /// `llama_decode` returns non-zero when the GPU discards our command buffers —
+    /// observed on device as `kIOGPUCommandBufferCallbackErrorInnocentVictim`
+    /// ("victim of GPU error/recovery"): the GPU was reset by something outside
+    /// this process and our work was collateral damage. The decode sites call
+    /// `recoverFromDecodeFailure()`, which rebuilds the context, so by the time the
+    /// error arrives here the engine is healthy and only the in-flight prompt was
+    /// lost. Retrying is transparent while the caller has seen nothing and
+    /// impossible once it has (delivered text cannot be taken back) — which is
+    /// exactly what `DecodeRetry` decides. Without this, a transient GPU fault
+    /// surfaced to the client as a 500 for a turn that would have succeeded.
     func generate(prompt: String,
+                  maxTokens: Int,
+                  params: SamplingParams,
+                  onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
+        var retriesSoFar = 0
+        // Count what the caller has already been handed, so a retry can never
+        // duplicate delivered text.
+        var tokensEmitted = 0
+        let countedOnToken: ((String) -> Bool)? = onToken.map { deliver in
+            { text in
+                if !text.isEmpty { tokensEmitted += 1 }
+                return deliver(text)
+            }
+        }
+        while true {
+            do {
+                return try generateOnce(prompt: prompt, maxTokens: maxTokens,
+                                        params: params, onToken: countedOnToken)
+            } catch {
+                guard DecodeRetry.shouldRetry(isDecodeFailure: Self.isRecoverableDecodeFailure(error),
+                                              retriesSoFar: retriesSoFar,
+                                              tokensEmitted: tokensEmitted) else {
+                    throw error
+                }
+                retriesSoFar += 1
+                FileLogger.shared.warn("generate: decode failed with nothing delivered — retrying on the recovered context (\(retriesSoFar)/\(DecodeRetry.maxRetries))")
+            }
+        }
+    }
+
+    /// One generation attempt — no retry, see `generate`.
+    /// `onToken` is called for each decoded piece; return `false` to stop early.
+    private func generateOnce(prompt: String,
                   maxTokens: Int,
                   params: SamplingParams,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
@@ -1303,7 +1375,12 @@ final class LlamaInference: @unchecked Sendable {
         // abort here would otherwise kill the process with no trace.
         FileLogger.shared.debug("decoding prompt (\(promptTokens.count) tokens, ctx \(contextSize), batch \(batchSize))")
         if promptTokens.count >= contextSize {
-            throw InferenceError.decode
+            // A prompt that cannot fit at all is an input error, not an engine
+            // failure — `ContextHeadroom.check` above normally rejects this with a
+            // headroom-aware message, so this is the backstop. It must NOT be
+            // `.decode`, which now means "the backend wedged and was rebuilt".
+            throw InferenceError.contextTooFull(
+                "Prompt is \(promptTokens.count) tokens but the context window is only \(contextSize) tokens.")
         }
         // A single llama_decode must NOT exceed n_batch or llama.cpp aborts
         // (ggml_abort/SIGABRT), so feed the prompt in batchSize-sized chunks.
