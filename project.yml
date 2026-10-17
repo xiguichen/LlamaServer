@@ -109,6 +109,10 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/FileLogger.swift
         createIntermediateGroups: true
+      - path: Sources/App/LogRouter.swift
+        createIntermediateGroups: true
+      - path: Sources/App/LogPanelSpec.swift
+        createIntermediateGroups: true
       - path: Sources/App/RecreateTracker.swift
         createIntermediateGroups: true
       - path: Sources/App/ReuseSurvival.swift

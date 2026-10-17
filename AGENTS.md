@@ -38,7 +38,9 @@ No local Xcode required. Everything runs in GitHub Actions:
 | `Sources/App/KVCacheSpec.swift` | Pure KV-cache decisions: bytes/token for f16/q8_0/q4_0, head-dim resolution, quant capability, context-window cap, YaRN recipe |
 | `Sources/App/RecreateTracker.swift` | Pure bookkeeping: when the periodic context recreate is due, and the off-response-path placement decision |
 | `Sources/App/ReuseSurvival.swift` | Pure predicate: the prompt-prefix reuse snapshot survives a `recreateContext()` (dense and hybrid) |
-| `Sources/App/FileLogger.swift` | Crash-survivable on-disk log; error/warn fsync'd sync, info+ buffered |
+| `Sources/App/FileLogger.swift` | Crash-survivable on-disk log, split by subsystem; error/warn fsync'd sync, info+ buffered; mirrors basic lines only |
+| `Sources/App/LogRouter.swift` | Pure routing: which file (server/inference/payloads) a line lands in, from its level + `#file` |
+| `Sources/App/LogPanelSpec.swift` | Pure panel budget: basic-only filter (error/warn/info), line-count cap, per-line truncation |
 | `Sources/App/StartupTimer.swift` | Pure startup-phase accumulator: records named phases + durations, formats the load-gap breakdown line (`load phases:` / `Startup gap:`) |
 
 ## Important gotchas
@@ -65,9 +67,11 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **Quantized KV cache** (`kvCacheType` q8_0/q4_0): only when `head_dim % 32 == 0` (llama.cpp b9553 validates per-head); quantized `type_v` requires flash attention, so `flash_attn_type` is forced `ENABLED` (AUTO can resolve off → constructor throw → NULL). Ineligible models fall back to f16 with a warn log (`KVCacheSpec.resolveCacheType`).
 - **YaRN long-context** (`longContextYarn`): sets `rope_scaling_type=YARN`, `rope_freq_scale=0.25` (factor 4), `yarn_orig_ctx=32768` on every context (target/MTP/recreate) and lifts the `n_ctx_train` clamp (Qwen3-4B: 40,960 → up to 131,072, still memory-clamped).
 
+- **Log split + panel budget**: `FileLogger` routes each line to one of three files by `LogRouter.category(level:sourceFile:)` — `.verbose` always goes to `llamaserver-payloads.log`, `LlamaInference.swift` to `llamaserver-inference.log`, everything else to `llamaserver.log`. The in-app panel renders **basic (error/warn/info) lines only** (`LogPanelSpec`), truncated to 500 chars, in a `LazyVStack`. Do not route payload/debug lines back to the panel or raise the cap without checking the cost: a `cpu_resource` report (bug_type 202, 57% CPU) traced the app's heaviest stack to the panel laying out 72k-char prompt lines with `.textSelection(.enabled)` at 10 Hz.
+
 ## Tests
 
-- Three test files: `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines) and `ToolPromptTests` (tool-instruction wording and injection).
+- Pure-logic specs are unit-tested in `Tests/LlamaServerTests/` — e.g. `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines), `ToolPromptTests` (tool-instruction wording and injection) and `LogRoutingTests` (log-file routing + panel budget).
 - All are pure Swift — no model file, no inference. They run on simulator in CI.
 - Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
 
@@ -75,5 +79,6 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 - `OSAllocatedUnfairLock` for thread-safe flags/counters (not `os_unfair_lock` C API).
 - No `#warning` — use `FileLogger.shared.warn(...)` for recoverable issues; the log is crash-survivable.
-- FileLogger: error/warn are written AND fsynced synchronously (crash breadcrumbs survive aborts); info/debug/verbose are buffered on the logger queue (fsync ≤ 1s / 64KB) so the inference path never blocks on I/O; NSLog fires for warn+ only; the on-screen mirror delivers ≤ 10Hz batches. Set `minimumLevel` from UI `.verbose` to capture full request/response payloads.
+- FileLogger: error/warn are written AND fsynced synchronously (crash breadcrumbs survive aborts); info/debug/verbose are buffered on the logger queue (fsync ≤ 1s / 64KB) so the inference path never blocks on I/O; NSLog fires for warn+ only; the on-screen mirror delivers ≤ 10Hz batches and carries **basic (error/warn/info) lines only**. Set `minimumLevel` from UI `.verbose` to capture full request/response payloads.
+- FileLogger writes one file per `LogCategory`: `llamaserver.log` (server/HTTP lifecycle), `llamaserver-inference.log` (engine internals), `llamaserver-payloads.log` (the `.verbose` payload dumps). Routing is `LogRouter.category(level:sourceFile:)`; the `file: String = #file` default on every log method supplies the source, so call sites need no category argument. Each file rotates at 1 MB to `<name>.1.log`.
 - `llama_log_set` routes llama.cpp native logs into FileLogger at `.debug` level.

@@ -204,10 +204,14 @@ struct ContentView: View {
             if viewModel.logs.isEmpty {
                 Text("No activity yet.").foregroundColor(.secondary)
             } else {
+                // LazyVStack (not a plain VStack): only the visible lines are laid
+                // out. The panel renders basic (error/warn/info) lines only, capped
+                // by `LogPanelSpec` — laying out payload-sized lines here was the
+                // app's heaviest CPU consumer.
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(viewModel.logs.enumerated()), id: \.offset) { _, line in
-                            Text(line)
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(viewModel.logs.indices, id: \.self) { index in
+                            Text(viewModel.logs[index])
                                 .font(.system(.caption2, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled)
@@ -223,7 +227,7 @@ struct ContentView: View {
                 Button { viewModel.reloadLogs() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                ShareLink(item: viewModel.logFileURL) {
+                ShareLink(items: viewModel.logFileURLs) {
                     Image(systemName: "square.and.arrow.up")
                 }
                 Button(role: .destructive) { viewModel.clearLogs() } label: {
@@ -231,7 +235,7 @@ struct ContentView: View {
                 }
             }
         } footer: {
-            Text("Logs persist to llamaserver.log and survive a crash. Read them on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload — the last line shows the step that crashed. Set the level to Verbose to capture full request and response payloads for troubleshooting.")
+            Text("This panel shows the basic (error/warning/info) log. Everything persists across crashes in three files — llamaserver.log (server), llamaserver-inference.log (engine) and llamaserver-payloads.log (requests/prompts/responses) — readable on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload; the last line shows the step that crashed.")
         }
     }
 

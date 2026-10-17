@@ -82,20 +82,23 @@ final class ServerViewModel: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         // Show persisted history (incl. breadcrumbs from before any prior crash).
-        logs = FileLogger.shared.tail(maxLines: 500)
-        // Mirror EVERY line the server writes (not just UI events) into the panel,
-        // so the in-app log matches the on-disk log at the selected level.
+        logs = FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines)
+        // Mirror every BASIC line (error/warn/info) the server writes into the
+        // panel, so the in-app log is a readable console. Debug/verbose payload
+        // lines stay on disk only — rendering them was what made the panel the
+        // app's heaviest CPU consumer (see `LogPanelSpec`).
         FileLogger.shared.onLine = { [weak self] line in
             Task { @MainActor in self?.appendLine(line) }
         }
         refreshModels()
     }
 
-    /// URL of the on-disk log (for ShareLink / Files app).
-    var logFileURL: URL { FileLogger.shared.fileURL }
+    /// URLs of the on-disk logs, for ShareLink / the Files app. One file per
+    /// subsystem: server, inference, payloads.
+    var logFileURLs: [URL] { FileLogger.shared.allFileURLs }
 
     /// Reload the persisted log into the panel (e.g. after a crash + relaunch).
-    func reloadLogs() { logs = FileLogger.shared.tail(maxLines: 500) }
+    func reloadLogs() { logs = FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines) }
 
     func clearLogs() {
         FileLogger.shared.clear()
@@ -375,8 +378,8 @@ final class ServerViewModel: ObservableObject {
     }
 
     /// Called on the main thread by `FileLogger.onLine` for every emitted line.
+    /// Bounded by `LogPanelSpec` so the panel's per-update layout cost stays flat.
     private func appendLine(_ line: String) {
-        logs.append(line)
-        if logs.count > 500 { logs.removeFirst(logs.count - 500) }
+        LogPanelSpec.append(line, to: &logs)
     }
 }
