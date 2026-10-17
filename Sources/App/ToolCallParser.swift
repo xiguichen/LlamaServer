@@ -231,7 +231,8 @@ enum ToolCallParser {
                 // Model already gave a string — pass it through verbatim.
                 argumentsString = argsString
             } else if JSONSerialization.isValidJSONObject(args),
-                      let argsData = try? JSONSerialization.data(withJSONObject: args),
+                      let argsData = try? JSONSerialization.data(withJSONObject: args,
+                                                                 options: [.withoutEscapingSlashes]),
                       let s = String(data: argsData, encoding: .utf8) {
                 argumentsString = s
             } else {
@@ -328,7 +329,8 @@ enum ToolCallParser {
             let argumentsString: String
             if arguments.isEmpty {
                 argumentsString = "{}"
-            } else if let data = try? JSONSerialization.data(withJSONObject: arguments),
+            } else if let data = try? JSONSerialization.data(withJSONObject: arguments,
+                                                             options: [.withoutEscapingSlashes]),
                       let string = String(data: data, encoding: .utf8) {
                 argumentsString = string
             } else {
