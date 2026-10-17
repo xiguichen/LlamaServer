@@ -98,6 +98,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
+            LLAMASERVER_BUILD_SHA="$(git rev-parse --short HEAD)" \
             build
 
       - name: Package IPA (ad-hoc signed, entitlements preserved)

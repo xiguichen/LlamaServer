@@ -31,6 +31,12 @@ targets:
         CFBundleDisplayName: LlamaServer
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
+        # Commit SHA, injected by CI (see .github/workflows/build.yml). Custom key
+        # on purpose: CFBundleVersion must stay numeric-ish for the install
+        # tooling, and this is read at runtime to identify the deployed build.
+        # A stale artifact and the current one are otherwise indistinguishable
+        # from the outside — which cost two redeploys on 2026-10-17.
+        LlamaServerBuildSHA: "$(LLAMASERVER_BUILD_SHA)"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -66,6 +72,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.llamaserver
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
+        # Overridden on the command line by CI; "dev" marks a local build.
+        LLAMASERVER_BUILD_SHA: dev
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO

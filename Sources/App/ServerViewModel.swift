@@ -327,7 +327,7 @@ final class ServerViewModel: ObservableObject {
                     if kvCache != .f16 || yarnLongContext {
                         self.log("KV cache \(kvCache.rawValue)\(yarnLongContext ? ", YaRN long-context on" : "").")
                     }
-                    self.log("Model loaded (context \(effectiveCtx)). HTTP server listening on port \(portValue).")
+                    self.log("Model loaded (context \(effectiveCtx), build \(openAISystemFingerprint)). HTTP server listening on port \(portValue).")
                     if let url = self.serverURL { self.log("Reachable at \(url)") }
                 }
             } catch {

@@ -5,7 +5,18 @@ import Foundation
 
 /// Build identifier echoed back in responses (OpenAI `system_fingerprint`).
 /// llama-server uses its build string here; clients only echo it for telemetry.
-let openAISystemFingerprint = "llamaserver"
+///
+/// CI bakes the commit SHA in at build time (`LlamaServerBuildSHA`, see
+/// `project.yml` + `.github/workflows/build.yml`), so a deployed build identifies
+/// itself over the API and in the startup log. Without that, a stale artifact and
+/// the current one are indistinguishable from the outside — which on 2026-10-17
+/// cost two redeploys that quietly installed a build from before the Qwen prompt
+/// fix (it took tokenizing both renderers and comparing `prompt_tokens` to tell).
+let openAISystemFingerprint: String = {
+    guard let sha = Bundle.main.infoDictionary?["LlamaServerBuildSHA"] as? String,
+          !sha.isEmpty, sha != "dev" else { return "llamaserver" }
+    return "llamaserver-\(sha)"
+}()
 
 struct ToolCallFunction: Codable {
     let name: String
