@@ -353,23 +353,26 @@ final class LlamaHTTPServer {
     private func logsResponse(queryItems: [URLQueryItem]) -> HTTPResponse {
         let plan = LogFetchSpec.plan(queryItems: queryItems)
         let chunks = FileLogger.shared.snapshot(plan)
-        FileLogger.shared.info("GET /logs name=\(plan.categories.map(\.rawValue).joined(separator: ",")) "
+        FileLogger.shared.info("GET /logs name=\(plan.categories.map { $0.rawValue }.joined(separator: ",")) "
             + "tail=\(plan.tail.map { String($0) } ?? "all") backups=\(plan.includeBackups) -> "
             + chunks.map { "\($0.name):\($0.lines) lines" }.joined(separator: ", "))
-        let headers = { (type: String, count: Int) -> [String: String] in
-            ["Content-Type": type,
-             "Content-Length": "\(count)",
-             "Access-Control-Allow-Origin": "*"]
-        }
         switch plan.format {
         case .text:
             let body = Data(LogFetchSpec.textBody(chunks).utf8)
-            return HTTPResponse(.ok, headers: headers("text/plain; charset=utf-8", body.count), body: body)
+            return HTTPResponse(.ok, headers: [
+                "Content-Type": "text/plain; charset=utf-8",
+                "Content-Length": "\(body.count)",
+                "Access-Control-Allow-Origin": "*"
+            ], body: body)
         case .json:
             guard let body = try? LogFetchSpec.jsonBody(chunks) else {
                 return HTTPResponse(.internalServerError)
             }
-            return HTTPResponse(.ok, headers: headers("application/json", body.count), body: body)
+            return HTTPResponse(.ok, headers: [
+                "Content-Type": "application/json",
+                "Content-Length": "\(body.count)",
+                "Access-Control-Allow-Origin": "*"
+            ], body: body)
         }
     }
 
