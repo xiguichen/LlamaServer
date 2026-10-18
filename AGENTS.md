@@ -17,6 +17,16 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **No local llama.cpp compilation.** `vendor/llama.xcframework` is prebuilt, fetched with `bash scripts/fetch-llama-xcframework.sh`. Pinned to tag `b11557`.
 - The `.xcodeproj` is **never committed** (`*.xcodeproj` in `.gitignore`). CI regenerates it on every run.
 
+## Debugging a deployed build
+
+The app runs on device, so behaviour is diagnosed from its logs — there is no debugger attached and no local build to fall back on.
+
+- **Identify the build before concluding anything.** Every build reports itself: `system_fingerprint` on any chat/completions response is `llamaserver-<sha>`, and the model-load line says `Model loaded (context …, build llamaserver-<sha>)` (`LlamaServerBuildSHA`, injected by CI). A stale artifact and the current one are otherwise indistinguishable — this cost two redeploys on 2026-10-17.
+- **Pull the logs off the device over HTTP** (no cable, no Files app): `curl 'http://<device>:8443/logs?name=inference&tail=500'`. Full query (`name`, `tail`, `backups`, `format`) and the payload-file caveat are in the `GET /logs` gotcha below.
+- **The in-app panel is not the log.** It renders basic (error/warn/info) lines only, capped and truncated (`LogPanelSpec`); the three on-disk files are authoritative.
+- **Prompt/response payloads are opt-in**: they land in the payloads file only while "log prompt & response content" is enabled (which needs log level *Verbose*). Missing prompts are a toggle, not a bug.
+- **On-device compliance** is the `llm-compliance-test` skill (runs `llm-comply openai-chat` against a deployed build).
+
 ## Architecture
 
 - **Single process.** llama.cpp linked as a framework (`import llama`), runs in-process. No separate server binary.

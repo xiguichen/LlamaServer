@@ -235,7 +235,7 @@ struct ContentView: View {
                 }
             }
         } footer: {
-            Text("This panel shows the basic (error/warning/info) log. Everything persists across crashes in three files — llamaserver.log (server), llamaserver-inference.log (engine) and llamaserver-payloads.log (requests/prompts/responses) — readable on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload; the last line shows the step that crashed.")
+            Text("This panel shows the basic (error/warning/info) log. Everything persists across crashes in three files — llamaserver.log (server), llamaserver-inference.log (engine) and llamaserver-payloads.log (requests/prompts/responses) — readable on-device via Files → On My iPhone → LlamaServer, or tap Share above. After a crash, reopen the app and tap Reload; the last line shows the step that crashed. While the server is running you can also pull all three over HTTP for analysis elsewhere: GET <endpoint>/logs (?name=server|inference|payloads, ?tail=N, ?format=json) — see the README.")
         }
     }
 

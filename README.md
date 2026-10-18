@@ -10,9 +10,10 @@ HTTP API**. Built around [llama.cpp](https://github.com/ggml-org/llama.cpp).
 - **UI** to pick a `.gguf` model, set port/context size, and **Start/Stop** the server.
 - **HTTP** server reachable from other machines on the same network (no cert hassle).
 
-> Status: **builds in CI** and produces a valid unsigned IPA. Runtime (loading a
-> model + serving inference) is unverified — that needs a real device. See
-> [Caveats](#caveats).
+> Status: **builds in CI** (unsigned IPA) and **runs on a real device** — it serves
+> streaming chat completions and tool calls from a GGUF model, and can hand its own
+> logs back over HTTP for debugging
+> (see [Getting the logs off the device](#getting-the-logs-off-the-device)).
 
 ---
 
@@ -37,6 +38,8 @@ The UI "Start/Stop" controls loading the model + starting/stopping that embedded
 | GET    | `/health`               | `{"status":"ok"}`                    |
 | GET    | `/v1/models`            | Lists the loaded model               |
 | POST   | `/v1/chat/completions`  | OpenAI chat completion (streaming + non-streaming) |
+| POST   | `/v1/completions`       | OpenAI text completion (raw prompt, no chat template) |
+| GET    | `/logs`                 | The on-device log files, for troubleshooting (see below) |
 
 Example from another machine on the network:
 
@@ -45,6 +48,38 @@ curl http://<iphone-ip>:8443/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"local","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
+
+### Getting the logs off the device
+
+The app writes three rotating files (server, engine, request payloads) into its
+Documents directory. Besides **Files → On My iPhone → LlamaServer** and the in-app
+**Share** button, the *running server* serves them over HTTP — which is how to get
+them when the phone isn't in your hands (e.g. an agent or a script doing the
+debugging):
+
+```bash
+curl 'http://<iphone-ip>:8443/logs'                           # all three files, whole
+curl 'http://<iphone-ip>:8443/logs?name=inference&tail=500'    # last 500 lines of the engine log
+curl 'http://<iphone-ip>:8443/logs?backups=0&format=json'      # skip the rotated *.1.log, JSON
+```
+
+| Query      | Values                                          | Default | Meaning |
+|------------|-------------------------------------------------|---------|---------|
+| `name`     | `server`, `inference`, `payloads`, `all` (comma-separated) | `all`   | which files |
+| `tail`     | integer                                         | whole file | lines kept per file, from the end |
+| `backups`  | `0`/`false`/`no` to exclude                     | included | the single rolled-over `*.1.log` (the file rotates at 1 MB) |
+| `format`   | `text`, `json`                                  | `text`  | plain text with `===== name =====` headers, or a JSON array |
+
+Notes for whoever reads this at 2 a.m.:
+
+- The **payloads** file holds full request bodies, prompts and responses — but only
+  while **"Log prompt & response content"** is enabled in the app (it needs log
+  level *Verbose* too, as the toggle is disabled otherwise). If prompts are missing,
+  that's why.
+- A `GET /logs` request is itself logged (one line, in the server file).
+- The endpoint has no auth, like the rest of the API: it returns whatever the files
+  hold, so anyone on the LAN can read it. With payload logging on, that includes
+  your prompts. Only expose the server on a network you trust (see [Caveats](#caveats)).
 
 ---
 
@@ -137,11 +172,14 @@ open LlamaServer.xcodeproj
 
 ## Caveats
 
-The project **builds green** in CI and produces a valid unsigned IPA. Remaining
-caveats:
+The project **builds green** in CI and produces a valid unsigned IPA, and it has been
+verified running on a real device. Remaining caveats:
 
-1. **Runtime is unverified.** The build + IPA structure are confirmed, but actually
-   loading a model and serving inference can only be proven on a real iPhone.
+1. **Runtime can only be exercised on hardware.** CI builds the app and unit-tests the
+   pure logic (parsing, prompt shaping, specs), but loading a model and serving
+   inference happens on a real device — nothing in the pipeline simulates that, so
+   device behaviour has to be checked by installing a build and reading its logs
+   ([over HTTP](#getting-the-logs-off-the-device) or in the app).
 2. **llama.cpp API drift.** `Sources/App/LlamaInference.swift` is written against the
    pinned tag **`b11557`** C API. If you change `LLAMA_TAG` in
    `scripts/fetch-llama-xcframework.sh` and the build fails, adjust that file.
