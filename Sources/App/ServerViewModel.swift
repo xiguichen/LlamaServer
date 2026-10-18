@@ -26,7 +26,7 @@ final class ServerViewModel: ObservableObject {
     // Server state
     @Published private(set) var status: Status = .stopped
     @Published var port: String = "8443"
-    @Published var contextSize: String = "262144"
+    @Published var contextSize: String = "131072"
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
@@ -321,8 +321,17 @@ final class ServerViewModel: ObservableObject {
                     self.status = .running
                     UIApplication.shared.isIdleTimerDisabled = true
                     self.log(gapLine)
-                    if effectiveCtx < ctxSize {
-                        self.log("Context reduced to \(effectiveCtx) tokens to fit device memory.")
+                    // Say which cap decided the context. The old message blamed
+                    // device memory for *any* reduction — including the hard
+                    // 131,072 ceiling, which the 262,144 default tripped on
+                    // every start while the KV cache was far from its limit.
+                    switch engine.contextClamp {
+                    case .notReduced:
+                        break
+                    case .memoryBudget(let cap):
+                        self.log("Context reduced to \(cap) tokens by the device memory budget (requested \(ctxSize)).")
+                    case .modelWindow(let cap):
+                        self.log("Context capped to \(cap) tokens by the model's window (requested \(ctxSize); enable long context or choose a bigger-window model for more).")
                     }
                     if kvCache != .f16 || yarnLongContext {
                         self.log("KV cache \(kvCache.rawValue)\(yarnLongContext ? ", YaRN long-context on" : "").")

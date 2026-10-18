@@ -178,4 +178,30 @@ enum KVCacheSpec {
         }
         return cap
     }
+
+    /// Which cap decided the effective context, when it came out below the
+    /// request. The distinction is operator-facing: a *window* cap is a
+    /// property of the model (raise it with long context or a bigger-window
+    /// model), a *memory* cap is a property of this device and the KV/model
+    /// footprint (shrink the KV type, context, or model).
+    ///
+    /// Why this exists: the app used to print "Context reduced to N tokens to
+    /// fit device memory" for *any* reduction. With the default request at
+    /// 262,144 and `hardMaxContext` at 131,072 that message printed on every
+    /// start while the KV cache was in fact far from its limit — blaming device
+    /// memory for a hard cap.
+    enum ContextClamp: Equatable {
+        case notReduced
+        case modelWindow(cap: Int)
+        case memoryBudget(cap: Int)
+    }
+
+    /// Classifies the binding clamp: `windowCap` is `contextCap(...)` (trained
+    /// window or the hard ceiling), `memoryCap` is what the KV budget can hold.
+    /// Ties go to `.memoryBudget`: it is the actionable one.
+    static func contextClamp(requested: Int, windowCap: Int, memoryCap: Int) -> ContextClamp {
+        let effective = min(requested, windowCap, memoryCap)
+        if effective >= requested { return .notReduced }
+        return memoryCap <= windowCap ? .memoryBudget(cap: effective) : .modelWindow(cap: effective)
+    }
 }

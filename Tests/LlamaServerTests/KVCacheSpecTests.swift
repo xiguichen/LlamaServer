@@ -217,6 +217,37 @@ final class KVCacheSpecTests: XCTestCase {
         XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: batch))
     }
 
+    // MARK: - Which clamp decided the context
+
+    func testContextClampNamesTheBindingLimit() {
+        // The device's own case (2026-10-18): requested 262,144, hard ceiling
+        // 131,072, memory room for hundreds of thousands of tokens. The
+        // *ceiling* decided — yet the on-device message said "reduced to fit
+        // device memory", blaming memory for a request that was simply above
+        // the hard cap (the field default is 262,144, so it printed on every
+        // start).
+        XCTAssertEqual(
+            KVCacheSpec.contextClamp(requested: 262_144, windowCap: 131_072, memoryCap: 400_000),
+            .modelWindow(cap: 131_072))
+        // Memory binds when it is the smaller cap.
+        XCTAssertEqual(
+            KVCacheSpec.contextClamp(requested: 262_144, windowCap: 131_072, memoryCap: 83_968),
+            .memoryBudget(cap: 83_968))
+        // Request small enough that nothing clamps.
+        XCTAssertEqual(
+            KVCacheSpec.contextClamp(requested: 4_096, windowCap: 131_072, memoryCap: 90_000),
+            .notReduced)
+        // A window below the request wins even with roomy memory.
+        XCTAssertEqual(
+            KVCacheSpec.contextClamp(requested: 8_192, windowCap: 4_096, memoryCap: 90_000),
+            .modelWindow(cap: 4_096))
+        // Ties go to memory: that is the message worth printing, because it is
+        // the one the user can act on (KV type, context, model size).
+        XCTAssertEqual(
+            KVCacheSpec.contextClamp(requested: 9_000, windowCap: 8_000, memoryCap: 8_000),
+            .memoryBudget(cap: 8_000))
+    }
+
     // MARK: - YaRN constants
 
     func testYarnRecipeMatchesQwenValidatedScaling() {

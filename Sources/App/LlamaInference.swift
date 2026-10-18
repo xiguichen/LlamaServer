@@ -141,7 +141,32 @@ final class LlamaInference: @unchecked Sendable {
 
     let modelName: String
 
+    /// Which cap decided the effective context, when it came out below the
+    /// request. The UI reports this instead of guessing "device memory": a
+    /// window cap and a memory cap are different problems with different
+    /// remedies, and the field default (262,144) used to make every start print
+    /// a memory message for what was really the hard 131,072 ceiling.
+    private(set) var contextClamp: KVCacheSpec.ContextClamp = .notReduced
+
     // MARK: - Lifecycle
+
+    /// Current physical footprint (`task_vm_info.phys_footprint`) — the number
+    /// jetsam accounts against. `os_proc_available_memory()` is the per-process
+    /// ceiling minus this, so adding it back recovers the ceiling
+    /// (`MemoryBudget.processLimit`). It is non-zero at engine init precisely
+    /// when the previous engine's pages are still resident, which is the case
+    /// the headroom-only reading got wrong.
+    private static func currentFootprint() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+    }
 
     /// First GGUF metadata value whose key ends with `suffix` (e.g.
     /// ".attention.key_length" → "qwen3.attention.key_length"). Keys are
@@ -189,43 +214,52 @@ final class LlamaInference: @unchecked Sendable {
         self.modelName = (modelPath as NSString).lastPathComponent
 
         // Memory budget. iOS jetsam-kills (SIGKILL — uncatchable) apps at a
-        // per-process limit well below total RAM (measured: ~6.1GB ceiling on
-        // 12GB hardware), so we fail *gracefully* with a message instead of
-        // letting a too-big load/KV-cache get us SIGKILLed with no log.
-        // Budget = min(physical, max(processAvailable, 55% of physical)) minus
-        // transient headroom (see MemoryBudget). The 55%-of-RAM floor matters:
-        // os_proc_available_memory() under-reports at init on some installs
-        // (~3.46GB observed here vs the ~3.10GB the previously-working
-        // 2.78GB-model config needs) — trusting the raw reading alone refused
-        // every start, while the floor keeps that config loading and still
-        // trusts a larger entitled reading.
+        // per-process limit well below total RAM (measured: ~9.26GB ceiling on
+        // 12GB hardware *with* the increased-memory-limit entitlement, near half
+        // of physical without it), so we fail *gracefully* with a message
+        // instead of letting a too-big load/KV-cache get us SIGKILLed with no
+        // log.
+        // Budget = min(physical, max(process-limit, 55% of physical)) minus
+        // transient headroom (see MemoryBudget). The *limit* is what
+        // os_proc_available_memory() reports the remainder of: the API returns
+        // headroom (limit − current footprint), and at init the previous
+        // engine's pages are often still resident, so the raw reading
+        // under-reports the device's real allowance (measured 2026-10-18:
+        // 6.37GB headroom with a 2.89GB footprint → a ~9.26GB ceiling). Feeding
+        // the headroom in as if it were the ceiling let the 55% floor win and
+        // computed 6.21GB, discarding a third of the entitlement uplift. Add the
+        // footprint back to recover the ceiling; keep the floor as the safety
+        // net for a zero/garbage reading.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
         let processAvailable = Int(os_proc_available_memory())
-        let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, processAvailable: processAvailable)
+        let footprint = Self.currentFootprint()
+        let processLimit = MemoryBudget.processLimit(physicalRAM: totalRAM,
+                                                     available: processAvailable,
+                                                     footprint: footprint)
+        let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, processLimit: processLimit)
         let computeReserve = 320 * 1024 * 1024   // activation/compute buffers headroom
 
         // Derivation logged BEFORE the pre-check so a refusal always leaves the
-        // numbers on disk — a suspiciously low process-available (~3.3GB class)
-        // means the install did not get increased-memory-limit; a low value with
-        // an otherwise healthy ceiling means stale resident memory at init.
-        // Raw bytes first (exact os_proc_available_memory() output), rounded
-        // rendering in parens — see MemoryBudget.logLine.
-        FileLogger.shared.info(MemoryBudget.logLine(budget: budget, processAvailable: processAvailable, physicalRAM: totalRAM))
+        // numbers on disk. Headroom, footprint and the derived limit are all raw
+        // bytes: a change in either input — toolchain, entitlement, a still-
+        // resident previous engine — stays diagnosable from this one line.
+        FileLogger.shared.info(MemoryBudget.logLine(budget: budget, processLimit: processLimit,
+                                                    processAvailable: processAvailable,
+                                                    footprint: footprint, physicalRAM: totalRAM))
 
-        // Entitlement diagnostic. A real app whose process-available is far
-        // below physical RAM did NOT get the increased-memory-limit uplift:
-        // entitled installs report the ~6GB class on 12GB hardware, un-entitled
-        // installs land in the ~3.3GB class. The MemoryBudget 55% floor then
-        // *inflates* `budget` above what jetsam will actually allow, so a
+        // Entitlement diagnostic. The *limit* is where the uplift shows up:
+        // entitled installs reach the ~9GB class on 12GB hardware, un-entitled
+        // ones land near half of physical. Below that, the MemoryBudget 55%
+        // floor *inflates* `budget` above what jetsam will actually allow, so a
         // config sized for `budget` can be SIGKILLed with no graceful error.
         // Flag it explicitly so the log always says why.
-        if processAvailable > 0, processAvailable < totalRAM / 2 {
+        if processLimit > 0, processLimit < totalRAM / 2 {
             FileLogger.shared.warn(
-                "increased-memory-limit entitlement appears MISSING: process-available " +
-                "\(processAvailable)B is below half of physical \(totalRAM)B. " +
+                "increased-memory-limit entitlement appears MISSING: process limit " +
+                "\(processLimit)B is below half of physical \(totalRAM)B. " +
                 "Re-sign with AltStore 2.3+ (AltSign >= b2c8861793) or Xcode Personal Team. " +
                 "The \(budget)B budget is an over-estimate; expect a jetsam kill above " +
-                "~\(processAvailable)B.")
+                "~\(processLimit)B.")
         }
 
         // Pre-check the model file size before attempting the load that would
@@ -357,6 +391,13 @@ final class LlamaInference: @unchecked Sendable {
         if effective > maxCtxByMemory {
             FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(kvTokenSize)/token); reducing to \(maxCtxByMemory)")
         }
+        // Classify the reduction *before* applying the memory clamp: `effective`
+        // here is already the window/ceiling cap, so the pair (windowCap,
+        // memoryCap) identifies which one binds. The UI reports this instead of
+        // always blaming device memory.
+        self.contextClamp = KVCacheSpec.contextClamp(requested: requestedContext,
+                                                     windowCap: effective,
+                                                     memoryCap: maxCtxByMemory)
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
 
