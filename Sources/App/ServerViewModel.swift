@@ -26,7 +26,7 @@ final class ServerViewModel: ObservableObject {
     // Server state
     @Published private(set) var status: Status = .stopped
     @Published var port: String = "8443"
-    @Published var contextSize: String = "131072"
+    @Published var contextSize: String = "262144"
     @Published private(set) var logs: [String] = []
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
@@ -59,8 +59,10 @@ final class ServerViewModel: ObservableObject {
     @Published var kvCacheType: String = KVCacheType.q8_0.rawValue
 
     /// Lifts the model's trained-window clamp (n_ctx_train) via YaRN rope
-    /// scaling ×4 from a 32K original window — Qwen's validated 32K→131K
-    /// recipe. Leave off for models already trained at large windows.
+    /// scaling. The factor is derived from the target context — the recipe's
+    /// factor IS the extension ratio over a 32K original window (×4 at
+    /// 131,072, ×8 at 262,144), which is exactly the model card's documented
+    /// 128K/256K recipe. Leave off for models already trained at large windows.
     @Published var longContextYarn: Bool = false
 
     /// Re-published so the UI updates on download progress.
@@ -322,9 +324,9 @@ final class ServerViewModel: ObservableObject {
                     UIApplication.shared.isIdleTimerDisabled = true
                     self.log(gapLine)
                     // Say which cap decided the context. The old message blamed
-                    // device memory for *any* reduction — including the hard
-                    // 131,072 ceiling, which the 262,144 default tripped on
-                    // every start while the KV cache was far from its limit.
+                    // device memory for *any* reduction — including a hard
+                    // ceiling, which a larger request tripped on every start
+                    // while the KV cache was far from its limit.
                     switch engine.contextClamp {
                     case .notReduced:
                         break

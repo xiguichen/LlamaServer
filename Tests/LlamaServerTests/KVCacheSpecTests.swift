@@ -179,7 +179,7 @@ final class KVCacheSpecTests: XCTestCase {
     func testContextCapEnforcesHardBounds() {
         XCTAssertEqual(
             KVCacheSpec.contextCap(requested: 999_999, nCtxTrain: 40_960, longContext: true),
-            131_072, "hard ceiling 131072 applies even with YaRN")
+            262_144, "hard ceiling 262144 applies even with YaRN")
         XCTAssertEqual(
             KVCacheSpec.contextCap(requested: 100, nCtxTrain: 40_960, longContext: false),
             256, "floor 256 applies")
@@ -248,15 +248,80 @@ final class KVCacheSpecTests: XCTestCase {
             .memoryBudget(cap: 8_000))
     }
 
-    // MARK: - YaRN constants
+    // MARK: - YaRN scaling is derived from the target context
 
-    func testYarnRecipeMatchesQwenValidatedScaling() {
-        // Qwen recipe: --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768
-        // llama.cpp computes factor = 1 / rope_freq_scale, so freq scale is 1/4.
+    func testYarnFactorMatchesTheValidatedRecipeAt131k() {
+        // Qwen's validated recipe: --rope-scaling yarn --rope-scale 4
+        // --yarn-orig-ctx 32768 extends 32K to 131,072. The factor IS the
+        // extension ratio, so the same recipe must produce it at 131,072.
         XCTAssertEqual(KVCacheSpec.yarnOrigCtx, 32_768)
-        XCTAssertEqual(KVCacheSpec.yarnFactor, 4.0, accuracy: 1e-6)
-        XCTAssertEqual(KVCacheSpec.yarnRopeFreqScale, 0.25, accuracy: 1e-6)
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 131_072), 4.0, accuracy: 1e-6)
+        XCTAssertEqual(KVCacheSpec.yarnRopeFreqScale(forContext: 131_072), 0.25, accuracy: 1e-6)
+        // llama.cpp computes factor = 1 / rope_freq_scale.
         XCTAssertEqual(
-            KVCacheSpec.yarnRopeFreqScale * KVCacheSpec.yarnFactor, 1.0, accuracy: 1e-6)
+            KVCacheSpec.yarnRopeFreqScale(forContext: 131_072)
+                * KVCacheSpec.yarnFactor(forContext: 131_072), 1.0, accuracy: 1e-6)
+    }
+
+    func testYarnFactorTracksTheContextNotAConstant() {
+        // The whole point of deriving it: 262,144 needs twice the extension.
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 262_144), 8.0, accuracy: 1e-6)
+        XCTAssertEqual(KVCacheSpec.yarnRopeFreqScale(forContext: 262_144), 0.125, accuracy: 1e-6)
+        // At or below the original window there is nothing to extend — a fixed
+        // factor 4 used to over-stretch these positions for no reason.
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 32_768), 1.0, accuracy: 1e-6)
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 16_000), 1.0, accuracy: 1e-6)
+        // Rounded UP: a factor below the ratio would leave positions past the
+        // trained window unscaled.
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 32_769), 2.0, accuracy: 1e-6)
+        XCTAssertEqual(KVCacheSpec.yarnFactor(forContext: 100_000), 4.0, accuracy: 1e-6)
+    }
+
+    func testHardCeilingAllows256kWithYarn() {
+        // Raised from 131,072 so a 262,144 request can actually take effect
+        // (32768 × 8). Without long context the trained window still caps it.
+        XCTAssertEqual(KVCacheSpec.hardMaxContext, 262_144)
+        XCTAssertEqual(
+            KVCacheSpec.contextCap(requested: 262_144, nCtxTrain: 32_768, longContext: true),
+            262_144)
+        XCTAssertEqual(
+            KVCacheSpec.contextCap(requested: 262_144, nCtxTrain: 32_768, longContext: false),
+            32_768)
+        XCTAssertEqual(
+            KVCacheSpec.contextCap(requested: 524_288, nCtxTrain: 32_768, longContext: true),
+            262_144)
+    }
+
+    // MARK: - Every KV cache the engine allocates counts against the budget
+
+    func testKvCacheCountFollowsMtp() {
+        // The MTP draft context is a second context on the same model with the
+        // same n_ctx (setupDraftContext), and llama.cpp commits its cache up
+        // front. Counting one approved contexts that cannot fit.
+        XCTAssertEqual(KVCacheSpec.kvCacheCount(useMtp: false), 1)
+        XCTAssertEqual(KVCacheSpec.kvCacheCount(useMtp: true), 2)
+    }
+
+    func testMaxContextByMemoryCountsEveryCache() {
+        // The device's post-fix numbers: budget 8,721,686,208B − 2.78GB model −
+        // 320MB compute = 5,606,141,888B of KV budget at 17,408 B/token.
+        let kvBudget = 5_606_141_888
+        let perToken = 17_408
+        // One cache: 262,144 fits comfortably (321,792 possible).
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget, kvBytesPerToken: perToken, cacheCount: 1),
+            321_792)
+        XCTAssertGreaterThanOrEqual(321_792, 262_144)
+        // Two caches (MTP): 262,144 cannot fit — 160,768 is the ceiling, so the
+        // request must be clamped and reported as memory-limited.
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget, kvBytesPerToken: perToken, cacheCount: 2),
+            160_768)
+        XCTAssertLessThan(160_768, 262_144)
+        // Alignment and degenerate inputs.
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 300, kvBytesPerToken: 1, cacheCount: 1), 256)
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 100, kvBytesPerToken: 1, cacheCount: 1), 0)
     }
 }

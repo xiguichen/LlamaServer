@@ -196,6 +196,36 @@ visible on small turns where 66 new tokens still took 1.45 s). It is written to
 the MTP path wipes `cachedTokenIds`/both caches at the end of `generate`
 (`LlamaInference.swift:2164`) instead of leaving the live KV reusable.
 
+### 262,144 context: what it costs (derived, not yet measured)
+
+The ceiling is no longer 131,072. This model's own GGUF window is 262,144
+(llama.cpp logs `n_ctx_train = 262144` at load) and the YaRN factor is now
+derived from the context being built (`KVCacheSpec.yarnFactor(forContext:)`:
+×4 at 131,072, ×8 at 262,144). The model card documents exactly those two
+recipes (`--rope-scale 4 … 131072`, `--rope-scale 8 … 256K`, both
+`--yarn-orig-ctx 32768`). The old fixed ×4 *halved* the native window:
+`llama-context.cpp` re-sets `n_ctx_train = yarn_orig_ctx / rope_freq_scale`, so
+`32768 / 0.25 = 131072`, and the ×8 recipe lands it back on 262,144.
+
+The KV figures below are **arithmetic on measured inputs** (17,408 B/token for
+q8_0 measured on device; 5,346 MB KV budget after the memory fix) — nothing
+here has run on the device:
+
+| config at 262,144 | KV | fits the 5,346 MB KV budget? |
+|---|---|---|
+| q8_0, MTP **off** | 4,352 MB | yes — 781 MB slack |
+| q8_0, MTP **on** | 8,704 MB (two caches) | **no** — clamped to 160,768 |
+| f16, MTP off | 8,704 MB | no |
+
+So the full window is reachable only with MTP off; with MTP on the (now
+cache-count-aware) clamp reduces it to ~160,768 and reports it as a memory cap.
+The dominant unmeasured risk is the snapshot: on the measured slope
+(664 MB at 31.8k → 897 MB at 48.4k, i.e. ~14–19 KB/token) the per-turn blob at
+262,144 extrapolates to **~3.9–4.9 GB of writes per turn**, on a process whose
+commitments (model 2.78 GB + KV 4.35 GB + compute ~0.32 GB ≈ 7.45 GB) already
+sit under a ~9.26 GB limit. That is the argument for doing the snapshot
+round-trip removal (open question 3) before the long end is used in anger.
+
 ## Stability: a GPU reset invalidates a run
 
 Both A/B runs hit `kIOGPUCommandBufferCallbackErrorInnocentVictim` (the GPU was
@@ -249,6 +279,15 @@ record.
 4. **Is the verify pass bandwidth-bound or compute-bound?** ~3.3 GB of traffic
    per 164 ms round ≈ 20 GB/s — far below the SoC's peak, so attention compute
    or kernel overhead is likely involved. Needs a profiler.
+5. **Does 262,144 actually work and is it coherent?** Load it on device
+   (MTP off, q8_0): the load line should report `YaRN long-context on (x8.0,
+   orig 32768)` and a 262,144-token context, and `n_ctx_train adjusted to 262144`
+   should appear in the llama.cpp log. Then measure prefill/gen at the top of the
+   range, the snapshot size and time, and — most importantly — compare output
+   against the ×4/131,072 config on the same long prompt. The ×8 recipe is
+   documented by the model author, but this fine-tune's *behaviour* at 256K is
+   unobserved, and the snapshot extrapolation above predicts the first
+   operational problem.
 
 ## Log-line semantics
 

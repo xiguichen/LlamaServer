@@ -21,21 +21,56 @@ enum KVCacheType: String, CaseIterable {
 /// llama.cpp when `head_dim % 32 == 0`.
 enum KVCacheSpec {
 
-    /// Hard ceiling on context size, mirroring the pre-existing clamp.
-    static let hardMaxContext = 131_072
+    /// Hard ceiling on context size. Raised from 131,072 to 262,144 (32768 × 8)
+    /// so a 262,144 request can take effect; the memory clamp is what decides
+    /// whether a context this size can actually be backed — and, with MTP on,
+    /// whether *two* caches can (they cannot: see `kvCacheCount`).
+    static let hardMaxContext = 262_144
 
     // MARK: YaRN long-context recipe
 
-    /// Qwen's validated YaRN recipe (README): factor 4.0 with
-    /// `original_max_position_embeddings = 32768` extends the native 32K
-    /// window to 131,072. Applied at runtime via context params — no GGUF
-    /// regeneration needed.
-    static let yarnFactor: Float = 4.0
+    /// Qwen's YaRN base window: `original_max_position_embeddings = 32768`.
+    /// Applied at runtime via context params — no GGUF regeneration needed.
     static let yarnOrigCtx: Int = 32_768
+
+    /// YaRN extension factor for a target context.
+    ///
+    /// The recipe's factor *is* the extension ratio (target / original), so it
+    /// has to be derived from the context actually being built rather than
+    /// pinned to one value. A fixed factor 4 was right at 131,072 (Qwen's
+    /// validated --rope-scale 4 --yarn-orig-ctx 32768) but wrong either side of
+    /// it: at 65,536 it stretched positions past the trained window for nothing,
+    /// and at 262,144 it left everything beyond 131,072 unscaled.
+    ///
+    /// Rounded **up**: a factor below the true ratio leaves the far positions
+    /// under-scaled, which is the failure mode that matters.
+    static func yarnFactor(forContext context: Int) -> Float {
+        guard context > yarnOrigCtx else { return 1.0 }
+        return Float((context + yarnOrigCtx - 1) / yarnOrigCtx)
+    }
+
     /// llama.cpp computes `factor = 1 / rope_freq_scale`
-    /// (llama-context.cpp rope-init), matching common's `--rope-scale 4`
-    /// → `rope_freq_scale = 1/4`.
-    static let yarnRopeFreqScale: Float = 0.25
+    /// (llama-context.cpp rope-init), matching common's `--rope-scale N`.
+    static func yarnRopeFreqScale(forContext context: Int) -> Float {
+        1.0 / yarnFactor(forContext: context)
+    }
+
+    /// How many KV caches the configured engine allocates.
+    ///
+    /// The MTP path creates a second context on the SAME model with the same
+    /// `n_ctx` (`LlamaInference.setupDraftContext`), and llama.cpp commits that
+    /// cache up front — it is real memory even though the draft only ever holds
+    /// a mirrored prompt plus a few tokens. Budgeting a single cache is what
+    /// approved contexts that could not fit (measured: 131,072 with MTP on is
+    /// 2 × 2.18GB of q8_0 KV, not 2.18GB).
+    static func kvCacheCount(useMtp: Bool) -> Int { useMtp ? 2 : 1 }
+
+    /// Largest 256-aligned context the KV budget can back, counting **every**
+    /// cache the engine allocates.
+    static func maxContextByMemory(kvBudgetBytes: Int, kvBytesPerToken: Int, cacheCount: Int) -> Int {
+        let perToken = max(1, kvBytesPerToken) * max(1, cacheCount)
+        return (kvBudgetBytes / perToken / 256) * 256
+    }
 
     // MARK: Sizing
 

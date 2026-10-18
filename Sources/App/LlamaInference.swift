@@ -366,30 +366,30 @@ final class LlamaInference: @unchecked Sendable {
             nHeadKV: nHeadKV, type: resolvedKV))
 
         // Clamp the context size to (a) the model's trained window — lifted
-        // when YaRN long-context is on — (b) the 256..131072 hard bounds, and
-        // later (c) what the KV cache can fit in the memory budget.
+        // when YaRN long-context is on — (b) the 256..hardMaxContext bounds,
+        // and later (c) what the KV caches can fit in the memory budget.
         var effective = KVCacheSpec.contextCap(
             requested: requestedContext, nCtxTrain: nCtxTrain,
             longContext: requestedYarnLongContext)
 
-        if resolvedKV != .f16 || requestedYarnLongContext {
-            let yarnDesc = requestedYarnLongContext
-                ? "on (x\(KVCacheSpec.yarnFactor), orig \(KVCacheSpec.yarnOrigCtx))" : "off"
-            FileLogger.shared.info(
-                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), kv layers \(kvLayers)/\(nLayer), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
-        }
-
         let kvBudget = budget - modelSize - computeReserve
         let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken), countStyle: .memory)
         let kvBudgetStr = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
-        if kvBudget < kvBytesPerToken * 256 {
+        // Every context on this model holds its OWN KV cache, and the MTP path
+        // creates a second one with the same n_ctx (setupDraftContext) whose
+        // memory is committed up front. Budgeting a single cache approved
+        // contexts the device cannot back: 131,072 with MTP on is 2 × 2.18GB,
+        // not 2.18GB.
+        let kvCacheCount = KVCacheSpec.kvCacheCount(useMtp: useMtp)
+        if kvBudget < kvBytesPerToken * kvCacheCount * 256 {
             llama_model_free(loadedModel)
             throw InferenceError.insufficientMemory(
-                "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token, only \(kvBudgetStr) available). Close other apps or reduce context size.")
+                "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token ×\(kvCacheCount), only \(kvBudgetStr) available). Close other apps or reduce context size.")
         }
-        let maxCtxByMemory = (kvBudget / kvBytesPerToken / 256) * 256   // round down to 256
+        let maxCtxByMemory = KVCacheSpec.maxContextByMemory(
+            kvBudgetBytes: kvBudget, kvBytesPerToken: kvBytesPerToken, cacheCount: kvCacheCount)
         if effective > maxCtxByMemory {
-            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(kvTokenSize)/token); reducing to \(maxCtxByMemory)")
+            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(kvTokenSize)/token ×\(kvCacheCount)); reducing to \(maxCtxByMemory)")
         }
         // Classify the reduction *before* applying the memory clamp: `effective`
         // here is already the window/ceiling cap, so the pair (windowCap,
@@ -401,6 +401,17 @@ final class LlamaInference: @unchecked Sendable {
         effective = min(effective, maxCtxByMemory)
         self.contextSize = effective
 
+        // Logged after the clamps so the YaRN factor is the one the context is
+        // actually built with: the recipe's factor IS the extension ratio over
+        // the 32K original window (×4 at 131,072, ×8 at 262,144), not a fixed
+        // constant — a fixed ×4 left everything past 131,072 unscaled.
+        if resolvedKV != .f16 || requestedYarnLongContext {
+            let yarnDesc = requestedYarnLongContext
+                ? "on (x\(KVCacheSpec.yarnFactor(forContext: effective)), orig \(KVCacheSpec.yarnOrigCtx))" : "off"
+            FileLogger.shared.info(
+                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), \(kvCacheCount) cache\(kvCacheCount == 1 ? "" : "s"), kv layers \(kvLayers)/\(nLayer), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
+        }
+
         // Physical micro-batch (n_ubatch) drives prefill GPU parallelism. The
         // policy is `KVCacheSpec.ubatchSize`: 1024 for large contexts with KV
         // headroom (measured ~29% faster prefill — 220 vs 170 tok/s on a 5k
@@ -409,7 +420,10 @@ final class LlamaInference: @unchecked Sendable {
         // launches (the Metal backend hadn't finished its async shader-set
         // init); `prewarmMetal` now runs a tiny decode first so that init has
         // completed before we build the large context.
-        let kvSlack = kvBudget - kvBytesPerToken * effective
+        // Slack still has to cover every cache the engine allocates (MTP adds a
+        // second one), or "fast prefill" would be chosen on memory that the
+        // draft context is about to consume.
+        let kvSlack = kvBudget - kvBytesPerToken * kvCacheCount * effective
         let fastPrefill = kvSlack > KVCacheSpec.ubatchSlackBytes
         self.batchSize = min(effective, KVCacheSpec.ubatchSize(contextSize: effective,
                                                                 kvSlackBytes: kvSlack))
@@ -484,7 +498,7 @@ final class LlamaInference: @unchecked Sendable {
             ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
 
-        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext, context: contextSize)
 
         // Force Metal's async shader-set initialization to completion BEFORE
         // building the large context, whenever the context size is >= 32k
@@ -563,7 +577,8 @@ final class LlamaInference: @unchecked Sendable {
     /// resolve off, which would throw during context construction.
     private static func applyCacheAndRopeParams(_ p: inout llama_context_params,
                                                 kvCacheType: KVCacheType,
-                                                yarnLongContext: Bool) {
+                                                yarnLongContext: Bool,
+                                                context: Int) {
         switch kvCacheType {
         case .f16:
             break // llama.cpp defaults type_k/type_v to F16
@@ -577,11 +592,14 @@ final class LlamaInference: @unchecked Sendable {
             p.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
         }
         if yarnLongContext {
-            // Qwen's validated recipe: --rope-scaling yarn --rope-scale 4
-            // --yarn-orig-ctx 32768. llama.cpp derives factor from
-            // 1/rope_freq_scale, so freq scale is 1/4 (KVCacheSpec).
+            // The model card's documented recipe: --rope-scaling yarn
+            // --rope-scale N --yarn-orig-ctx 32768, where N is the extension
+            // ratio (4 for 128K, 8 for 256K). llama.cpp derives the factor from
+            // 1/rope_freq_scale and re-adjusts the model's n_ctx_train to
+            // n_ctx_orig_yarn / rope_freq_scale, so deriving the factor from the
+            // context leaves the adjusted window exactly on the built context.
             p.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN
-            p.rope_freq_scale = KVCacheSpec.yarnRopeFreqScale
+            p.rope_freq_scale = KVCacheSpec.yarnRopeFreqScale(forContext: context)
             p.yarn_orig_ctx = UInt32(KVCacheSpec.yarnOrigCtx)
         }
     }
@@ -641,7 +659,7 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.n_outputs_max = UInt32(mtpOutputCount)
         ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         ctxParams.ctx_other = target
-        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext, context: contextSize)
 
         draftPromptTokens = []
         draftPromptBoundaryH = [:]
@@ -730,7 +748,7 @@ final class LlamaInference: @unchecked Sendable {
         if useMtp {
             ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
-        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext)
+        Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext, context: contextSize)
 
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             // `context` still holds the freed pointer; leave `contextValid` false
