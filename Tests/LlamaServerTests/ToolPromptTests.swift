@@ -98,6 +98,50 @@ final class ToolPromptTests: XCTestCase {
         """)
     }
 
+    /// A tool call whose arguments hold a top-level scalar — number, bool or
+    /// null — must render as compact JSON, the template's `tojson`-for-mappings
+    /// rule. These used to reach `JSONSerialization.data(withJSONObject:)` as
+    /// JSON *fragments*, which raises an uncatchable ObjC exception ("Invalid
+    /// top-level type in JSON write") and aborted the process on the serial
+    /// inference queue: a `read` call with `{"path":…,"limit":150,"offset":200}`
+    /// killed the server as soon as the client replayed the turn (device crash
+    /// 2026-10-18 11:58:53, request #13 following the tool call in #12).
+    func testQwenToolEnvelopeRendersScalarArguments() {
+        let env = ToolPrompt.toolEnvelope(
+            name: "read",
+            argumentsJSON: #"{"path":"a.swift","limit":150,"offset":200,"recursive":true,"cursor":null}"#,
+            format: .qwenXML)
+        XCTAssertEqual(env, """
+        <tool_call>
+        <function=read>
+        <parameter=cursor>
+        null
+        </parameter>
+        <parameter=limit>
+        150
+        </parameter>
+        <parameter=offset>
+        200
+        </parameter>
+        <parameter=path>
+        a.swift
+        </parameter>
+        <parameter=recursive>
+        true
+        </parameter>
+        </function>
+        </tool_call>
+        """)
+    }
+
+    /// `orderedArguments` is the direct entry point that used to abort; keep a
+    /// test on it so the fragment handling can't regress silently.
+    func testOrderedArgumentsRendersScalarsAsJSON() {
+        let pairs = ToolPrompt.orderedArguments(#"{"a":1,"b":1.5,"c":true,"d":null,"e":"s","f":{"k":1}}"#)
+            .map { "\($0.0)=\($0.1)" }
+        XCTAssertEqual(pairs, ["a=1", "b=1.5", "c=true", "d=null", "e=s", "f={\"k\":1}"])
+    }
+
     func testJSONToolEnvelopeUnchanged() {
         let env = ToolPrompt.toolEnvelope(name: "read", argumentsJSON: #"{"path":"x"}"#, format: .jsonHermes)
         XCTAssertEqual(env, #"<tool_call>{"name": "read", "arguments": {"path":"x"}}</tool_call>"#)

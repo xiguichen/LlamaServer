@@ -212,7 +212,18 @@ enum ToolPrompt {
         return obj.keys.sorted().map { key in
             let value = obj[key] as Any
             if let string = value as? String { return (key, string) }
-            if let data = try? JSONSerialization.data(withJSONObject: value),
+            // `.fragmentsAllowed` is load-bearing, not cosmetic: a scalar value
+            // (number, bool, null) is a JSON *fragment*, and without this option
+            // `dataWithJSONObject` raises an uncatchable ObjC exception
+            // ("Invalid top-level type in JSON write") rather than returning an
+            // error — `try?` cannot catch it, so the process aborted on the
+            // serial inference queue. A tool call like
+            // `{"path":…,"limit":150,"offset":200}` killed the server as soon as
+            // the client replayed that assistant turn (device crash
+            // 2026-10-18 11:58:53, request #13 after the tool call in #12).
+            // Every value here comes from `JSONSerialization.jsonObject`, so with
+            // fragments allowed all reachable values serialize.
+            if let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
                let string = String(data: data, encoding: .utf8) {
                 return (key, string)
             }
