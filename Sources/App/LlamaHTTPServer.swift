@@ -405,11 +405,16 @@ final class LlamaHTTPServer {
         return r == KERN_SUCCESS ? info.resident_size / (1024 * 1024) : 0
     }
 
-    /// System memory snapshot: total, this process's RSS, and the raw
-    /// `os_proc_available_memory()` value written verbatim (bytes) so every
-    /// line doubles as an exact A/B record across toolchain/entitlement
-    /// changes, plus Mach `vm_statistics64` system-wide page counts when
-    /// available (entitlement-gated on iOS).
+    /// System memory snapshot: total, this process's RSS, its physical
+    /// footprint, and the raw `os_proc_available_memory()` value written
+    /// verbatim (bytes) so every line doubles as an exact A/B record across
+    /// toolchain/entitlement changes, plus Mach `vm_statistics64` system-wide
+    /// page counts when available (entitlement-gated on iOS).
+    ///
+    /// `footprint` (not `rss`) is what jetsam accounts against, and
+    /// `available + footprint` is the per-process ceiling `MemoryBudget`
+    /// reconstructs — so the same line that shows a live budget also shows
+    /// whether the ceiling held steady after load.
     private var systemMemoryLog: String {
         let total = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
         let pageSize = UInt64(vm_page_size)
@@ -419,9 +424,13 @@ final class LlamaHTTPServer {
         // jetsam kills it (iOS 17+, no entitlement needed). Captured raw and
         // included in BOTH branches — previously the Mach-success branch
         // omitted it entirely and the fallback truncated to whole MB.
-        let availableRaw = os_proc_available_memory()
+        let availableRaw = ProcessMemory.availableBytes()
         let availableMB = availableRaw / (1024 * 1024)
         let availableField = "available=\(availableRaw)B(\(availableMB)MB)"
+
+        let footprintRaw = ProcessMemory.footprintBytes()
+        let footprintMB = footprintRaw / (1024 * 1024)
+        let footprintField = "footprint=\(footprintRaw)B(\(footprintMB)MB)"
 
         // Try Mach host_statistics (requires entitlement on iOS).
         var stats = vm_statistics64()
@@ -436,12 +445,12 @@ final class LlamaHTTPServer {
             let wired     = UInt64(stats.wire_count) * pageSize / (1024 * 1024)
             let compressed = UInt64(stats.compressor_page_count) * pageSize / (1024 * 1024)
             let free      = UInt64(stats.free_count) * pageSize / (1024 * 1024)
-            return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB \(availableField)"
+            return "total=\(total)MB active=\(active)MB wired=\(wired)MB compressed=\(compressed)MB free=\(free)MB rss=\(rss)MB \(availableField) \(footprintField)"
         }
 
         // Mach stats unavailable (host_statistics is entitlement-gated on
         // iOS): report the process-level numbers we always have.
-        return "total=\(total)MB \(availableField) rss=\(rss)MB"
+        return "total=\(total)MB \(availableField) \(footprintField) rss=\(rss)MB"
     }
 
     private func handleStreamingCompletion(request: HTTPRequest, connection: HTTPConnection, body: ChatCompletionRequest) {

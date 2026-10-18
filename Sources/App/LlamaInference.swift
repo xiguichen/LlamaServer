@@ -150,24 +150,6 @@ final class LlamaInference: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Current physical footprint (`task_vm_info.phys_footprint`) — the number
-    /// jetsam accounts against. `os_proc_available_memory()` is the per-process
-    /// ceiling minus this, so adding it back recovers the ceiling
-    /// (`MemoryBudget.processLimit`). It is non-zero at engine init precisely
-    /// when the previous engine's pages are still resident, which is the case
-    /// the headroom-only reading got wrong.
-    private static func currentFootprint() -> Int {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-        let kr = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        return kr == KERN_SUCCESS ? Int(info.phys_footprint) : 0
-    }
-
     /// First GGUF metadata value whose key ends with `suffix` (e.g.
     /// ".attention.key_length" → "qwen3.attention.key_length"). Keys are
     /// arch-prefixed, so a suffix match avoids hardcoding arch names.
@@ -214,65 +196,70 @@ final class LlamaInference: @unchecked Sendable {
         self.modelName = (modelPath as NSString).lastPathComponent
 
         // Memory budget. iOS jetsam-kills (SIGKILL — uncatchable) apps at a
-        // per-process limit well below total RAM (measured: ~9.26GB ceiling on
-        // 12GB hardware *with* the increased-memory-limit entitlement, near half
-        // of physical without it), so we fail *gracefully* with a message
-        // instead of letting a too-big load/KV-cache get us SIGKILLed with no
-        // log.
-        // Budget = min(physical, max(process-limit, 55% of physical)) minus
-        // transient headroom (see MemoryBudget). The *limit* is what
-        // os_proc_available_memory() reports the remainder of: the API returns
-        // headroom (limit − current footprint), and at init the previous
-        // engine's pages are often still resident, so the raw reading
-        // under-reports the device's real allowance (measured 2026-10-18:
-        // 6.37GB headroom with a 2.89GB footprint → a ~9.26GB ceiling). Feeding
-        // the headroom in as if it were the ceiling let the 55% floor win and
-        // computed 6.21GB, discarding a third of the entitlement uplift. Add the
-        // footprint back to recover the ceiling; keep the floor as the safety
-        // net for a zero/garbage reading.
+        // per-process limit well below total RAM (measured: ~9GB class on 12GB
+        // hardware *with* the increased-memory-limit entitlement, near half of
+        // physical without it), so we fail *gracefully* with a message instead
+        // of letting a too-big load/KV-cache get us SIGKILLed with no log.
+        //
+        // The budget is the device's own measured ceiling minus transient
+        // headroom (see MemoryBudget) — no assumed fraction of RAM may override
+        // a successful measurement. One reading is not enough, though: the
+        // allowance is granted lazily and *rises* with the process (measured
+        // 2026-10-18, one launch: 6.35GB available + a 92.1MB footprint → a
+        // 6.44GB ceiling at the end of backend init, then 4.16GB available +
+        // a 4.58GB footprint → ~8.74GiB once the model was loaded). So the
+        // first reading is taken here and the second right after the load, and
+        // the larger wins; the pre-check can only use the reading that exists
+        // before memory is committed.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
-        let processAvailable = Int(os_proc_available_memory())
-        let footprint = Self.currentFootprint()
-        let processLimit = MemoryBudget.processLimit(physicalRAM: totalRAM,
-                                                     available: processAvailable,
-                                                     footprint: footprint)
-        let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, processLimit: processLimit)
+        var readings = [MemoryBudget.Reading("at init",
+                                             available: ProcessMemory.availableBytes(),
+                                             footprint: ProcessMemory.footprintBytes())]
+        let initCeiling = MemoryBudget.ceiling(physicalRAM: totalRAM, readings: readings)
+        let initBudget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, ceiling: initCeiling.bytes)
         let computeReserve = 320 * 1024 * 1024   // activation/compute buffers headroom
 
         // Derivation logged BEFORE the pre-check so a refusal always leaves the
-        // numbers on disk. Headroom, footprint and the derived limit are all raw
-        // bytes: a change in either input — toolchain, entitlement, a still-
-        // resident previous engine — stays diagnosable from this one line.
-        FileLogger.shared.info(MemoryBudget.logLine(budget: budget, processLimit: processLimit,
-                                                    processAvailable: processAvailable,
-                                                    footprint: footprint, physicalRAM: totalRAM))
+        // numbers on disk: every reading's raw inputs, the ceiling it derives
+        // and which reading won, all in bytes. A change in any input —
+        // toolchain, entitlement, a still-resident previous engine — stays
+        // diagnosable from this one line. Logged again after the load with both
+        // readings; the later line's ceiling is what the KV budget is sized
+        // against.
+        FileLogger.shared.info(MemoryBudget.logLine(budget: initBudget, ceiling: initCeiling,
+                                                    readings: readings, physicalRAM: totalRAM))
 
-        // Entitlement diagnostic. The *limit* is where the uplift shows up:
+        // Entitlement diagnostic. The *ceiling* is where the uplift shows up:
         // entitled installs reach the ~9GB class on 12GB hardware, un-entitled
-        // ones land near half of physical. Below that, the MemoryBudget 55%
-        // floor *inflates* `budget` above what jetsam will actually allow, so a
-        // config sized for `budget` can be SIGKILLed with no graceful error.
-        // Flag it explicitly so the log always says why.
-        if processLimit > 0, processLimit < totalRAM / 2 {
+        // ones land near half of physical. Flag it explicitly so the log always
+        // says why a budget is small.
+        if initCeiling.usedFallback {
             FileLogger.shared.warn(
-                "increased-memory-limit entitlement appears MISSING: process limit " +
-                "\(processLimit)B is below half of physical \(totalRAM)B. " +
-                "Re-sign with AltStore 2.3+ (AltSign >= b2c8861793) or Xcode Personal Team. " +
-                "The \(budget)B budget is an over-estimate; expect a jetsam kill above " +
-                "~\(processLimit)B.")
+                "os_proc_available_memory() unreadable (\(readings[0].available)B); " +
+                "assuming half of physical (\(initCeiling.bytes)B). The " +
+                "\(initBudget)B budget is a fallback, not a measurement.")
+        } else if initCeiling.bytes < totalRAM / 2 {
+            FileLogger.shared.warn(
+                "increased-memory-limit entitlement appears MISSING: measured ceiling " +
+                "\(initCeiling.bytes)B is below half of physical \(totalRAM)B. " +
+                "Re-sign with AltStore 2.3+ (AltSign >= b2c8861793) or Xcode Personal Team.")
         }
 
         // Pre-check the model file size before attempting the load that would
-        // otherwise OOM-kill the whole app.
+        // otherwise OOM-kill the whole app. Deliberately the *conservative*
+        // (pre-load) reading: the ceiling rises once the model is in, so a model
+        // this rejects might have fit — but the check exists to avoid the
+        // SIGKILL, and nothing can tell "rejected early" from "killed" after the
+        // fact. A 4B Q4 model (2.78GB) is nowhere near the boundary.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: modelPath),
            let fileSize = (attrs[.size] as? NSNumber)?.intValue,
-           fileSize + computeReserve > budget {
+           fileSize + computeReserve > initBudget {
             let f = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
-            let b = ByteCountFormatter.string(fromByteCount: Int64(budget), countStyle: .file)
-            let pa = ByteCountFormatter.string(fromByteCount: Int64(processAvailable), countStyle: .file)
+            let b = ByteCountFormatter.string(fromByteCount: Int64(initBudget), countStyle: .file)
+            let pa = ByteCountFormatter.string(fromByteCount: Int64(readings[0].available), countStyle: .file)
             let ph = ByteCountFormatter.string(fromByteCount: Int64(totalRAM), countStyle: .file)
             throw InferenceError.insufficientMemory(
-                "Model is \(f) but only ~\(b) is usable on this device (process-available \(processAvailable)B ~\(pa), physical \(totalRAM)B ~\(ph)). Try a smaller model (1–3B, Q4).")
+                "Model is \(f) but only ~\(b) is usable on this device (process-available \(readings[0].available)B ~\(pa), physical \(totalRAM)B ~\(ph)). Try a smaller model (1–3B, Q4).")
         }
 
         var modelParams = llama_model_default_params()
@@ -290,7 +277,7 @@ final class LlamaInference: @unchecked Sendable {
         // (GGML_ABORT/SIGABRT) on an unsupported architecture or OOMs during
         // load, this line survives the crash in llamaserver.log — so a crash is
         // never "without any log", and it's readable on-device (no Mac needed).
-        FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(budget / (1024 * 1024)) MB)")
+        FileLogger.shared.info("loading model '\(self.modelName)' (requested ctx \(requestedContext), budget \(initBudget / (1024 * 1024)) MB)")
 
         let modelLoadStart = Date()
         guard let loadedModel = llama_model_load_from_file(modelPath, modelParams) else {
@@ -313,6 +300,24 @@ final class LlamaInference: @unchecked Sendable {
             throw InferenceError.contextInit
         }
         self.vocab = loadedVocab
+
+        // Second memory reading, now that the model's pages are committed. The
+        // allowance rises as the process settles (the init sample sees a
+        // container that is still being set up), so the ceiling — and the KV
+        // budget below — is the larger of the readings. Logged here, so the
+        // clamp that follows and the line that justifies it agree.
+        readings.append(MemoryBudget.Reading("after model load",
+                                             available: ProcessMemory.availableBytes(),
+                                             footprint: ProcessMemory.footprintBytes()))
+        let ceiling = MemoryBudget.ceiling(physicalRAM: totalRAM, readings: readings)
+        let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, ceiling: ceiling.bytes)
+        FileLogger.shared.info(MemoryBudget.logLine(budget: budget, ceiling: ceiling,
+                                                    readings: readings, physicalRAM: totalRAM))
+        if ceiling.usedFallback {
+            FileLogger.shared.warn(
+                "memory ceiling fell back to half of physical (\(ceiling.bytes)B) — " +
+                "neither reading was usable")
+        }
 
         // Clamp the context size to (a) the model's trained window, (b) a hard
         // ceiling, and (c) what the KV cache can fit in the memory budget.
