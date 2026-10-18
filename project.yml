@@ -115,6 +115,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/MemoryBudget.swift
         createIntermediateGroups: true
+      - path: Sources/App/UpdateSpec.swift
+        createIntermediateGroups: true
       - path: Sources/App/ResponsePolicy.swift
         createIntermediateGroups: true
       - path: Sources/App/KVCacheSpec.swift
