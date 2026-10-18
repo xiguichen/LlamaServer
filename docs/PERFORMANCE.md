@@ -66,6 +66,10 @@ the snapshot **save**, see below), not the snapshot restore.
 Roughly **170–350 t/s** for genuinely new tokens, i.e. a cold 24k-token agent
 prompt costs ~80 s. That is the single most expensive thing the server does.
 
+The rate also falls with context: 344 t/s for 8,577 decoded tokens at an 8.9k
+context → 271 at 17.7k → 205 at 26.6k → 184 at 35.4k (the A/B runs below, which
+also show MTP-on paying roughly 9% more here than MTP-off).
+
 ### Generation
 
 MTP on, `gen=` measures from the first sampled token (after the prompt GPU sync).
@@ -105,6 +109,41 @@ wall clock of an agent turn (the 499-token turn took 51 s to generate).
 - MTP emits 1.5–2.0 tokens/round; acceptance (`hits`) tracked 36–100% and fell
   as context grew.
 
+### MTP depth 1: paired on/off A/B (2026-10-18, build `46c215d`)
+
+Identical prompt sequences in both configs (`temperature: 0`, so speculative
+decoding must be exact — **all 7 comparable turns emitted byte-identical text**,
+as it must), one engine restart between the runs. `t/s` is the engine's own
+`gen=` figure; `ms/tok` is the per-round wall divided by tokens emitted per
+round (on) versus the per-step wall (off).
+
+| context | MTP on t/s | off t/s | on/off | on ms/tok | off ms/tok | on/off |
+|---|---|---|---|---|---|---|
+| 43 | 27.84 | 22.19 | 1.25 | 35.3 | 44.6 | 0.79 |
+| 164 | 23.64 | 22.03 | 1.07 | 42.3 | 45.0 | 0.94 |
+| 294 | 22.60 | 21.90 | 1.03 | 43.6 | 45.1 | 0.97 |
+| 8,864 | 21.41 | 19.75 | 1.08 | 46.7 | 49.8 | 0.94 |
+| 17,711 | 18.10 | 16.33 | 1.11 | 53.8 | 60.2 | 0.89 |
+| 26,558 | 15.23 | 14.41 | 1.06 | 63.8 | 68.2 | 0.94 |
+| 35,405 | 13.91 | 12.90 | 1.08 | 70.0 | 76.2 | 0.92 |
+
+- **Generation: MTP depth 1 wins, ~+6–11% at 9k–35k context** (and up to +25%
+  when the whole context is tiny). Acceptance settles at a flat **2.03
+  tokens/round (100% hits)** from ~9k up, and the draft pass is a constant
+  ~11–13 ms/round; the win is the 2-row verify sharing one weight read.
+- **Prefill: MTP loses ~9%** (344 vs 376 t/s at 8.9k, 184 vs 204 at 35.4k). The
+  MTP path also decodes each prompt chunk into the draft context
+  (`mirrorPromptChunkIntoDraft`, no logits — MTP-only work). This is *not*
+  thermal drift: the same run was *faster* per generated token while slower per
+  prefill token, which throttling cannot produce.
+- Net for the pi agent loop (2–3k-token delta prefill + 200–500 generated tokens
+  at ~35k context) the two roughly cancel: ~1.7 s lost on prefill, ~1.7 s
+  gained on generation. MTP helps long generations; it hurts cold prompts.
+
+The paired numbers supersede the earlier unpaired note in the repo
+(`MTP-on 18.3/17.5` vs `off 19.9/19.7` t/s, context unrecorded), which had
+suggested MTP was a loss.
+
 ### KV cache and prefix reuse
 
 Reuse works, including across the periodic context recreate:
@@ -136,6 +175,28 @@ visible on small turns where 66 new tokens still took 1.45 s). It is written to
 the MTP path wipes `cachedTokenIds`/both caches at the end of `generate`
 (`LlamaInference.swift:2164`) instead of leaving the live KV reusable.
 
+## Stability: a GPU reset invalidates a run
+
+Both A/B runs hit `kIOGPUCommandBufferCallbackErrorInnocentVictim` (the GPU was
+reset by something outside the process). `DecodeRetry` retried once; one run
+recovered, the other did not — so the MTP-on run stopped at 44k while the off
+run completed to 53k. The fault is environmental, not config-specific. Memory
+was tight throughout: rss 5.3–5.6 GB against ~2.8–3.1 GB available on an 11.7 GB
+device, climbing across the run.
+
+Recognise it in a log by `llama_decode failed — recreating context to recover`
+followed by `ggml_metal_graph_compute: backend is in error state … recreate the
+backend to recover` and `llama_decode: failed to decode, ret = -3`. Two
+consequences: a run containing one is not a measurement, and after a
+*persistent* fault the engine answers 500 to every request until the app is
+restarted — the recovery rebuilds the `llama_context` while llama.cpp asks for
+the **backend** (`llama_backend_free`/`llama_backend_init` are exported by the
+vendored framework but unused).
+
+Note also that a failed non-streaming generation logs nothing in
+`llamaserver.log` (only `generation OK` prints on success), so the request line
+just stops; the evidence lives in the inference file's error lines.
+
 ## Claims the logs disprove
 
 These were stated by an agent that read the code but did not measure. Each is
@@ -146,17 +207,17 @@ record.
 |---|---|
 | "Hybrid models **cannot reuse KV** — `llama_memory_clear` wipes the cache, forcing full prompt re-decode" | False. Reuse is the normal path: `KV snapshot restored (48337 tokens, prompt 48450); decoding 113 new`. What's unavailable is the *cheap* `seq_rm` suffix trim; the snapshot replaces it. `llama_memory_clear(_, false)` runs on the fallback/recreate paths, not per request. |
 | "Token limit **wastes 1 decode** per step — the last token is decoded but never sampled" | False, backwards. `LlamaInference.swift:2109` breaks *before* the useless decode (`if generated >= limit { break }`). |
-| "MTP is **slower** (2 decode cycles per output token)" | Unverified. A round costs one draft pass (~11 ms) + one 2-token verify pass, and emits 1.5–2.0 tokens: the verify cost is amortised over the batch. Whether plain wins at long context is an **open question** (A/B below). |
+| "MTP is **slower** (2 decode cycles per output token)" | False, measured. A paired A/B (see above) puts depth 1 at **+6–11% generation** at 9k–35k context with byte-identical output; the draft pass is ~11 ms/round against a flat 2.03 tokens/round. |
 | "**Cannot be improved** without changing the serial decode+sample model" | False. The measured bottlenecks — KV bytes per token, snapshot round-trip, delta re-decode — are all addressable without touching the decode loop. |
 | "Serial queue / async GPU + CPU sample per token" are the bottleneck | True as facts, but not the bottleneck here: CPU time is ~3 ms/round vs 95–150 ms of GPU verify wait. |
 
 ## Open questions / next measurements
 
-1. **MTP on/off at long context** — paired A/B with the UI toggle (fixed prompt
-   shapes, alternating, same context). The table above suggests MTP emits
-   ~1.5–2 tokens per round for ~1 verify pass, but this has not been measured
-   against the plain path. The repo's older note (`MTP-on 18.3/17.5` vs
-   `off 19.9/19.7` t/s) is unpaired and at an unrecorded context.
+1. ~~**MTP on/off at long context**~~ — **answered** 2026-10-18: MTP depth 1 is
+   +6–11% on generation at 9k–35k context but ~9% slower on prefill (see the A/B
+   above). The 44k–53k end is still one-sided (the MTP-on run died of a GPU reset
+   there); a bracket run with MTP back on would close it, as would a thermal
+   bracket to confirm the ~9% prefill cost is structural.
 2. **KV q4_0** — this model qualifies (`head_dim 256 % 32 == 0`, flash-attn
    forced). Halves the KV (843 MB → ~466 MB at 48k) and the snapshot; measure
    the t/s gain and the quality cost.
