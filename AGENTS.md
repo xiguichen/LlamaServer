@@ -42,6 +42,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 | `Sources/App/FileLogger.swift` | Crash-survivable on-disk log, split by subsystem; error/warn fsync'd sync, info+ buffered; mirrors basic lines only |
 | `Sources/App/LogRouter.swift` | Pure routing: which file (server/inference/payloads) a line lands in, from its level + `#file` |
 | `Sources/App/LogPanelSpec.swift` | Pure panel budget: basic-only filter (error/warn/info), line-count cap, per-line truncation |
+| `Sources/App/LogFetchSpec.swift` | Pure `GET /logs` contract: which files, how much of each, text vs JSON |
 | `Sources/App/StartupTimer.swift` | Pure startup-phase accumulator: records named phases + durations, formats the load-gap breakdown line (`load phases:` / `Startup gap:`) |
 
 ## Important gotchas
@@ -71,10 +72,11 @@ No local Xcode required. Everything runs in GitHub Actions:
 - **YaRN long-context** (`longContextYarn`): sets `rope_scaling_type=YARN`, `rope_freq_scale=0.25` (factor 4), `yarn_orig_ctx=32768` on every context (target/MTP/recreate) and lifts the `n_ctx_train` clamp (Qwen3-4B: 40,960 → up to 131,072, still memory-clamped).
 
 - **Log split + panel budget**: `FileLogger` routes each line to one of three files by `LogRouter.category(level:sourceFile:)` — `.verbose` always goes to `llamaserver-payloads.log`, `LlamaInference.swift` to `llamaserver-inference.log`, everything else to `llamaserver.log`. The in-app panel renders **basic (error/warn/info) lines only** (`LogPanelSpec`), truncated to 500 chars, in a `LazyVStack`. Do not route payload/debug lines back to the panel or raise the cap without checking the cost: a `cpu_resource` report (bug_type 202, 57% CPU) traced the app's heaviest stack to the panel laying out 72k-char prompt lines with `.textSelection(.enabled)` at 10 Hz.
+- **Logs come off the device over HTTP**: `GET /logs` (also `/v1/logs`) returns the three files so a LAN client can pull them without the Files app — `curl 'http://<device>:8443/logs?name=inference&tail=500'`, `?backups=0`, `?format=json`. The contract is the pure `LogFetchSpec`; `FileLogger.snapshot(_:)` flushes buffered lines first, then reads backup+live per category. It returns whatever the files hold, so with "log prompt & response content" on it exposes prompts and completions (the payload file) to anyone on the LAN; that toggle is off by default. Each fetch logs one `GET /logs …` line to the server file.
 
 ## Tests
 
-- Pure-logic specs are unit-tested in `Tests/LlamaServerTests/` — e.g. `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines), `ToolPromptTests` (tool-instruction wording and injection), `ThinkingSwitchTests` (the thinking-off block against each renderer tail) and `LogRoutingTests` (log-file routing + panel budget).
+- Pure-logic specs are unit-tested in `Tests/LlamaServerTests/` — e.g. `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines), `ToolPromptTests` (tool-instruction wording and injection), `ThinkingSwitchTests` (the thinking-off block against each renderer tail), `LogFetchSpecTests` (the `GET /logs` contract) and `LogRoutingTests` (log-file routing + panel budget).
 - All are pure Swift — no model file, no inference. They run on simulator in CI.
 - Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
 

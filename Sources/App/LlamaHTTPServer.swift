@@ -328,6 +328,14 @@ final class LlamaHTTPServer {
         }
         server.route(.POST, "completions", completions)
         server.route(.POST, "v1/completions", completions)
+
+        // Debug: the on-device log files, so a LAN client can pull them for
+        // analysis without going through the Files app. See `LogFetchSpec`.
+        let logs: (HTTPRequest) -> HTTPResponse = { [weak self] request in
+            self?.logsResponse(queryItems: request.uri.queryItems ?? []) ?? HTTPResponse(.internalServerError)
+        }
+        server.route(.GET, "logs", logs)
+        server.route(.GET, "v1/logs", logs)
     }
 
     private func modelsResponse() -> HTTPResponse {
@@ -336,6 +344,33 @@ final class LlamaHTTPServer {
                              owned_by: "local")
         let list = ModelList(object: "list", data: [info])
         return json(encodable: list, status: .ok)
+    }
+
+    /// `GET /logs` — the on-device log files, for a debugging client on the LAN.
+    /// Query documented in `LogFetchSpec`. It returns whatever the files hold:
+    /// with "log prompt & response content" enabled that includes prompts and
+    /// completions (the payloads file). That toggle is off by default.
+    private func logsResponse(queryItems: [URLQueryItem]) -> HTTPResponse {
+        let plan = LogFetchSpec.plan(queryItems: queryItems)
+        let chunks = FileLogger.shared.snapshot(plan)
+        FileLogger.shared.info("GET /logs name=\(plan.categories.map(\.rawValue).joined(separator: ",")) "
+            + "tail=\(plan.tail.map { String($0) } ?? "all") backups=\(plan.includeBackups) -> "
+            + chunks.map { "\($0.name):\($0.lines) lines" }.joined(separator: ", "))
+        let headers = { (type: String, count: Int) -> [String: String] in
+            ["Content-Type": type,
+             "Content-Length": "\(count)",
+             "Access-Control-Allow-Origin": "*"]
+        }
+        switch plan.format {
+        case .text:
+            let body = Data(LogFetchSpec.textBody(chunks).utf8)
+            return HTTPResponse(.ok, headers: headers("text/plain; charset=utf-8", body.count), body: body)
+        case .json:
+            guard let body = try? LogFetchSpec.jsonBody(chunks) else {
+                return HTTPResponse(.internalServerError)
+            }
+            return HTTPResponse(.ok, headers: headers("application/json", body.count), body: body)
+        }
     }
 
     /// Reject request bodies larger than this to avoid a memory-spike crash.

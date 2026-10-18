@@ -324,6 +324,32 @@ final class FileLogger {
         }
     }
 
+    // MARK: - Fetching the files (GET /logs)
+
+    /// Path of the one rolled-over backup kept per category (`rotateIfNeeded`).
+    /// `llamaserver.log` → `llamaserver.1.log`.
+    private func backupURL(for category: LogCategory) -> URL {
+        url(for: category).deletingPathExtension().appendingPathExtension("1.log")
+    }
+
+    /// Snapshot the log files for `GET /logs` (see `LogFetchSpec`): for each
+    /// requested category, the rolled-over backup (older) followed by the live
+    /// file. Buffered lines are flushed first so the caller sees everything that
+    /// has been written, not just what the 1 s / 64 KB policy has synced.
+    func snapshot(_ plan: LogFetchSpec.Plan) -> [LogFetchSpec.Chunk] {
+        queue.sync {
+            syncToDisk()
+            return plan.categories.map { category in
+                let backup = plan.includeBackups
+                    ? (try? String(contentsOf: backupURL(for: category), encoding: .utf8)) ?? ""
+                    : ""
+                let live = (try? String(contentsOf: url(for: category), encoding: .utf8)) ?? ""
+                return LogFetchSpec.chunk(name: category.fileName, backupText: backup,
+                                          liveText: live, plan: plan)
+            }
+        }
+    }
+
     func clear() {
         queue.sync {
             syncToDisk()
@@ -345,7 +371,7 @@ final class FileLogger {
             guard let attrs = try? fm.attributesOfItem(atPath: path.path),
                   let size = (attrs[.size] as? NSNumber)?.intValue,
                   size > maxBytes else { continue }
-            let backup = path.deletingPathExtension().appendingPathExtension("1.log")
+            let backup = backupURL(for: category)
             try? fm.removeItem(at: backup)
             try? fm.moveItem(at: path, to: backup)
         }

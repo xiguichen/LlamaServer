@@ -107,6 +107,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/ThinkingSwitch.swift
         createIntermediateGroups: true
+      - path: Sources/App/LogFetchSpec.swift
+        createIntermediateGroups: true
       - path: Sources/App/MtpProbe.swift
         createIntermediateGroups: true
       - path: Sources/App/MtpSpeculator.swift
