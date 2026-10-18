@@ -196,19 +196,23 @@ final class LlamaInference: @unchecked Sendable {
         self.modelName = (modelPath as NSString).lastPathComponent
 
         // Memory budget. iOS jetsam-kills (SIGKILL — uncatchable) apps at a
-        // per-process limit well below total RAM (measured: ~9GB class on 12GB
-        // hardware *with* the increased-memory-limit entitlement, near half of
-        // physical without it), so we fail *gracefully* with a message instead
-        // of letting a too-big load/KV-cache get us SIGKILLed with no log.
+        // per-process limit well below total RAM, and that limit is Apple's
+        // per-device constant, *not* a fraction of RAM: on iPhone 17 Pro Max
+        // (12GB) it is exactly 6GiB (6,442,450,944B) and the
+        // increased-memory-limit entitlement only unlocks it (xnu
+        // `memorystatus_get_default_task_active_limit` takes the MAX of the base
+        // limit and the device-tree `entitled_max_task_pmem`). So we fail
+        // *gracefully* with a message instead of letting a too-big load/KV-cache
+        // get us SIGKILLed with no log.
         //
         // The budget is the device's own measured ceiling minus transient
         // headroom (see MemoryBudget) — no assumed fraction of RAM may override
         // a successful measurement. One reading is not enough, though: the
-        // allowance is granted lazily and *rises* with the process (measured
-        // 2026-10-18, one launch: 6.35GB available + a 92.1MB footprint → a
-        // 6.44GB ceiling at the end of backend init, then 4.16GB available +
-        // a 4.58GB footprint → ~8.74GiB once the model was loaded). So the
-        // first reading is taken here and the second right after the load, and
+        // allowance is granted lazily, so the earliest sample can be the
+        // smallest (measured 2026-10-18, one launch: 6.35GB available + a 90.2MB
+        // footprint at init, then 6.29GB available + a 153.8MB footprint after
+        // the model loaded — the sum is exactly 6,442,450,944B both times). So
+        // the first reading is taken here and the second right after the load, and
         // the larger wins; the pre-check can only use the reading that exists
         // before memory is committed.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
@@ -229,10 +233,10 @@ final class LlamaInference: @unchecked Sendable {
         FileLogger.shared.info(MemoryBudget.logLine(budget: initBudget, ceiling: initCeiling,
                                                     readings: readings, physicalRAM: totalRAM))
 
-        // Entitlement diagnostic. The *ceiling* is where the uplift shows up:
-        // entitled installs reach the ~9GB class on 12GB hardware, un-entitled
-        // ones land near half of physical. Flag it explicitly so the log always
-        // says why a budget is small.
+        // A ceiling below half of physical is the signature of a *missing*
+        // entitlement, so it is flagged here and probed below: the probe names
+        // the kernel's base limit and this process's effective entitlement, so a
+        // small budget always says *which* of the two causes it was.
         if initCeiling.usedFallback {
             FileLogger.shared.warn(
                 "os_proc_available_memory() unreadable (\(readings[0].available)B); " +
@@ -244,6 +248,16 @@ final class LlamaInference: @unchecked Sendable {
                 "\(initCeiling.bytes)B is below half of physical \(totalRAM)B. " +
                 "Re-sign with AltStore 2.3+ (AltSign >= b2c8861793) or Xcode Personal Team.")
         }
+
+        // The read-only probe that separates the two causes, in one greppable
+        // line: the device's base per-process limit (`kern.max_task_pmem`) and
+        // whether the running (re-signed) binary actually carries the
+        // entitlement. Equal numbers mean the entitlement is decorative on this
+        // device because the base tier already IS the entitled tier.
+        FileLogger.shared.info(MemoryLimitProbe.line(
+            baseLimitMB: MemoryLimitProbe.baseLimitMB(),
+            ceilingBytes: initCeiling.bytes,
+            entitlement: MemoryLimitProbe.entitlementPresent()))
 
         // Pre-check the model file size before attempting the load that would
         // otherwise OOM-kill the whole app. Deliberately the *conservative*

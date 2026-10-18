@@ -54,11 +54,16 @@ targets:
         # Keep serving while screen is on; background execution is limited by iOS.
         UIBackgroundModes:
           - audio
-    # Required for real 6GB+ inference headroom on iOS 26+/27 devices.
-    # The per-process jetsam limit rises from ~3.3GB to ~6GB+ only when the app
-    # carries com.apple.developer.kernel.increased-memory-limit. No paid account
-    # needed: AltStore 2.3+ (AltSign >= b2c8861793) and Xcode "Personal Team"
-    # signing both grant this capability to free Apple ID apps; SideStore does not.
+    # Unlocks the device's own per-process memory tier (6GiB / 6,442,450,944B on
+    # iPhone 17 Pro Max, measured 2026-10-18) instead of the base limit the app
+    # gets without it. xnu raises nothing by itself: it takes
+    # MAX(base, memorystatus_entitled_max_task_footprint_mb), and that second
+    # value is a device-tree constant Apple bakes per model
+    # (`entitled_max_task_pmem`), so no SDK or build flag can exceed it.
+    # No paid account needed: AltStore 2.3+ (AltSign >= b2c8861793) and Xcode
+    # "Personal Team" signing both carry the entitlement over for free Apple ID
+    # apps; SideStore does not. Whether it survived the re-sign in the field is
+    # logged at init by MemoryLimitProbe.
     # NOTE: xcodebuild cannot ad-hoc sign for the iphoneos SDK, so CI builds
     # unsigned and scripts/package-ipa.sh ad-hoc signs the .app with this
     # entitlements file — embedding the blob in LC_CODE_SIGNATURE, the only
@@ -114,6 +119,8 @@ targets:
       - path: Sources/App/MtpSpeculator.swift
         createIntermediateGroups: true
       - path: Sources/App/MemoryBudget.swift
+        createIntermediateGroups: true
+      - path: Sources/App/MemoryLimitProbe.swift
         createIntermediateGroups: true
       - path: Sources/App/UpdateSpec.swift
         createIntermediateGroups: true
