@@ -149,7 +149,10 @@ fi
 echo "$BODY"
 
 echo "==> On the phone now:"
-curl -fsS "$URL/v1/updates"
+# The upload above already landed; a phone that does not answer this second
+# request must not turn a successful push into a reported failure.
+curl -fsS "$URL/v1/updates" \
+  || echo "    (the phone did not answer a second request — the upload above still landed)"
 echo
 
 cat <<'EOS'

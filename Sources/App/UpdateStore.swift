@@ -14,10 +14,12 @@ import Foundation
 /// - `store` rotates (current → `.prev`) **before** writing the new body, and
 ///   writes the body with `.atomic` (a complete temp file renamed into place).
 ///   A write that fails therefore leaves the last good build in `.prev` rather
-///   than a half-written current file. `latest.json` is written last, so a crash
-///   between the two leaves a new IPA carrying the previous build id — visible in
-///   `GET /v1/updates`, never a decode failure (`decodeRecord` returns nil for
-///   anything unreadable).
+///   than a half-written current file. `latest.json` is written last and is
+///   best-effort: the body landing *is* the upload, so a record that cannot be
+///   written is a warning — never a failed upload — and its absence reads as
+///   "no build id" in `GET /v1/updates` rather than an invented one. A torn
+///   record degrades the same way (`decodeRecord` returns nil for anything
+///   unreadable).
 struct UpdateStore {
     /// The app container's Documents directory; `updates/` lives under it.
     let documentsPath: String
@@ -71,8 +73,19 @@ struct UpdateStore {
 
         try body.write(to: URL(fileURLWithPath: paths.current), options: .atomic)
 
-        let record = UpdateSpec.Record(build: build, bytes: body.count, uploadedAt: Date())
-        try UpdateSpec.encode(record)
-            .write(to: URL(fileURLWithPath: paths.metadata), options: .atomic)
+        // The IPA is what the user installs, so once the body has landed the
+        // upload has succeeded: a record that cannot be written (disk full
+        // between the two writes) is a warning, never a failed upload — the
+        // caller would otherwise report 500 for a build that is already on the
+        // phone and about to replace the good one. What is lost is the build id,
+        // which `GET /v1/updates` then reports as absent rather than invented.
+        do {
+            let record = UpdateSpec.Record(build: build, bytes: body.count, uploadedAt: Date())
+            try UpdateSpec.encode(record)
+                .write(to: URL(fileURLWithPath: paths.metadata), options: .atomic)
+        } catch {
+            FileLogger.shared.warn("updates: stored \(body.count) bytes but could not write "
+                + "\(UpdateSpec.metadataFileName) (build \(build)): \(error)")
+        }
     }
 }

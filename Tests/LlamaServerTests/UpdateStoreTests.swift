@@ -124,4 +124,22 @@ final class UpdateStoreTests: XCTestCase {
         let broken = UpdateStore(documentsPath: blocker.appendingPathComponent("nested").path)
         XCTAssertThrowsError(try broken.store(body: ipa(0x41), build: "441aadc"))
     }
+
+    func testALandedBodyIsSuccessEvenIfTheMetadataCannotBeWritten() throws {
+        // The IPA is what the user installs. Once the body has landed the upload
+        // has succeeded, so a metadata write that fails (disk full between the two
+        // writes) must not be reported as a failed upload — that would send the
+        // user back to re-push a file that is already there. What is lost is the
+        // record, and it shows up honestly as "no build id" in GET /v1/updates.
+        let locations = UpdateSpec.locations(documentsPath: temp.path)
+        try FileManager.default.createDirectory(atPath: locations.directory,
+                                                withIntermediateDirectories: true)
+        // A directory where latest.json should go makes the atomic write fail.
+        try FileManager.default.createDirectory(atPath: locations.metadata,
+                                                withIntermediateDirectories: true)
+        let body = ipa(0x41)
+        XCTAssertNoThrow(try store.store(body: body, build: "441aadc"))
+        XCTAssertEqual(file(locations.current), body, "the IPA is installable")
+        XCTAssertNil(store.status().current.build, "the record could not be written")
+    }
 }
