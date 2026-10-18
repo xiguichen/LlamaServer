@@ -1,5 +1,4 @@
 import XCTest
-@testable import LlamaServer
 
 /// The probe exists to answer one question from a device log: *why* is the
 /// per-process ceiling this size, and is the entitlement that raises it

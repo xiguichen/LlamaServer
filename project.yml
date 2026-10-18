@@ -103,6 +103,10 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
+      # Pure sources only, compiled straight into this target — there is no
+      # `LlamaServer` module to import. A test file must NOT `@testable import
+      # LlamaServer`: it fails with "Unable to resolve module dependency".
+      # To test something new, add its (pure) source file to this list.
       - Tests/LlamaServerTests
       - path: Sources/App/ToolCallParser.swift
         createIntermediateGroups: true
