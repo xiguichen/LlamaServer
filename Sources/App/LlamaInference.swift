@@ -2174,13 +2174,18 @@ final class LlamaInference: @unchecked Sendable {
         let genEnd = CFAbsoluteTimeGetCurrent()
         let prefillSecs = prefillEnd - genStart
         let genSecs = genEnd - firstTokenTime
-        let prefillTokPerSec = prefillSecs > 0 ? Double(promptTokens.count) / prefillSecs : 0
+        // The prefill phase decodes only the prompt suffix after cache reuse
+        // (`reuseLen` tokens came back from the KV cache or the snapshot), so
+        // the rate must divide the *decoded* count — see PrefillStats.
+        let prefillSegment = PrefillStats.segment(promptTokens: promptTokens.count,
+                                                  reusedTokens: reuseLen,
+                                                  seconds: prefillSecs)
         let genTokPerSec = genSecs > 0 ? Double(generated) / genSecs : 0
         let tpms = genTokPerSec * 60
         let preview = output.prefix(200).replacingOccurrences(of: "\n", with: "\\n")
         // Two decimals: Int() truncation hid every change under ~4% at ~28 t/s.
         func f2(_ x: Double) -> String { String(format: "%.2f", x) }
-        FileLogger.shared.info("generated \(generated) tokens (prefill=\(f2(prefillSecs))s \(f2(prefillTokPerSec))t/s, gen=\(f2(genSecs))s \(f2(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
+        FileLogger.shared.info("generated \(generated) tokens (\(prefillSegment), gen=\(f2(genSecs))s \(f2(genTokPerSec))t/s, \(Int(tpms))t/min, finish=\(finishReason), cache now \(cachedTokenCount)) preview='\(preview)'")
 
         return GenerationResult(text: output,
                                 promptTokens: promptTokens.count,

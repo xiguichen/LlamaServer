@@ -132,6 +132,7 @@ targets:
       - path: Sources/App/StartupTimer.swift
       - path: Sources/App/MtpPhaseStats.swift
       - path: Sources/App/PlainStepStats.swift
+      - path: Sources/App/PrefillStats.swift
       - path: Sources/App/MtpSpec.swift
         createIntermediateGroups: true
       - path: Sources/App/EngineConfigSpec.swift
