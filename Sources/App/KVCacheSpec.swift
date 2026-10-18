@@ -23,8 +23,8 @@ enum KVCacheSpec {
 
     /// Hard ceiling on context size. Raised from 131,072 to 262,144 (32768 × 8)
     /// so a 262,144 request can take effect; the memory clamp is what decides
-    /// whether a context this size can actually be backed — and, with MTP on,
-    /// whether *two* caches can (they cannot: see `kvCacheCount`).
+    /// whether a context this size can actually be backed (see
+    /// `chargedKvBytesPerToken` for what every context on the model costs).
     static let hardMaxContext = 262_144
 
     // MARK: YaRN long-context recipe
@@ -55,21 +55,47 @@ enum KVCacheSpec {
         1.0 / yarnFactor(forContext: context)
     }
 
-    /// How many KV caches the configured engine allocates.
+    /// KV layers the MTP draft context keeps.
     ///
-    /// The MTP path creates a second context on the SAME model with the same
-    /// `n_ctx` (`LlamaInference.setupDraftContext`), and llama.cpp commits that
-    /// cache up front — it is real memory even though the draft only ever holds
-    /// a mirrored prompt plus a few tokens. Budgeting a single cache is what
-    /// approved contexts that could not fit (measured: 131,072 with MTP on is
-    /// 2 × 2.18GB of q8_0 KV, not 2.18GB).
-    static func kvCacheCount(useMtp: Bool) -> Int { useMtp ? 2 : 1 }
+    /// Every context on this model holds its own cache, but they are not the
+    /// same size. The draft context is created with
+    /// `ctx_type = LLAMA_CONTEXT_TYPE_MTP` (`LlamaInference.setupDraftContext`),
+    /// so llama.cpp builds only the model's nextn blocks and commits KV for
+    /// those alone — the main layers' attention is never run there (the MTP
+    /// block takes the target's hidden state as input).
+    ///
+    /// This replaced a plain "two caches" count, which charged the draft a
+    /// *second full cache*. The device log disproved that (2026-10-18, build
+    /// `698dbbf`): at 80,128 tokens the target context allocated 1,330.25 MiB
+    /// (80,128 × 17,408 B/token = 8 of 32 layers) and the draft context
+    /// 166.28 MiB (80,128 × 2,176 B/token = exactly **one** layer, this model's
+    /// `nextn_predict_layers = 1`). The 8x over-charge clamped a viable
+    /// 142,336-token context down to 80,128.
+    ///
+    /// The floor of one layer: `nextnLayers` comes from
+    /// `llama_model_n_layer_nextn`, and a model reporting none cannot be drafted
+    /// at all (`load_mtp` finds no `nextn.eh_proj` and the MTP graph aborts), so
+    /// a zero here is a mis-report and must never charge the draft cache nothing.
+    static func draftKVLayers(nextnLayers: Int, useMtp: Bool) -> Int {
+        guard useMtp else { return 0 }
+        return max(1, nextnLayers)
+    }
 
-    /// Largest 256-aligned context the KV budget can back, counting **every**
-    /// cache the engine allocates.
-    static func maxContextByMemory(kvBudgetBytes: Int, kvBytesPerToken: Int, cacheCount: Int) -> Int {
-        let perToken = max(1, kvBytesPerToken) * max(1, cacheCount)
-        return (kvBudgetBytes / perToken / 256) * 256
+    /// Total KV bytes per token the budget must back across **every** context on
+    /// the model: the target's own cache plus the draft context's nextn-layer
+    /// cache (`draftKVLayers`). Naming this separately is what keeps the charge
+    /// honest: budgeting one cache approved contexts the device could not back,
+    /// and budgeting two charged the draft eight times what it stores.
+    static func chargedKvBytesPerToken(targetKvBytesPerToken: Int,
+                                       draftKvBytesPerToken: Int) -> Int {
+        max(1, targetKvBytesPerToken) + max(0, draftKvBytesPerToken)
+    }
+
+    /// Largest 256-aligned context the KV budget can back at
+    /// `chargedBytesPerToken` — the sum across every context the engine
+    /// allocates, not one cache's cost and not a whole number of caches.
+    static func maxContextByMemory(kvBudgetBytes: Int, chargedBytesPerToken: Int) -> Int {
+        (kvBudgetBytes / max(1, chargedBytesPerToken) / 256) * 256
     }
 
     // MARK: Sizing

@@ -292,36 +292,78 @@ final class KVCacheSpecTests: XCTestCase {
             262_144)
     }
 
-    // MARK: - Every KV cache the engine allocates counts against the budget
+    // MARK: - Every context the engine allocates counts — at its real size
 
-    func testKvCacheCountFollowsMtp() {
-        // The MTP draft context is a second context on the same model with the
-        // same n_ctx (setupDraftContext), and llama.cpp commits its cache up
-        // front. Counting one approved contexts that cannot fit.
-        XCTAssertEqual(KVCacheSpec.kvCacheCount(useMtp: false), 1)
-        XCTAssertEqual(KVCacheSpec.kvCacheCount(useMtp: true), 2)
+    func testDraftKVLayersAreTheModelsNextnBlocks() {
+        // The draft context is typed LLAMA_CONTEXT_TYPE_MTP, so llama.cpp builds
+        // only the model's nextn blocks. The device log settled it (2026-10-18,
+        // build 698dbbf): at 80,128 tokens the target context allocated
+        // 1,330.25 MiB and the draft context 166.28 MiB — 2,176 B/token, exactly
+        // one of the target's eight layers (nextn_predict_layers = 1). A flat
+        // "second cache" charged the draft eight times what it stores.
+        XCTAssertEqual(KVCacheSpec.draftKVLayers(nextnLayers: 1, useMtp: true), 1)
+        XCTAssertEqual(KVCacheSpec.draftKVLayers(nextnLayers: 3, useMtp: true), 3)
+        XCTAssertEqual(KVCacheSpec.draftKVLayers(nextnLayers: 1, useMtp: false), 0,
+                       "no draft context exists without MTP")
+        // A model reporting no nextn block cannot be drafted at all (the MTP
+        // graph aborts), so a zero is a mis-report: the draft cache must never
+        // be charged nothing.
+        XCTAssertEqual(KVCacheSpec.draftKVLayers(nextnLayers: 0, useMtp: true), 1)
     }
 
-    func testMaxContextByMemoryCountsEveryCache() {
-        // The device's post-fix numbers: budget 8,721,686,208B − 2.78GB model −
-        // 320MB compute = 5,606,141,888B of KV budget at 17,408 B/token.
-        let kvBudget = 5_606_141_888
-        let perToken = 17_408
-        // One cache: 262,144 fits comfortably (321,792 possible).
+    func testChargedKvBytesPerTokenAddsTheDraftCacheOnly() {
+        // Device numbers: 8 KV layers x 4 heads x 256 dims at q8_0 = 17,408
+        // B/token for the target, 2,176 for the one-layer draft.
+        let target = KVCacheSpec.kvBytesPerToken(
+            nLayer: 8, headDimK: 256, headDimV: 256, nHeadKV: 4, type: .q8_0)
+        let draft = KVCacheSpec.kvBytesPerToken(
+            nLayer: 1, headDimK: 256, headDimV: 256, nHeadKV: 4, type: .q8_0)
+        XCTAssertEqual(target, 17_408)
+        XCTAssertEqual(draft, 2_176)
+        let charged = KVCacheSpec.chargedKvBytesPerToken(targetKvBytesPerToken: target,
+                                                         draftKvBytesPerToken: draft)
+        XCTAssertEqual(charged, 19_584)
+        // llama.cpp's own two buffers at 80,128 tokens: 1,330.25 + 166.28 MiB.
+        XCTAssertEqual(80_128 * charged, 1_569_226_752)
+        // MTP off adds nothing; a zero total would make the clamp unbounded.
+        XCTAssertEqual(KVCacheSpec.chargedKvBytesPerToken(targetKvBytesPerToken: target,
+                                                          draftKvBytesPerToken: 0), 17_408)
+        XCTAssertEqual(KVCacheSpec.chargedKvBytesPerToken(targetKvBytesPerToken: 0,
+                                                          draftKvBytesPerToken: 0), 1)
+    }
+
+    func testMaxContextByMemoryReclaimsTheDraftOverCharge() {
+        // The device's KV budget (log 2026-10-18, build 698dbbf): memory budget
+        // 5,905,580,032 − llama_model_size − 320 MiB compute ≈ 2.79 GB. Its
+        // logged clamp of 80,128 pins the exact value used here.
+        let kvBudget = 2_789_740_288
+        let target = 17_408
+        // The old charge — a second full cache — is why the request was clamped.
         XCTAssertEqual(
-            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget, kvBytesPerToken: perToken, cacheCount: 1),
-            321_792)
-        XCTAssertGreaterThanOrEqual(321_792, 262_144)
-        // Two caches (MTP): 262,144 cannot fit — 160,768 is the ceiling, so the
-        // request must be clamped and reported as memory-limited.
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget,
+                                           chargedBytesPerToken: target * 2),
+            80_128, "the old two-cache charge, i.e. the device's observed clamp")
+        // The real charge backs a 78% larger window from the same budget.
         XCTAssertEqual(
-            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget, kvBytesPerToken: perToken, cacheCount: 2),
-            160_768)
-        XCTAssertLessThan(160_768, 262_144)
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget,
+                                           chargedBytesPerToken: 19_584),
+            142_336, "target 17,408 + draft 2,176")
+        // MTP off: one cache, 160,256.
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget,
+                                           chargedBytesPerToken: target),
+            160_256)
+        // q4_0 KV shrinks both caches enough for the full 262,144 window.
+        let q4Charged = KVCacheSpec.chargedKvBytesPerToken(targetKvBytesPerToken: 9_216,
+                                                           draftKvBytesPerToken: 1_152)
+        XCTAssertGreaterThanOrEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: kvBudget,
+                                           chargedBytesPerToken: q4Charged),
+            262_144)
         // Alignment and degenerate inputs.
         XCTAssertEqual(
-            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 300, kvBytesPerToken: 1, cacheCount: 1), 256)
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 300, chargedBytesPerToken: 1), 256)
         XCTAssertEqual(
-            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 100, kvBytesPerToken: 1, cacheCount: 1), 0)
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: 100, chargedBytesPerToken: 1), 0)
     }
 }

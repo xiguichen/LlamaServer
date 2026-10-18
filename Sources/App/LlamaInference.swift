@@ -378,23 +378,38 @@ final class LlamaInference: @unchecked Sendable {
             longContext: requestedYarnLongContext)
 
         let kvBudget = budget - modelSize - computeReserve
-        let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken), countStyle: .memory)
+        // Every context on this model holds its OWN cache, but they are not the
+        // same size: the MTP draft context is typed LLAMA_CONTEXT_TYPE_MTP
+        // (setupDraftContext), so llama.cpp builds only the model's nextn blocks
+        // and commits KV for those alone. Device log 2026-10-18 (build
+        // 698dbbf): at 80,128 tokens the target cache was 1,330.25 MiB and the
+        // draft's 166.28 MiB — 2,176 B/token, exactly one of the target's eight
+        // layers. Charging the draft a second *full* cache clamped a viable
+        // 142,336 tokens down to 80,128.
+        let draftLayers = KVCacheSpec.draftKVLayers(
+            nextnLayers: Int(llama_model_n_layer_nextn(loadedModel)), useMtp: useMtp)
+        let draftBytesPerToken = KVCacheSpec.kvBytesPerToken(
+            nLayer: draftLayers, headDimK: headDimK, headDimV: headDimV,
+            nHeadKV: nHeadKV, type: resolvedKV)
+        let chargedBytesPerToken = KVCacheSpec.chargedKvBytesPerToken(
+            targetKvBytesPerToken: kvBytesPerToken, draftKvBytesPerToken: draftBytesPerToken)
+        // The log must show what the clamp charged, not just the total: e.g.
+        // "17408 target + 2176 draft x1 nextn". A number that can't be checked
+        // against llama.cpp's own buffer sizes is how the 8x over-charge hid.
+        let chargeDesc = draftLayers > 0
+            ? "\(kvBytesPerToken) target + \(draftBytesPerToken) draft x\(draftLayers) nextn"
+            : "\(kvBytesPerToken)"
+        let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(chargedBytesPerToken), countStyle: .memory)
         let kvBudgetStr = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
-        // Every context on this model holds its OWN KV cache, and the MTP path
-        // creates a second one with the same n_ctx (setupDraftContext) whose
-        // memory is committed up front. Budgeting a single cache approved
-        // contexts the device cannot back: 131,072 with MTP on is 2 × 2.18GB,
-        // not 2.18GB.
-        let kvCacheCount = KVCacheSpec.kvCacheCount(useMtp: useMtp)
-        if kvBudget < kvBytesPerToken * kvCacheCount * 256 {
+        if kvBudget < chargedBytesPerToken * 256 {
             llama_model_free(loadedModel)
             throw InferenceError.insufficientMemory(
-                "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token ×\(kvCacheCount), only \(kvBudgetStr) available). Close other apps or reduce context size.")
+                "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token across every context [\(chargeDesc)], only \(kvBudgetStr) available). Close other apps or reduce context size.")
         }
         let maxCtxByMemory = KVCacheSpec.maxContextByMemory(
-            kvBudgetBytes: kvBudget, kvBytesPerToken: kvBytesPerToken, cacheCount: kvCacheCount)
+            kvBudgetBytes: kvBudget, chargedBytesPerToken: chargedBytesPerToken)
         if effective > maxCtxByMemory {
-            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(kvTokenSize)/token ×\(kvCacheCount)); reducing to \(maxCtxByMemory)")
+            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr), \(chargedBytesPerToken) B/token charged [\(chargeDesc)]); reducing to \(maxCtxByMemory)")
         }
         // Classify the reduction *before* applying the memory clamp: `effective`
         // here is already the window/ceiling cap, so the pair (windowCap,
@@ -414,7 +429,7 @@ final class LlamaInference: @unchecked Sendable {
             let yarnDesc = requestedYarnLongContext
                 ? "on (x\(KVCacheSpec.yarnFactor(forContext: effective)), orig \(KVCacheSpec.yarnOrigCtx))" : "off"
             FileLogger.shared.info(
-                "KV cache \(resolvedKV.rawValue) (\(kvBytesPerToken) B/token), \(kvCacheCount) cache\(kvCacheCount == 1 ? "" : "s"), kv layers \(kvLayers)/\(nLayer), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
+                "KV cache \(resolvedKV.rawValue) (\(chargedBytesPerToken) B/token charged [\(chargeDesc)]), kv layers \(kvLayers)/\(nLayer), YaRN long-context \(yarnDesc), head_dim K=\(headDimK) V=\(headDimV)")
         }
 
         // Physical micro-batch (n_ubatch) drives prefill GPU parallelism. The
@@ -425,10 +440,11 @@ final class LlamaInference: @unchecked Sendable {
         // launches (the Metal backend hadn't finished its async shader-set
         // init); `prewarmMetal` now runs a tiny decode first so that init has
         // completed before we build the large context.
-        // Slack still has to cover every cache the engine allocates (MTP adds a
-        // second one), or "fast prefill" would be chosen on memory that the
-        // draft context is about to consume.
-        let kvSlack = kvBudget - kvBytesPerToken * kvCacheCount * effective
+        // Slack still has to cover every context the engine allocates — the MTP
+        // draft context's cache is smaller than the target's, but it is not
+        // free (chargedBytesPerToken sums both) — or "fast prefill" would be
+        // chosen on memory the draft context is about to consume.
+        let kvSlack = kvBudget - chargedBytesPerToken * effective
         let fastPrefill = kvSlack > KVCacheSpec.ubatchSlackBytes
         self.batchSize = min(effective, KVCacheSpec.ubatchSize(contextSize: effective,
                                                                 kvSlackBytes: kvSlack))
@@ -522,7 +538,7 @@ final class LlamaInference: @unchecked Sendable {
         FileLogger.shared.info("creating context (\(effective) tokens, batch \(batchSize) [fast prefill \(fastPrefill), kv slack \(kvSlack / (1024 * 1024)) MB], swa_window \(nSwa), swa_full on, mtp=\(wantMtp)) for '\(self.modelName)'")
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
-            let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(kvBytesPerToken * effective), countStyle: .memory)
+            let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(chargedBytesPerToken * effective), countStyle: .memory)
             let compMem = ByteCountFormatter.string(fromByteCount: Int64(computeReserve), countStyle: .memory)
             let avail = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
             llama_model_free(loadedModel)

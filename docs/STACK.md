@@ -114,8 +114,12 @@ The whole engine runs in-process: `import llama`, no separate server binary.
      text (`ToolCallParser`) rather than rendered by the template.
   2. `ctx_other` is dropped for non-Gemma4 architectures, so the MTP draft
      context has **its own memory**: the prompt must be mirrored into it, and
-     its KV cache is a real allocation that the memory budget has to count
-     (`KVCacheSpec.kvCacheCount`).
+     its KV cache is a real allocation the memory budget has to count — but at
+     its own size. The draft context is typed `LLAMA_CONTEXT_TYPE_MTP`, so
+     llama.cpp builds only the model's nextn blocks
+     (`llama_model_n_layer_nextn`): measured on device, its cache is one layer
+     (2,176 B/token on the 4B model), not a second full cache
+     (`KVCacheSpec.chargedKvBytesPerToken`).
 
 ### Telegraph — the HTTP server
 

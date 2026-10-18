@@ -9,8 +9,9 @@ import Foundation
 ///
 /// 1. iOS jetsam-kills (SIGKILL, uncatchable) any process whose footprint
 ///    exceeds its *per-process* limit, which is well below total RAM (on the
-///    12.26GB test device the allowance is ~9GB). Budgeting against physical
-///    RAM plans memory the process can never hold.
+///    12.26GB test device the measured allowance is 6.44GB — exactly 6GiB, see
+///    below). Budgeting against physical RAM plans memory the process can
+///    never hold.
 /// 2. `os_proc_available_memory()` reports **headroom, not the ceiling** — it
 ///    subtracts the caller's current footprint, so the ceiling is
 ///    `available + footprint`, capped at physical. `available == 0` means the
@@ -27,12 +28,25 @@ import Foundation
 /// and it is reported as a fallback so it can never be mistaken for a
 /// measurement.
 ///
-/// Why one reading is not enough: the allowance is not at its final value when
-/// the process starts. Same process, same launch (2026-10-18 16:53):
-/// 6.35GB available + a 92.1MB footprint → a 6.44GB ceiling at the end of
-/// backend init, then 4.16GB available + 4.58GB rss → ~8.74GiB once the model
-/// was loaded. A reading taken only at init samples the smallest ceiling the
-/// process will ever see.
+/// Why one reading is not enough: the allowance can rise as the process
+/// settles, so the earliest sample can be the smallest — that is why every
+/// reading is taken and the largest wins. The evidence once offered for a
+/// rising allowance was a bad sum, though: `4.16GB available + 4.58GB rss →
+/// ~8.74GiB` added **rss**, which is not the ceiling operand. Three clean
+/// samples of 2026-10-18 (build `698dbbf`) all give the same ceiling —
+/// 6,352,271,400 + 90,179,544 at init, 6,288,683,008 + 153,767,936 after the
+/// model load, 4,576,193,192 + 1,866,257,752 idle with both contexts live;
+/// each sum is exactly 6,442,450,944B (6GiB) — so on this device the policy has
+/// nothing to choose between, and the ceiling to plan against is 6GiB, ~52.5%
+/// of physical 12,263,424,000B. That is not the ~9GB class the entitlement is
+/// supposed to add; whether 6GiB is this device's entitled value or its
+/// un-entitled half-of-physical is not observable from inside the app.
+///
+/// What the ceiling does *not* cover is just as important as what it does: the
+/// model's mmap (loading a 2.78GB model moved the footprint by 63.6MB) and the
+/// Metal compute buffers (1.23GB of `sched_reserve` buffer lines, private
+/// storage) are outside it. A KV budget derived from this ceiling is therefore
+/// a **bound on what to attempt**, not a measurement of the engine's total.
 struct MemoryBudget {
 
     /// Transient headroom held back from the budget: request buffers,
@@ -57,9 +71,10 @@ struct MemoryBudget {
     /// Reconstructs the per-process ceiling from one reading.
     ///
     /// The API returns `ceiling − footprint`, so the ceiling is the sum. This is
-    /// where the increased-memory-limit entitlement shows up: the same API
-    /// returns ~half-of-physical-class readings on an un-entitled install and
-    /// the ~9GB class on this entitled one.
+    /// where the increased-memory-limit entitlement would show up, as a larger
+    /// sum; on this install every sample sums to 6GiB (~52.5% of physical), the
+    /// half-of-physical class, so the uplift is not in evidence — see the type
+    /// comment for the three measured samples.
     ///
     /// - Parameters:
     ///   - physicalRAM: total physical memory (`ProcessInfo.physicalMemory`).
