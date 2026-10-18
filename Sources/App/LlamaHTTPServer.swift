@@ -336,6 +336,25 @@ final class LlamaHTTPServer {
         }
         server.route(.GET, "logs", logs)
         server.route(.GET, "v1/logs", logs)
+
+        // Self-upgrade: a LAN client can push the CI-built IPA onto the phone,
+        // then the user taps it in the Files app and AltStore installs it in
+        // place — no cable, no AirDrop, no AltServer. Same listener as
+        // inference on purpose (no second port, no second permission prompt, no
+        // server that is down exactly when the build is broken), which also
+        // means the routes exist only while a model is loaded. `UpdateSpec` owns
+        // the contract, `UpdateStore` the files.
+        let updates: (HTTPRequest) -> HTTPResponse = { [weak self] _ in
+            self?.updatesResponse() ?? HTTPResponse(.internalServerError)
+        }
+        server.route(.GET, "updates", updates)
+        server.route(.GET, "v1/updates", updates)
+
+        let upload: (HTTPRequest) -> HTTPResponse = { [weak self] request in
+            self?.uploadIPAResponse(request: request) ?? HTTPResponse(.internalServerError)
+        }
+        server.route(.PUT, "updates/ipa", upload)
+        server.route(.PUT, "v1/updates/ipa", upload)
     }
 
     private func modelsResponse() -> HTTPResponse {
@@ -374,6 +393,99 @@ final class LlamaHTTPServer {
                 "Access-Control-Allow-Origin": "*"
             ], body: body)
         }
+    }
+
+    // MARK: - Self-upgrade (`UpdateSpec` contract, `UpdateStore` files)
+
+    /// `Documents/` — the container the Files app shows (`UIFileSharingEnabled` +
+    /// `LSSupportsOpeningDocumentsInPlace`, project.yml), so `updates/` lands
+    /// somewhere the user can tap the `.ipa` from.
+    private var documentsPath: String {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+    }
+
+    /// Serializes uploads against each other (a retry overlapping a re-run).
+    /// Deliberately *not* the inference queue: an upload must not wait for a
+    /// generation, and a generation must not wait for a multi-MB write.
+    private static let uploadLock = OSAllocatedUnfairLock()
+
+    /// `GET /v1/updates` — what is stored on the phone right now.
+    private func updatesResponse() -> HTTPResponse {
+        let status = UpdateStore(documentsPath: documentsPath).status()
+        FileLogger.shared.info("GET /v1/updates current=\(Self.slotLog(status.current)) "
+            + "previous=\(Self.slotLog(status.previous)) "
+            + "uploaded=\(status.uploadedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "unknown")")
+        return updateResponse(status, statusCode: .ok)
+    }
+
+    /// `PUT /v1/updates/ipa?build=<sha>` — store the body as the current IPA,
+    /// rotating the build it replaces into the `.prev` slot.
+    ///
+    /// The order is the requirement, not a detail: validate first (a refused
+    /// upload touches nothing), then rotate, then write atomically — see
+    /// `UpdateStore` for why.
+    private func uploadIPAResponse(request: HTTPRequest) -> HTTPResponse {
+        let requestedBuild = UpdateSpec.build(fromQueryItems: request.uri.queryItems ?? [])
+        if let rejection = UpdateSpec.rejection(build: requestedBuild, body: request.body) {
+            FileLogger.shared.warn("PUT /v1/updates/ipa refused: \(rejection.message) "
+                + "(body \(request.body.count) bytes)")
+            return errorResponse(rejection.message, status: httpStatus(for: rejection))
+        }
+        // Unreachable: `rejection` already refused a missing/blank build. Kept
+        // because the type system needs the unwrap, and a force-unwrap would
+        // crash the server the day someone loosens that guard.
+        guard let build = requestedBuild else {
+            return errorResponse(UpdateSpec.Rejection.missingBuild.message, status: .badRequest)
+        }
+
+        let store = UpdateStore(documentsPath: documentsPath)
+        let replacedBytes = store.status().current.bytes
+        do {
+            try Self.uploadLock.withLock {
+                try store.store(body: request.body, build: build)
+            }
+        } catch {
+            FileLogger.shared.error("PUT /v1/updates/ipa failed (\(request.body.count) bytes, "
+                + "build \(build)): \(error)")
+            return errorResponse("could not store the IPA: \(error.localizedDescription)",
+                                 status: .internalServerError)
+        }
+
+        let status = store.status()
+        FileLogger.shared.info("PUT /v1/updates/ipa build=\(build) \(request.body.count) bytes -> "
+            + "\(UpdateSpec.currentFileName) (replaced "
+            + "\(replacedBytes.map { "\($0) bytes" } ?? "nothing")"
+            + "\(status.previous.present ? ", rollback kept" : ""))")
+        return updateResponse(status, statusCode: .created)
+    }
+
+    /// A refusal's status code: over the cap is 413, the rest are malformed
+    /// requests. (The spec carries the reason only — the tests target cannot see
+    /// Telegraph's `HTTPStatus`.)
+    private func httpStatus(for rejection: UpdateSpec.Rejection) -> HTTPStatus {
+        switch rejection {
+        case .tooLarge: return .payloadTooLarge
+        case .missingBuild, .notAnIPA: return .badRequest
+        }
+    }
+
+    /// The update routes' own encoder: `UpdateSpec.encode` writes ISO-8601 dates,
+    /// where `json(encodable:)` would render the same dates as
+    /// seconds-since-2001 doubles — disagreeing with the `latest.json` on disk.
+    private func updateResponse(_ status: UpdateSpec.Status, statusCode: HTTPStatus) -> HTTPResponse {
+        guard let data = try? UpdateSpec.encode(status) else {
+            return HTTPResponse(.internalServerError)
+        }
+        return HTTPResponse(statusCode, headers: [
+            "Content-Type": "application/json",
+            "Content-Length": "\(data.count)",
+            "Access-Control-Allow-Origin": "*"
+        ], body: data)
+    }
+
+    private static func slotLog(_ slot: UpdateSpec.Status.Slot) -> String {
+        guard slot.present else { return "none" }
+        return "\(slot.fileName) \(slot.bytes ?? 0)B build=\(slot.build ?? "unknown")"
     }
 
     /// Reject request bodies larger than this to avoid a memory-spike crash.
