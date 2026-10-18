@@ -139,6 +139,27 @@ round (on) versus the per-step wall (off).
 - Net for the pi agent loop (2–3k-token delta prefill + 200–500 generated tokens
   at ~35k context) the two roughly cancel: ~1.7 s lost on prefill, ~1.7 s
   gained on generation. MTP helps long generations; it hurts cold prompts.
+- The MTP-off run was the only one to reach the long end: 44,252 → 11.47 t/s,
+  52,961 → 10.32, and the top turns at ~53k → 9.82 / 10.41 / 9.69 t/s
+  (`gpu-wait` 80–97 ms/step).
+
+**Thermal bracket (second MTP-on run, 2026-10-18 14:56).** The first pair ran
+14:06 vs 14:28, so a re-run of the identical first five turns checks how much of
+the difference was drift. Both runs then sat right after a fresh app start:
+
+| context | MTP on t/s | off t/s | on/off | MTP on prefill t/s | off prefill t/s | on/off |
+|---|---|---|---|---|---|---|
+| 43 | 28.36 | 22.19 | 1.28 | — | — | — |
+| 164 | 24.49 | 22.03 | 1.11 | 368.1 | 364.3 | 1.01 |
+| 294 | 24.25 | 21.90 | 1.11 | 259.4 | 261.0 | 0.99 |
+| 8,864 | 22.64 | 19.75 | 1.15 | 363.0 | 375.8 | **0.97** |
+| 17,711 | 18.99 | 16.33 | 1.16 | 283.4 | 295.5 | **0.96** |
+
+The bracket moves *both* numbers: the first MTP-on run was ~5% down on
+everything (it followed a long session), so the honest read is **generation
++11–16%, prefill −4%**. The prefill penalty is real but about half what the
+first pair suggested, and the generation win is larger. Same byte-identical
+text and the same flat 2.03 tokens/round.
 
 The paired numbers supersede the earlier unpaired note in the repo
 (`MTP-on 18.3/17.5` vs `off 19.9/19.7` t/s, context unrecorded), which had
