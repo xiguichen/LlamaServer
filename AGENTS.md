@@ -1,5 +1,9 @@
 # LlamaServer — compact reference for agents
 
+**The models and frameworks this server rests on — with the upstream links to
+read (model card, llama.cpp, Telegraph, XcodeGen), how pi discovers the docs,
+and how to point a client at the server: [`docs/STACK.md`](docs/STACK.md).**
+
 ## Build & test (CI only)
 
 No local Xcode required. Everything runs in GitHub Actions:

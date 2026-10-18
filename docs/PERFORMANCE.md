@@ -17,6 +17,7 @@ measured; do not replace a measurement with a theory.
 | Device | A19 Pro GPU (`ggml_metal_init: picking default device: Apple A19 Pro GPU`) |
 | Build | `llamaserver-470957a` (every response carries `system_fingerprint`) |
 | Model | `Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf` (4B, Q4_K_M) |
+| Model source | [Jackrong/Qwopus3.5-4B-Coder-MTP-GGUF](https://huggingface.co/Jackrong/Qwopus3.5-4B-Coder-MTP-GGUF), base [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) — see [`STACK.md`](STACK.md) |
 | Context | 131,072 tokens (hybrid SSM+attention, `can_shift=false`) |
 | KV cache | q8_0, **17,408 B/token**, 8 of 32 layers, head_dim K=256 V=256 |
 | Long context | YaRN x4.0 (`orig 32768`) |
