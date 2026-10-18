@@ -30,17 +30,15 @@ import Foundation
 ///
 /// Why one reading is not enough: the allowance can rise as the process
 /// settles, so the earliest sample can be the smallest — that is why every
-/// reading is taken and the largest wins. The evidence once offered for a
-/// rising allowance was a bad sum, though: `4.16GB available + 4.58GB rss →
-/// ~8.74GiB` added **rss**, which is not the ceiling operand. Three clean
-/// samples of 2026-10-18 (build `698dbbf`) all give the same ceiling —
-/// 6,352,271,400 + 90,179,544 at init, 6,288,683,008 + 153,767,936 after the
-/// model load, 4,576,193,192 + 1,866,257,752 idle with both contexts live;
-/// each sum is exactly 6,442,450,944B (6GiB) — so on this device the policy has
-/// nothing to choose between, and the ceiling to plan against is 6GiB, ~52.5%
-/// of physical 12,263,424,000B. That is not the ~9GB class the entitlement is
-/// supposed to add; whether 6GiB is this device's entitled value or its
-/// un-entitled half-of-physical is not observable from inside the app.
+/// reading is taken and the largest wins. Three clean samples of 2026-10-18
+/// (build `698dbbf`) all give the *same* ceiling — 6,352,271,400 + 90,179,544
+/// at init, 6,288,683,008 + 153,767,936 after the model load, 4,576,193,192 +
+/// 1,866,257,752 idle with both contexts live; each sum is exactly
+/// 6,442,450,944B (6GiB) — so here the policy has nothing to choose between.
+/// 6GiB is the **entitled** class (`project.yml`: ~3.3GB un-entitled → ~6GB+
+/// entitled), so the uplift is working. What is *not* real is the ~9GB class
+/// these notes used to claim: that came from adding `available` to a 4.58GB
+/// reading recorded as **rss**, and rss is not the ceiling operand.
 ///
 /// What the ceiling does *not* cover is just as important as what it does: the
 /// model's mmap (loading a 2.78GB model moved the footprint by 63.6MB) and the
@@ -71,10 +69,10 @@ struct MemoryBudget {
     /// Reconstructs the per-process ceiling from one reading.
     ///
     /// The API returns `ceiling − footprint`, so the ceiling is the sum. This is
-    /// where the increased-memory-limit entitlement would show up, as a larger
-    /// sum; on this install every sample sums to 6GiB (~52.5% of physical), the
-    /// half-of-physical class, so the uplift is not in evidence — see the type
-    /// comment for the three measured samples.
+    /// where the increased-memory-limit entitlement shows up, as a larger sum:
+    /// on this install every sample of 2026-10-18 sums to 6,442,450,944B (6GiB),
+    /// the ~6GB+ entitled class the entitlement is documented to grant (the
+    /// un-entitled limit is ~3.3GB) — see the type comment for the samples.
     ///
     /// - Parameters:
     ///   - physicalRAM: total physical memory (`ProcessInfo.physicalMemory`).
