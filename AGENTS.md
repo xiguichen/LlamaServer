@@ -30,6 +30,7 @@ The app runs on device, so behaviour is diagnosed from its logs — there is no 
 - **The in-app panel is not the log.** It renders basic (error/warn/info) lines only, capped and truncated (`LogPanelSpec`); the three on-disk files are authoritative.
 - **Prompt/response payloads are opt-in**: they land in the payloads file only while "log prompt & response content" is enabled (which needs log level *Verbose*). Missing prompts are a toggle, not a bug.
 - **On-device compliance** is the `llm-compliance-test` skill (runs `llm-comply openai-chat` against a deployed build).
+- **Deploying a new build is a LAN push, not a cable**: `scripts/upload-ipa.sh --url http://<device>:8443` downloads the latest green `build.yml` artifact with `gh` and `PUT`s it to `GET|PUT /v1/updates[/ipa?build=<sha>]`; the app stores it in `Documents/updates/` (`LlamaServer-unsigned.ipa`, rotated `LlamaServer-unsigned.prev.ipa`, `latest.json`), the user taps the `.ipa` in Files, and AltStore installs it in place (models survive). Runbook: the `upload-ipa` skill. Three things to hold onto: the build id lives in `latest.json`/the log and **not** in the file name (Files sorts by name, so a hash-suffixed name hides the newest build); the routes exist **only while a model is loaded** (they ride the inference listener — no second port, no second permission prompt), so a build that cannot start a model cannot be replaced this way, and the escape hatch is picking a smaller model in the UI; and validation (`UpdateSpec.rejection`) runs before any filesystem call, so a refused upload — no `?build=`, over the 128 MB cap, no zip header — leaves both slots untouched. The cap is best-effort (Telegraph buffers the whole body before the handler runs; the real IPA is ~4 MB), and uploads are serialized by their own lock, never the inference queue.
 
 ## Performance
 
@@ -70,6 +71,8 @@ Headline numbers (A19 Pro, 4B Q4_K_M, ctx 131072, KV q8_0, MTP depth 1, build `4
 | `Sources/App/LogRouter.swift` | Pure routing: which file (server/inference/payloads) a line lands in, from its level + `#file` |
 | `Sources/App/LogPanelSpec.swift` | Pure panel budget: basic-only filter (error/warn/info), line-count cap, per-line truncation |
 | `Sources/App/LogFetchSpec.swift` | Pure `GET /logs` contract: which files, how much of each, text vs JSON |
+| `Sources/App/UpdateSpec.swift` | Pure self-upgrade contract: `Documents/updates/` paths, `?build=` parsing, the upload guards (missing build / 128 MB cap / zip header), `latest.json` + `GET /v1/updates` JSON shapes |
+| `Sources/App/UpdateStore.swift` | The upload's filesystem half: rotate current → `.prev`, write the body atomically, record the build; Foundation-only so the rotation is unit-tested |
 | `Sources/App/StartupTimer.swift` | Pure startup-phase accumulator: records named phases + durations, formats the load-gap breakdown line (`load phases:` / `Startup gap:`) |
 | `Sources/App/PrefillStats.swift` | Pure `prefill=` segment of the `generated N tokens` line: rate over **decoded** tokens + the `(X of Y, Z reused)` split |
 
@@ -108,7 +111,7 @@ Headline numbers (A19 Pro, 4B Q4_K_M, ctx 131072, KV q8_0, MTP depth 1, build `4
 
 ## Tests
 
-- Pure-logic specs are unit-tested in `Tests/LlamaServerTests/` — e.g. `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines), `ToolPromptTests` (tool-instruction wording and injection), `ThinkingSwitchTests` (the thinking-off block against each renderer tail), `LogFetchSpecTests` (the `GET /logs` contract), `LogRoutingTests` (log-file routing + panel budget) and `PrefillStatsTests` (the `prefill=` rate over decoded tokens, not the full prompt).
+- Pure-logic specs are unit-tested in `Tests/LlamaServerTests/` — e.g. `OpenAIModelsTests` (JSON decode/encode round-trips, model parsing), `ToolCallParserTests` (regex parsing, think-block stripping, `ReasoningStreamFilter`/`ToolStreamFilter` state machines), `ToolPromptTests` (tool-instruction wording and injection), `ThinkingSwitchTests` (the thinking-off block against each renderer tail), `LogFetchSpecTests` (the `GET /logs` contract), `LogRoutingTests` (log-file routing + panel budget) and `PrefillStatsTests` (the `prefill=` rate over decoded tokens, not the full prompt). The self-upgrade surface is split the same way: `UpdateSpecTests` (paths, `?build=` parsing, the refusal guards and their messages, ISO-8601 metadata round-trip, status JSON) and `UpdateStoreTests` (directory creation, the `.prev` rotation, a file dropped in by hand, corrupt metadata, a store that cannot write).
 - All are pure Swift — no model file, no inference. They run on simulator in CI.
 - Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
 

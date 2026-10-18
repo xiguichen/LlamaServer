@@ -40,6 +40,8 @@ The UI "Start/Stop" controls loading the model + starting/stopping that embedded
 | POST   | `/v1/chat/completions`  | OpenAI chat completion (streaming + non-streaming) |
 | POST   | `/v1/completions`       | OpenAI text completion (raw prompt, no chat template) |
 | GET    | `/logs`                 | The on-device log files, for troubleshooting (see below) |
+| GET    | `/v1/updates`           | Which IPA builds are stored on the phone, and when |
+| PUT    | `/v1/updates/ipa`       | Store the request body as the current build (`?build=<sha>`) |
 
 Example from another machine on the network:
 
@@ -81,6 +83,36 @@ Notes for whoever reads this at 2 a.m.:
   hold, so anyone on the LAN can read it. With payload logging on, that includes
   your prompts. Only expose the server on a network you trust (see [Caveats](#caveats)).
 
+### Pushing a new build onto the phone
+
+The same server that hands out logs can take a new build in: it stores the uploaded
+IPA in its Documents directory (`updates/`), which the Files app shows, so you can
+install it by tapping it — no cable, no AirDrop, no re-download from a Mac.
+
+```bash
+scripts/upload-ipa.sh --url http://<iphone-ip>:8443                      # latest green CI build
+scripts/upload-ipa.sh --url http://<iphone-ip>:8443 --file path/to.ipa   # a local build
+```
+
+The script downloads the `LlamaServer-unsigned-ipa` artifact with `gh`, checks it is
+a real IPA, and PUTs it. Then, on the phone:
+
+1. **Files → On My iPhone → LlamaServer → updates**.
+2. Tap **`LlamaServer-unsigned.ipa`** → AltStore installs it **in place**, so your
+   models stay.
+
+Details worth knowing:
+
+- **The build id is not in the file name.** Files sorts by name, so the newest build
+  always sits at `LlamaServer-unsigned.ipa`; `GET /v1/updates` (and `latest.json` on
+  the phone) tell you which build that is.
+- **One rollback slot.** Each upload rotates the build it replaces to
+  `LlamaServer-unsigned.prev.ipa` — tap that one to go back.
+- **These routes exist only while the server runs**, and the server only starts
+  after a model loads. If a build will not start a model, this path cannot reach the
+  phone; install once over a cable/AltStore instead.
+- **No auth, 128 MB cap** — same trust model as the rest of the API.
+
 ---
 
 ## Repository layout
@@ -101,6 +133,7 @@ Sources/App/
 scripts/
   fetch-llama-xcframework.sh      Downloads official prebuilt llama.xcframework -> vendor/
   package-ipa.sh                  Wraps the .app into an unsigned .ipa
+  upload-ipa.sh                   Pushes the latest CI .ipa onto the phone (Files -> tap -> AltStore)
 .github/workflows/build.yml       CI: build -> unsigned .ipa artifact
 ```
 
