@@ -157,11 +157,23 @@ echo
 
 cat <<'EOS'
 
-==> Install it:
+==> Install it (the one manual step):
   1. Open Files on the iPhone.
   2. On My iPhone -> LlamaServer -> updates -> tap LlamaServer-unsigned.ipa
-  3. AltStore offers to install it, in place (your models stay).
+  3. AltStore imports the file, re-signs it, and installs it over the current build.
 
-  The build this replaces is kept as LlamaServer-unsigned.prev.ipa, so a build
-  that turns out to be broken on device is one tap away from being restored.
+  Why the .ipa can sit inside the app it replaces (AltStore source, not a guess):
+  - No uninstall is involved. AltStore's sideload path installs *over* the existing
+    app -- there is no "remove the app first" step -- and an in-place upgrade keeps
+    the data container, so the .ipa inside it is still there afterwards.
+  - AltStore reads the file *before* anything is replaced: it unzips the .ipa into
+    its own temp directory first and installs from that copy.
+  - It then deletes the file it was handed (its unzip step defers
+    `removeItem(at: fileURL)`), so this copy is a one-shot delivery, not a backup.
+    LlamaServer-unsigned.prev.ipa is a *different* file and is untouched, which is
+    what keeps rollback one tap.
+
+  A delete-first install only comes from a signing-team mismatch (the installed app
+  signed by another Apple ID), not from AltStore's normal path. If AltStore ever
+  asks to delete the app, that would take the container with it -- stop and say so.
 EOS

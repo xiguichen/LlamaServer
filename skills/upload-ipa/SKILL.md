@@ -17,7 +17,8 @@ The app serves two routes on **the same HTTP listener as inference**:
 An uploaded IPA lands in `Documents/updates/` inside the app container, which
 `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` (project.yml) expose in
 the **Files** app. The flow is: script pushes → user opens Files → taps the `.ipa` →
-AltStore installs it **in place** (the container, and therefore your models, survive).
+AltStore installs it **in place** — no uninstall, so the container and everything in
+it except the file AltStore was handed survive (it deletes that one; see *The Tap*).
 No cable, no AirDrop, no AltServer, no Files-app shuffle from a Mac.
 
 Running it is one command:
@@ -112,11 +113,18 @@ curl -s 'http://<iphone-ip>:8443/logs?name=server&tail=40' | grep updates
 1. Open **Files** on the iPhone.
 2. **On My iPhone → LlamaServer → updates**.
 3. Tap **`LlamaServer-unsigned.ipa`** → AltStore offers to install it.
-4. The install is **in place**: the container is preserved, so models, logs and the
-   stored IPAs stay.
+4. The install is **in place**: AltStore's sideload path installs *over* the existing
+   app and never uninstalls it, so the data container (models, logs, the `.prev`
+   slot) is preserved.
+5. AltStore **deletes the file it was handed** — its unzip step runs
+   `defer { removeItem(at: fileURL) }` — so the `current` slot is consumed by the
+   install: a one-shot delivery, not a backup. The `.prev` slot is a different file
+   and is untouched, which is why rollback stays one tap.
 
 > An uninstall (not an upgrade) deletes the whole container — models, logs and the
-> stored IPA go with it. iOS gives the app no way around that.
+> stored IPA go with it. iOS gives the app no way around that. AltStore's sideload
+> path never uninstalls; a delete-first install only comes from a signing
+> identity/team mismatch (the installed app signed by another Apple ID).
 
 ## Rollback
 
