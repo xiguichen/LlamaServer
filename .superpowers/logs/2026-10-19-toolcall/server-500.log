@@ -1,0 +1,121 @@
+===== llamaserver.log — 120 lines, 14195 bytes, last 120 lines =====
+[2026-10-19 20:29:36.787] [DEBUG  ] [heartbeat] total=11695MB available=3336644496B(3182MB) footprint=3105806448B(2961MB) rss=168MB
+[2026-10-19 20:29:46.104] [DEBUG  ] [heartbeat] total=11695MB available=3329058704B(3174MB) footprint=3113392240B(2969MB) rss=185MB
+[2026-10-19 20:29:56.104] [DEBUG  ] [heartbeat] total=11695MB available=3321505680B(3167MB) footprint=3120945264B(2976MB) rss=198MB
+[2026-10-19 20:30:06.104] [DEBUG  ] [heartbeat] total=11695MB available=3314968464B(3161MB) footprint=3127482480B(2982MB) rss=209MB
+[2026-10-19 20:30:16.104] [DEBUG  ] [heartbeat] total=11695MB available=3308398480B(3155MB) footprint=3134052464B(2988MB) rss=216MB
+[2026-10-19 20:30:22.345] [DEBUG  ] streaming #1: generated 1 tokens so far
+[2026-10-19 20:30:23.382] [INFO   ] streaming #1: generation done, 16 tokens, finish=eog
+[2026-10-19 20:30:23.382] [DEBUG  ] streaming #1: tools active, parsing tool calls
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: content already streamed during generation
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: finish_reason chunk sent (stop)
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: usage chunk sent
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: stream summary — finish_reason_sent=true didDisconnect=false genTokens=16
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: [DONE] sent
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: closing connection
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: stream ended (total active: 0, recreate count: 1)
+[2026-10-19 20:30:26.106] [DEBUG  ] [heartbeat] total=11695MB available=3304335224B(3151MB) footprint=3138115720B(2992MB) rss=634MB
+[2026-10-19 20:30:36.107] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:30:46.108] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:30:56.108] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:31:06.857] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:36.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:46.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:56.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:32:06.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:32:08.339] [INFO   ] GET /logs name=payloads tail=1200 backups=true -> llamaserver-payloads.log:1200 lines
+[2026-10-19 20:32:08.450] [INFO   ] GET /logs name=server tail=1200 backups=true -> llamaserver.log:1200 lines
+[2026-10-19 20:32:08.557] [INFO   ] GET /logs name=inference tail=1200 backups=true -> llamaserver-inference.log:1200 lines
+[2026-10-19 20:32:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=643MB
+[2026-10-19 20:32:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:36.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:46.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:56.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:06.183] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:51.074] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 20:33:51.074] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 20:33:51.074] [DEBUG  ] streaming #2: connection OPENED (total active: 1)
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming chat request #2: total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: SSE headers sent, token count=4
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: role chunk sent
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: keep-alive timer started
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: async block started (queue wait ended)
+[2026-10-19 20:33:51.079] [INFO   ] streaming #2: prompt built (86446 chars), starting generation
+[2026-10-19 20:33:51.079] [DEBUG  ] streaming #2: thinking=true
+[2026-10-19 20:33:53.590] [INFO   ] streaming #2: generation done, 35 tokens, finish=eog
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: tools active, parsing tool calls
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: content already streamed during generation
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: finish_reason chunk sent (stop)
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: usage chunk sent
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: stream summary — finish_reason_sent=true didDisconnect=false genTokens=35
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: [DONE] sent
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: closing connection
+[2026-10-19 20:33:53.591] [DEBUG  ] streaming #2: stream ended (total active: 0, recreate count: 2)
+[2026-10-19 20:33:53.611] [INFO   ] chat/completions body.stream=false tools=1
+[2026-10-19 20:33:53.614] [DEBUG  ] chat request #3: total=11695MB available=3275384696B(3123MB) footprint=3167066248B(3020MB) rss=687MB, thinking=false
+[2026-10-19 20:33:55.548] [INFO   ] generation OK: #3 88 chars, encoding response
+[2026-10-19 20:33:55.548] [INFO   ] chat request #3: found 1 tool calls
+[2026-10-19 20:33:55.548] [INFO   ] chat response #3: 502 bytes, finish=tool_calls, preview={"choices":[{"message":{"refusal":null,"role":"assistant","tool_calls":[{"id":"call_ADAD94DD-976C-4645-A715-","function"
+[2026-10-19 20:33:55.580] [INFO   ] chat/completions body.stream=false tools=1
+[2026-10-19 20:33:55.580] [DEBUG  ] chat request #4: total=11695MB available=3275220856B(3123MB) footprint=3167230088B(3020MB) rss=689MB, thinking=true
+[2026-10-19 20:33:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3273664376B(3122MB) footprint=3168786568B(3021MB) rss=689MB
+[2026-10-19 20:33:57.051] [INFO   ] generation OK: #4 107 chars, encoding response
+[2026-10-19 20:33:57.051] [INFO   ] chat request #4: found 1 tool calls
+[2026-10-19 20:33:57.051] [INFO   ] chat response #4: 502 bytes, finish=tool_calls, preview={"choices":[{"logprobs":null,"index":0,"message":{"tool_calls":[{"type":"function","function":{"arguments":"{\"command\"
+[2026-10-19 20:34:06.110] [DEBUG  ] [heartbeat] total=11695MB available=3300632440B(3147MB) footprint=3141818504B(2996MB) rss=688MB
+[2026-10-19 20:34:12.889] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:34:12.896] [DEBUG  ] chat request #5: total=11695MB available=3300632440B(3147MB) footprint=3141818504B(2996MB) rss=688MB, thinking=false
+[2026-10-19 20:34:16.110] [DEBUG  ] [heartbeat] total=11695MB available=3302975376B(3149MB) footprint=3139475568B(2994MB) rss=663MB
+[2026-10-19 20:34:26.110] [DEBUG  ] [heartbeat] total=11695MB available=3302975376B(3149MB) footprint=3139475568B(2994MB) rss=663MB
+[2026-10-19 20:34:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3302926224B(3149MB) footprint=3139524720B(2994MB) rss=663MB
+[2026-10-19 20:34:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:34:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:35:06.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:35:13.358] [INFO   ] generation OK: #5 73 chars, encoding response
+[2026-10-19 20:35:13.358] [INFO   ] chat response #5: 437 bytes, finish=stop, preview={"object":"chat.completion","usage":{"prompt_tokens":21234,"completion_tokens":17,"total_tokens":21251},"created":179241
+[2026-10-19 20:35:13.440] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:35:13.443] [DEBUG  ] chat request #6: total=11695MB available=3277318008B(3125MB) footprint=3165132936B(3018MB) rss=688MB, thinking=true
+[2026-10-19 20:35:16.110] [DEBUG  ] [heartbeat] total=11695MB available=3277170552B(3125MB) footprint=3165280392B(3018MB) rss=688MB
+[2026-10-19 20:35:18.381] [INFO   ] generation OK: #6 323 chars, encoding response
+[2026-10-19 20:35:18.386] [INFO   ] chat response #6: 518 bytes, finish=stop, preview={"created":1792413318,"usage":{"prompt_tokens":21230,"completion_tokens":71,"total_tokens":21301},"system_fingerprint":"
+[2026-10-19 20:35:18.449] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:35:18.452] [DEBUG  ] chat request #7: total=11695MB available=3277170552B(3125MB) footprint=3165280392B(3018MB) rss=688MB, thinking=false
+[2026-10-19 20:35:26.110] [DEBUG  ] [heartbeat] total=11695MB available=3278235512B(3126MB) footprint=3164215432B(3017MB) rss=689MB
+[2026-10-19 20:35:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3308857232B(3155MB) footprint=3133593712B(2988MB) rss=664MB
+[2026-10-19 20:35:42.666] [INFO   ] generation OK: #7 206 chars, encoding response
+[2026-10-19 20:35:42.672] [INFO   ] chat request #7: found 1 tool calls
+[2026-10-19 20:35:42.672] [INFO   ] chat response #7: 622 bytes, finish=tool_calls, preview={"choices":[{"index":0,"message":{"content":null,"tool_calls":[{"function":{"arguments":"{\"queries\":[\"MTP depth 2 tes
+[2026-10-19 20:35:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:35:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:36:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:36:10.224] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:36:10.231] [DEBUG  ] chat request #8: total=11695MB available=3321341816B(3167MB) footprint=3121109128B(2976MB) rss=675MB, thinking=false
+[2026-10-19 20:36:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:46.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:56.111] [DEBUG  ] [heartbeat] total=11695MB available=3296241528B(3143MB) footprint=3146209416B(3000MB) rss=675MB
+[2026-10-19 20:37:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:37:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3295651704B(3142MB) footprint=3146799240B(3001MB) rss=675MB
+[2026-10-19 20:37:23.984] [INFO   ] generation OK: #8 282 chars, encoding response
+[2026-10-19 20:37:23.989] [INFO   ] chat response #8: 651 bytes, finish=stop, preview={"created":1792413443,"usage":{"prompt_tokens":21263,"completion_tokens":65,"total_tokens":21328},"system_fingerprint":"
+[2026-10-19 20:37:24.106] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:37:24.112] [DEBUG  ] chat request #9: total=11695MB available=3275581304B(3123MB) footprint=3166869640B(3020MB) rss=698MB, thinking=false
+[2026-10-19 20:37:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3274057592B(3122MB) footprint=3168393352B(3021MB) rss=700MB
+[2026-10-19 20:37:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3309234064B(3155MB) footprint=3133216880B(2988MB) rss=665MB
+[2026-10-19 20:37:46.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:37:56.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:38:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:38:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3309217680B(3155MB) footprint=3133233264B(2988MB) rss=665MB
+[2026-10-19 20:38:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3309217680B(3155MB) footprint=3133233264B(2988MB) rss=665MB
+[2026-10-19 20:38:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3309119376B(3155MB) footprint=3133331568B(2988MB) rss=666MB
+[2026-10-19 20:38:43.729] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:38:43.733] [DEBUG  ] chat request #10: total=11695MB available=3289425784B(3137MB) footprint=3153025160B(3006MB) rss=3024MB, thinking=false
+[2026-10-19 20:38:46.112] [DEBUG  ] [heartbeat] total=11695MB available=3307071352B(3153MB) footprint=3135379592B(2990MB) rss=2980MB
+[2026-10-19 20:38:56.112] [DEBUG  ] [heartbeat] total=11695MB available=3339118456B(3184MB) footprint=3103332488B(2959MB) rss=2937MB

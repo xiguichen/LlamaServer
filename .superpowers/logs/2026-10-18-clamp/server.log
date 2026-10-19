@@ -1,0 +1,52 @@
+===== llamaserver.log — 51 lines, 6276 bytes =====
+[2026-10-18 21:03:43.425] [INFO   ] Importing Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf…
+[2026-10-18 21:03:43.440] [INFO   ] Imported Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf
+[2026-10-18 21:03:45.030] [INFO   ] Selected model: Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf
+[2026-10-18 21:03:50.826] [INFO   ] Starting… loading Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf into memory
+[2026-10-18 21:04:04.566] [INFO   ] background keep-alive started (silent audio session active)
+[2026-10-18 21:04:04.566] [INFO   ] Startup gap: engine init 13.51s + server start 0.23s = 13.74s
+[2026-10-18 21:04:04.570] [INFO   ] Startup gap: engine init 13.51s + server start 0.23s = 13.74s
+[2026-10-18 21:04:04.570] [INFO   ] Context reduced to 80128 tokens by the device memory budget (requested 262144).
+[2026-10-18 21:04:04.570] [INFO   ] KV cache q8_0, YaRN long-context on.
+[2026-10-18 21:04:04.571] [INFO   ] Model loaded (context 80128, build llamaserver-698dbbf). HTTP server listening on port 8443.
+[2026-10-18 21:04:04.571] [INFO   ] Reachable at http://192.168.3.3:8443
+[2026-10-18 21:04:14.568] [DEBUG  ] [heartbeat] total=11695MB available=4576193192B(4364MB) footprint=1866257752B(1779MB) rss=4207MB
+[2026-10-18 21:04:24.567] [DEBUG  ] [heartbeat] total=11695MB available=4575734440B(4363MB) footprint=1866716504B(1780MB) rss=4212MB
+[2026-10-18 21:04:34.971] [DEBUG  ] [heartbeat] total=11695MB available=4575505064B(4363MB) footprint=1866945880B(1780MB) rss=4211MB
+[2026-10-18 21:04:44.568] [DEBUG  ] [heartbeat] total=11695MB available=4575718056B(4363MB) footprint=1866732888B(1780MB) rss=4211MB
+[2026-10-18 21:04:54.568] [DEBUG  ] [heartbeat] total=11695MB available=4575718056B(4363MB) footprint=1866732888B(1780MB) rss=4211MB
+[2026-10-18 21:05:04.568] [DEBUG  ] [heartbeat] total=11695MB available=4575685288B(4363MB) footprint=1866765656B(1780MB) rss=4211MB
+[2026-10-18 21:05:14.567] [DEBUG  ] [heartbeat] total=11695MB available=4575718056B(4363MB) footprint=1866732888B(1780MB) rss=4211MB
+[2026-10-18 21:05:24.567] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:05:34.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:05:44.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:05:54.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:04.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:14.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:24.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:34.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:44.568] [DEBUG  ] [heartbeat] total=11695MB available=4575701672B(4363MB) footprint=1866749272B(1780MB) rss=4214MB
+[2026-10-18 21:06:54.569] [DEBUG  ] [heartbeat] total=11695MB available=4575783592B(4363MB) footprint=1866667352B(1780MB) rss=4214MB
+[2026-10-18 21:06:55.407] [INFO   ] GET /v1/updates current=none previous=none uploaded=unknown
+[2026-10-18 21:06:55.408] [INFO   ] GET /logs name=inference tail=400 backups=true -> llamaserver-inference.log:400 lines
+[2026-10-18 21:06:55.479] [INFO   ] GET /logs name=server tail=120 backups=true -> llamaserver.log:30 lines
+[2026-10-18 21:07:04.569] [DEBUG  ] [heartbeat] total=11695MB available=4573817512B(4361MB) footprint=1868633432B(1782MB) rss=4219MB
+[2026-10-18 21:07:14.569] [DEBUG  ] [heartbeat] total=11695MB available=4573817512B(4361MB) footprint=1868633432B(1782MB) rss=4219MB
+[2026-10-18 21:07:24.569] [DEBUG  ] [heartbeat] total=11695MB available=4573817512B(4361MB) footprint=1868633432B(1782MB) rss=4219MB
+[2026-10-18 21:07:34.569] [DEBUG  ] [heartbeat] total=11695MB available=4573817512B(4361MB) footprint=1868633432B(1782MB) rss=4219MB
+[2026-10-18 21:07:44.569] [DEBUG  ] [heartbeat] total=11695MB available=4573817512B(4361MB) footprint=1868633432B(1782MB) rss=4219MB
+[2026-10-18 21:07:49.673] [INFO   ] GET /logs name=inference tail=4000 backups=false -> llamaserver-inference.log:3218 lines
+[2026-10-18 21:07:54.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:04.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:14.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:24.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:34.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:44.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:08:54.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:04.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:14.569] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:24.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:34.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:44.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:09:54.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB
+[2026-10-18 21:10:04.570] [DEBUG  ] [heartbeat] total=11695MB available=4572883624B(4361MB) footprint=1869567320B(1782MB) rss=4220MB

@@ -93,7 +93,7 @@ final class LlamaInference: @unchecked Sendable {
     /// cheap `seq_rm` (the upstream "RS" path) rather than a full-state
     /// checkpoint restore. Raising this to 2 requires re-checking the device
     /// A/B (`ab-device.sh`).
-    private let mtpMaxDraft = 1
+    private let mtpMaxDraft = 2
 
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model
     /// predicts multiple future tokens per forward pass, which can increase

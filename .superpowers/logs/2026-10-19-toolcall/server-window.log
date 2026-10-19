@@ -1,0 +1,401 @@
+===== llamaserver.log — 400 lines, 50121 bytes, last 400 lines =====
+[2026-10-19 05:27:17.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:27:27.005] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:27:37.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:27:47.004] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:27:57.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:07.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:17.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:27.003] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:37.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:47.004] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:28:57.004] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:07.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:17.001] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:27.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:37.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:47.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:29:57.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:07.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:17.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:27.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:37.002] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:47.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:30:57.006] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:07.005] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:17.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:27.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:37.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:47.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:31:57.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:07.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:17.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:27.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:37.005] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:47.007] [DEBUG  ] [heartbeat] total=11695MB available=3412682712B(3254MB) footprint=3029768232B(2889MB) rss=2628MB
+[2026-10-19 05:32:57.006] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:07.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:17.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:27.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:37.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:47.006] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:33:57.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:34:07.007] [DEBUG  ] [heartbeat] total=11695MB available=3412666328B(3254MB) footprint=3029784616B(2889MB) rss=2628MB
+[2026-10-19 05:34:17.007] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:34:27.003] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:34:37.004] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:34:47.006] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:34:57.007] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:07.007] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:17.005] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:27.006] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:37.006] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:47.005] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:35:57.007] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:36:07.008] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:36:17.005] [DEBUG  ] [heartbeat] total=11695MB available=3412699096B(3254MB) footprint=3029751848B(2889MB) rss=2628MB
+[2026-10-19 05:36:27.004] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:36:37.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:36:47.005] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:36:57.004] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:07.004] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:17.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:27.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:37.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:47.005] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:37:57.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:07.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:17.003] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:27.005] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:37.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:47.008] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:38:57.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:07.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:17.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:27.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:37.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:47.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:39:57.011] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:07.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:17.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:27.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:37.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:47.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:40:57.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:07.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:17.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:27.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:37.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:47.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:41:57.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:07.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:17.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:27.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:37.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:47.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:42:57.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:07.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:17.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:27.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:37.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:47.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:43:57.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:07.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:17.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:27.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:37.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:47.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:44:57.011] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:07.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:17.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:27.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:37.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:47.011] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:45:57.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:07.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:17.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:27.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:37.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:47.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:46:57.009] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:07.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:17.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:27.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:37.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:47.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:47:57.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:07.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:17.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:27.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:37.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:47.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:48:57.011] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:17.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:27.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:37.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:47.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:49:57.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:07.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:17.010] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:27.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:37.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:47.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:50:57.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:07.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:17.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:27.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:37.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:47.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:51:57.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:17.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:27.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:37.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:47.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:52:57.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:17.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:27.012] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:37.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:47.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:53:57.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:07.011] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:17.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:27.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:37.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:47.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:54:57.013] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:07.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:17.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:27.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:37.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:47.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:55:57.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:07.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:17.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:27.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:37.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:47.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:56:57.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:17.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:27.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:37.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:47.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:57:57.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:07.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:17.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:27.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:37.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:47.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:58:57.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:07.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:17.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:27.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:37.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:47.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 05:59:57.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:07.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:17.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:27.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:37.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:47.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:00:57.014] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:17.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:27.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:37.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:47.019] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:01:57.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:07.015] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:17.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:27.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:37.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:47.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:02:57.017] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:07.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:17.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:27.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:37.016] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:47.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:03:57.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:07.018] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:17.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:27.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:37.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:47.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:04:57.020] [DEBUG  ] [heartbeat] total=11695MB available=3412731864B(3254MB) footprint=3029719080B(2889MB) rss=2628MB
+[2026-10-19 06:05:09.904] [DEBUG  ] [heartbeat] total=11695MB available=3425871832B(3267MB) footprint=3016579112B(2876MB) rss=2548MB
+[2026-10-19 20:26:53.617] [DEBUG  ] [heartbeat] total=11695MB available=3425642456B(3266MB) footprint=3016808488B(2877MB) rss=59MB
+[2026-10-19 20:26:57.624] [DEBUG  ] [heartbeat] total=11695MB available=3422447576B(3263MB) footprint=3020003368B(2880MB) rss=85MB
+[2026-10-19 20:26:59.847] [INFO   ] background keep-alive stopped
+[2026-10-19 20:26:59.847] [DEBUG  ] stop: active connections=0
+[2026-10-19 20:26:59.848] [INFO   ] Server stopped (model kept in memory for fast restart).
+[2026-10-19 20:27:00.796] [INFO   ] Restarting server (model already loaded)…
+[2026-10-19 20:27:00.915] [INFO   ] background keep-alive started (silent audio session active)
+[2026-10-19 20:27:00.924] [INFO   ] HTTP server listening on port 8443.
+[2026-10-19 20:27:00.924] [INFO   ] Reachable at http://192.168.3.3:8443
+[2026-10-19 20:27:10.925] [DEBUG  ] [heartbeat] total=11695MB available=3421431768B(3262MB) footprint=3021019176B(2881MB) rss=87MB
+[2026-10-19 20:27:14.046] [INFO   ] background keep-alive stopped
+[2026-10-19 20:27:14.046] [DEBUG  ] stop: active connections=0
+[2026-10-19 20:27:14.047] [INFO   ] Server stopped (model kept in memory for fast restart).
+[2026-10-19 20:27:15.985] [INFO   ] Restarting server (model already loaded)…
+[2026-10-19 20:27:16.092] [INFO   ] background keep-alive started (silent audio session active)
+[2026-10-19 20:27:16.102] [INFO   ] HTTP server listening on port 8443.
+[2026-10-19 20:27:16.102] [INFO   ] Reachable at http://192.168.3.3:8443
+[2026-10-19 20:27:26.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=90MB
+[2026-10-19 20:27:36.102] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:27:46.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:27:56.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:06.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:16.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:26.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:36.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:46.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:28:56.103] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:29:06.104] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:29:16.104] [DEBUG  ] [heartbeat] total=11695MB available=3420530648B(3262MB) footprint=3021920296B(2881MB) rss=89MB
+[2026-10-19 20:29:20.231] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 20:29:20.232] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 20:29:20.232] [DEBUG  ] streaming #1: connection OPENED (total active: 1)
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming chat request #1: total=11695MB available=3420055512B(3261MB) footprint=3022395432B(2882MB) rss=90MB
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming #1: SSE headers sent, token count=4
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming #1: role chunk sent
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming #1: keep-alive timer started
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming #1: async block started (queue wait ended)
+[2026-10-19 20:29:20.240] [INFO   ] streaming #1: prompt built (86465 chars), starting generation
+[2026-10-19 20:29:20.240] [DEBUG  ] streaming #1: thinking=false
+[2026-10-19 20:29:26.103] [DEBUG  ] [heartbeat] total=11695MB available=3344852904B(3189MB) footprint=3097598040B(2954MB) rss=144MB
+[2026-10-19 20:29:36.787] [DEBUG  ] [heartbeat] total=11695MB available=3336644496B(3182MB) footprint=3105806448B(2961MB) rss=168MB
+[2026-10-19 20:29:46.104] [DEBUG  ] [heartbeat] total=11695MB available=3329058704B(3174MB) footprint=3113392240B(2969MB) rss=185MB
+[2026-10-19 20:29:56.104] [DEBUG  ] [heartbeat] total=11695MB available=3321505680B(3167MB) footprint=3120945264B(2976MB) rss=198MB
+[2026-10-19 20:30:06.104] [DEBUG  ] [heartbeat] total=11695MB available=3314968464B(3161MB) footprint=3127482480B(2982MB) rss=209MB
+[2026-10-19 20:30:16.104] [DEBUG  ] [heartbeat] total=11695MB available=3308398480B(3155MB) footprint=3134052464B(2988MB) rss=216MB
+[2026-10-19 20:30:22.345] [DEBUG  ] streaming #1: generated 1 tokens so far
+[2026-10-19 20:30:23.382] [INFO   ] streaming #1: generation done, 16 tokens, finish=eog
+[2026-10-19 20:30:23.382] [DEBUG  ] streaming #1: tools active, parsing tool calls
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: content already streamed during generation
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: finish_reason chunk sent (stop)
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: usage chunk sent
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: stream summary — finish_reason_sent=true didDisconnect=false genTokens=16
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: [DONE] sent
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: closing connection
+[2026-10-19 20:30:23.389] [DEBUG  ] streaming #1: stream ended (total active: 0, recreate count: 1)
+[2026-10-19 20:30:26.106] [DEBUG  ] [heartbeat] total=11695MB available=3304335224B(3151MB) footprint=3138115720B(2992MB) rss=634MB
+[2026-10-19 20:30:36.107] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:30:46.108] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:30:56.108] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=635MB
+[2026-10-19 20:31:06.857] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:36.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:46.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:31:56.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:32:06.109] [DEBUG  ] [heartbeat] total=11695MB available=3306055544B(3152MB) footprint=3136395400B(2991MB) rss=636MB
+[2026-10-19 20:32:08.339] [INFO   ] GET /logs name=payloads tail=1200 backups=true -> llamaserver-payloads.log:1200 lines
+[2026-10-19 20:32:08.450] [INFO   ] GET /logs name=server tail=1200 backups=true -> llamaserver.log:1200 lines
+[2026-10-19 20:32:08.557] [INFO   ] GET /logs name=inference tail=1200 backups=true -> llamaserver-inference.log:1200 lines
+[2026-10-19 20:32:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=643MB
+[2026-10-19 20:32:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:36.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:46.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:32:56.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:06.183] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:16.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:26.109] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:51.074] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 20:33:51.074] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 20:33:51.074] [DEBUG  ] streaming #2: connection OPENED (total active: 1)
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming chat request #2: total=11695MB available=3301484408B(3148MB) footprint=3140966536B(2995MB) rss=642MB
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: SSE headers sent, token count=4
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: role chunk sent
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: keep-alive timer started
+[2026-10-19 20:33:51.075] [DEBUG  ] streaming #2: async block started (queue wait ended)
+[2026-10-19 20:33:51.079] [INFO   ] streaming #2: prompt built (86446 chars), starting generation
+[2026-10-19 20:33:51.079] [DEBUG  ] streaming #2: thinking=true
+[2026-10-19 20:33:53.590] [INFO   ] streaming #2: generation done, 35 tokens, finish=eog
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: tools active, parsing tool calls
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: content already streamed during generation
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: finish_reason chunk sent (stop)
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: usage chunk sent
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: stream summary — finish_reason_sent=true didDisconnect=false genTokens=35
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: [DONE] sent
+[2026-10-19 20:33:53.590] [DEBUG  ] streaming #2: closing connection
+[2026-10-19 20:33:53.591] [DEBUG  ] streaming #2: stream ended (total active: 0, recreate count: 2)
+[2026-10-19 20:33:53.611] [INFO   ] chat/completions body.stream=false tools=1
+[2026-10-19 20:33:53.614] [DEBUG  ] chat request #3: total=11695MB available=3275384696B(3123MB) footprint=3167066248B(3020MB) rss=687MB, thinking=false
+[2026-10-19 20:33:55.548] [INFO   ] generation OK: #3 88 chars, encoding response
+[2026-10-19 20:33:55.548] [INFO   ] chat request #3: found 1 tool calls
+[2026-10-19 20:33:55.548] [INFO   ] chat response #3: 502 bytes, finish=tool_calls, preview={"choices":[{"message":{"refusal":null,"role":"assistant","tool_calls":[{"id":"call_ADAD94DD-976C-4645-A715-","function"
+[2026-10-19 20:33:55.580] [INFO   ] chat/completions body.stream=false tools=1
+[2026-10-19 20:33:55.580] [DEBUG  ] chat request #4: total=11695MB available=3275220856B(3123MB) footprint=3167230088B(3020MB) rss=689MB, thinking=true
+[2026-10-19 20:33:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3273664376B(3122MB) footprint=3168786568B(3021MB) rss=689MB
+[2026-10-19 20:33:57.051] [INFO   ] generation OK: #4 107 chars, encoding response
+[2026-10-19 20:33:57.051] [INFO   ] chat request #4: found 1 tool calls
+[2026-10-19 20:33:57.051] [INFO   ] chat response #4: 502 bytes, finish=tool_calls, preview={"choices":[{"logprobs":null,"index":0,"message":{"tool_calls":[{"type":"function","function":{"arguments":"{\"command\"
+[2026-10-19 20:34:06.110] [DEBUG  ] [heartbeat] total=11695MB available=3300632440B(3147MB) footprint=3141818504B(2996MB) rss=688MB
+[2026-10-19 20:34:12.889] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:34:12.896] [DEBUG  ] chat request #5: total=11695MB available=3300632440B(3147MB) footprint=3141818504B(2996MB) rss=688MB, thinking=false
+[2026-10-19 20:34:16.110] [DEBUG  ] [heartbeat] total=11695MB available=3302975376B(3149MB) footprint=3139475568B(2994MB) rss=663MB
+[2026-10-19 20:34:26.110] [DEBUG  ] [heartbeat] total=11695MB available=3302975376B(3149MB) footprint=3139475568B(2994MB) rss=663MB
+[2026-10-19 20:34:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3302926224B(3149MB) footprint=3139524720B(2994MB) rss=663MB
+[2026-10-19 20:34:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:34:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:35:06.110] [DEBUG  ] [heartbeat] total=11695MB available=3302942608B(3149MB) footprint=3139508336B(2994MB) rss=663MB
+[2026-10-19 20:35:13.358] [INFO   ] generation OK: #5 73 chars, encoding response
+[2026-10-19 20:35:13.358] [INFO   ] chat response #5: 437 bytes, finish=stop, preview={"object":"chat.completion","usage":{"prompt_tokens":21234,"completion_tokens":17,"total_tokens":21251},"created":179241
+[2026-10-19 20:35:13.440] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:35:13.443] [DEBUG  ] chat request #6: total=11695MB available=3277318008B(3125MB) footprint=3165132936B(3018MB) rss=688MB, thinking=true
+[2026-10-19 20:35:16.110] [DEBUG  ] [heartbeat] total=11695MB available=3277170552B(3125MB) footprint=3165280392B(3018MB) rss=688MB
+[2026-10-19 20:35:18.381] [INFO   ] generation OK: #6 323 chars, encoding response
+[2026-10-19 20:35:18.386] [INFO   ] chat response #6: 518 bytes, finish=stop, preview={"created":1792413318,"usage":{"prompt_tokens":21230,"completion_tokens":71,"total_tokens":21301},"system_fingerprint":"
+[2026-10-19 20:35:18.449] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:35:18.452] [DEBUG  ] chat request #7: total=11695MB available=3277170552B(3125MB) footprint=3165280392B(3018MB) rss=688MB, thinking=false
+[2026-10-19 20:35:26.110] [DEBUG  ] [heartbeat] total=11695MB available=3278235512B(3126MB) footprint=3164215432B(3017MB) rss=689MB
+[2026-10-19 20:35:36.110] [DEBUG  ] [heartbeat] total=11695MB available=3308857232B(3155MB) footprint=3133593712B(2988MB) rss=664MB
+[2026-10-19 20:35:42.666] [INFO   ] generation OK: #7 206 chars, encoding response
+[2026-10-19 20:35:42.672] [INFO   ] chat request #7: found 1 tool calls
+[2026-10-19 20:35:42.672] [INFO   ] chat response #7: 622 bytes, finish=tool_calls, preview={"choices":[{"index":0,"message":{"content":null,"tool_calls":[{"function":{"arguments":"{\"queries\":[\"MTP depth 2 tes
+[2026-10-19 20:35:46.110] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:35:56.110] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:36:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3321374584B(3167MB) footprint=3121076360B(2976MB) rss=675MB
+[2026-10-19 20:36:10.224] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:36:10.231] [DEBUG  ] chat request #8: total=11695MB available=3321341816B(3167MB) footprint=3121109128B(2976MB) rss=675MB, thinking=false
+[2026-10-19 20:36:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:46.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:36:56.111] [DEBUG  ] [heartbeat] total=11695MB available=3296241528B(3143MB) footprint=3146209416B(3000MB) rss=675MB
+[2026-10-19 20:37:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3295668088B(3142MB) footprint=3146782856B(3001MB) rss=675MB
+[2026-10-19 20:37:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3295651704B(3142MB) footprint=3146799240B(3001MB) rss=675MB
+[2026-10-19 20:37:23.984] [INFO   ] generation OK: #8 282 chars, encoding response
+[2026-10-19 20:37:23.989] [INFO   ] chat response #8: 651 bytes, finish=stop, preview={"created":1792413443,"usage":{"prompt_tokens":21263,"completion_tokens":65,"total_tokens":21328},"system_fingerprint":"
+[2026-10-19 20:37:24.106] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:37:24.112] [DEBUG  ] chat request #9: total=11695MB available=3275581304B(3123MB) footprint=3166869640B(3020MB) rss=698MB, thinking=false
+[2026-10-19 20:37:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3274057592B(3122MB) footprint=3168393352B(3021MB) rss=700MB
+[2026-10-19 20:37:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3309234064B(3155MB) footprint=3133216880B(2988MB) rss=665MB
+[2026-10-19 20:37:46.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:37:56.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:38:06.111] [DEBUG  ] [heartbeat] total=11695MB available=3309250448B(3155MB) footprint=3133200496B(2988MB) rss=665MB
+[2026-10-19 20:38:16.111] [DEBUG  ] [heartbeat] total=11695MB available=3309217680B(3155MB) footprint=3133233264B(2988MB) rss=665MB
+[2026-10-19 20:38:26.111] [DEBUG  ] [heartbeat] total=11695MB available=3309217680B(3155MB) footprint=3133233264B(2988MB) rss=665MB
+[2026-10-19 20:38:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3309119376B(3155MB) footprint=3133331568B(2988MB) rss=666MB
+[2026-10-19 20:38:43.729] [INFO   ] chat/completions body.stream=false tools=17
+[2026-10-19 20:38:43.733] [DEBUG  ] chat request #10: total=11695MB available=3289425784B(3137MB) footprint=3153025160B(3006MB) rss=3024MB, thinking=false
+[2026-10-19 20:38:46.112] [DEBUG  ] [heartbeat] total=11695MB available=3307071352B(3153MB) footprint=3135379592B(2990MB) rss=2980MB
+[2026-10-19 20:38:56.112] [DEBUG  ] [heartbeat] total=11695MB available=3339118456B(3184MB) footprint=3103332488B(2959MB) rss=2937MB
+[2026-10-19 20:39:00.977] [INFO   ] GET /logs name=server tail=120 backups=true -> llamaserver.log:120 lines
+[2026-10-19 20:39:01.207] [INFO   ] GET /logs name=inference tail=120 backups=true -> llamaserver-inference.log:120 lines
+[2026-10-19 20:39:06.112] [DEBUG  ] [heartbeat] total=11695MB available=3333646200B(3179MB) footprint=3108804744B(2964MB) rss=2945MB
+[2026-10-19 20:39:16.115] [DEBUG  ] [heartbeat] total=11695MB available=3335792504B(3181MB) footprint=3106658440B(2962MB) rss=2919MB
+[2026-10-19 20:39:26.114] [DEBUG  ] [heartbeat] total=11695MB available=3335612280B(3181MB) footprint=3106838664B(2962MB) rss=2868MB
+[2026-10-19 20:39:36.111] [DEBUG  ] [heartbeat] total=11695MB available=3332253560B(3177MB) footprint=3110197384B(2966MB) rss=2861MB
+[2026-10-19 20:39:46.111] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB
+[2026-10-19 20:39:56.112] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB
+[2026-10-19 20:40:06.112] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB
+[2026-10-19 20:40:16.112] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB
+[2026-10-19 20:40:26.112] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB
+[2026-10-19 20:40:36.112] [DEBUG  ] [heartbeat] total=11695MB available=3332302712B(3177MB) footprint=3110148232B(2966MB) rss=2860MB

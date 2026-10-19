@@ -22,12 +22,14 @@
 	<string>1</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>LlamaServer serves LLM requests to other devices on your local network.</string>
+	<key>LlamaServerBuildSHA</key>
+	<string>$(LLAMASERVER_BUILD_SHA)</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_http._tcp</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LlamaServer serves LLM requests to other devices on your local network.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
