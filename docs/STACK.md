@@ -5,7 +5,9 @@ recipe, its MTP layers, which quant to run) and about an upstream library (what
 its API can and cannot do) should be answered from the upstream source, not
 inferred from our call sites. This is the canonical list of what we build on,
 with the link to read and the version we pin. Measured *performance* lives in
-[`PERFORMANCE.md`](PERFORMANCE.md); the gotchas that shaped our code live in
+[`PERFORMANCE.md`](PERFORMANCE.md); the engine/memory/tool-call decisions live
+in [`ENGINE.md`](ENGINE.md), [`MEMORY.md`](MEMORY.md) and
+[`TOOL-CALLS.md`](TOOL-CALLS.md) — all reached from the map in
 [`../AGENTS.md`](../AGENTS.md). This file is the index to both worlds.
 
 Every link below was verified to return HTTP 200 on **2026-10-18**.
@@ -64,7 +66,7 @@ The repo publishes the full quant ladder (sizes from the HF repo tree API,
   `llama.cpp` re-sets `n_ctx_train = yarn_orig_ctx / rope_freq_scale` to match.
 - **MTP.** The card benchmarks "MTP n=2" against the Qwen3.5-4B-MTP reference.
   We run depth 1 (`mtpMaxDraft`), with the output-slot count resolved from the
-  GGUF's own head count — see the MTP gotcha in `AGENTS.md`.
+  GGUF's own head count — see `docs/ENGINE.md` (*MTP*).
 
 #### What we verified ourselves (provenance matters)
 
@@ -106,8 +108,9 @@ The whole engine runs in-process: `import llama`, no separate server binary.
   sequence-state snapshots (`llama_state_seq_save_file` / `_load_file`).
 - **Why the pin is a decision, not a detail:** the tag must publish an
   `xcframework.zip` asset, and bumping it can require adapting our Swift for API
-  drift. See the `LLAMA_TAG` gotcha in `AGENTS.md`.
-- **Two upstream limits that shaped this codebase** (details in `AGENTS.md`):
+  drift. See `docs/ENGINE.md` (*Vendored llama.cpp*).
+- **Two upstream limits that shaped this codebase** (details in
+  `docs/TOOL-CALLS.md` and `docs/MEMORY.md`):
   1. `llama_chat_apply_template` takes **no `tools` parameter**, and the
      framework exports no `common_chat_*` symbols — so tool schemas are injected
      as a system block (`ToolPrompt`) and calls are parsed out of the generated
@@ -142,15 +145,16 @@ arm64, Xcode 27 → iOS 27 SDK).
 
 pi (`pi --help`, v1.1.0) **auto-discovers and loads `AGENTS.md` and
 `CLAUDE.md`** from the project at startup; `--no-context-files` is the opt-out,
-and nothing disables it in `~/.pi/agent/settings.json`. `AGENTS.md` links this
-file, so a pi session working in this repo already has the pointer before its
-first turn and can `read` this file when a question is about the model or an
-upstream library.
+and nothing disables it in `~/.pi/agent/settings.json`. `AGENTS.md` is
+deliberately a short **map**: it links this file and the subsystem docs under
+`docs/`, so a pi session has the pointers before its first turn and can `read`
+only the doc a question needs.
 
 That is why there is no pi-specific copy of this documentation: one
-auto-loaded entry point (`AGENTS.md`) plus one canonical file (this one) is the
-whole discovery path, and it also serves any other agent that reads
-`AGENTS.md`.
+auto-loaded entry point (`AGENTS.md`), a table saying which doc to load when,
+and one canonical file per subsystem. The small entry point is not just tidiness
+— a long system prompt measurably suppresses the model's tool calls (see
+`docs/TOOL-CALLS.md` → *Prompt dilution*).
 
 ## Consuming this server as a backend
 
