@@ -166,6 +166,28 @@ The paired numbers supersede the earlier unpaired note in the repo
 (`MTP-on 18.3/17.5` vs `off 19.9/19.7` t/s, context unrecorded), which had
 suggested MTP was a loss.
 
+### MTP depth 2: re-test (pending, 2026-10-19)
+
+The configured draft depth is now **2** (`mtpMaxDraft`, build `3e56c47`), so the
+depth-1 figures above are the baseline, not the current configuration.
+
+The earlier depth-2 run (2026-10-18) measured ~9–13% **slower** than plain
+decoding, but that run billed both GPU waits to `sample` (the draft's and the
+verify's) — `MtpPhaseStats` now splits `draft-gpu` and `verify-gpu`, and a
+deeper chain adds exactly that kind of work (one more chained draft decode per
+round). The comparison therefore has to be redone.
+
+Re-run the same paired protocol as depth 1:
+
+- identical prompt sequences, `temperature: 0`, byte-identical output required
+- one engine restart between configs; same model, context, KV type
+- read `accepted`/`depth` from the `MTP stats:` line — depth 2 should raise
+  accepted tokens/round; if acceptance stays ~2.0, the second draft is wasted
+  work and the round is slower by construction
+- quote context length and pair the runs (thermals swing ~30%)
+
+Rows go here once measured.
+
 ### KV cache and prefix reuse
 
 Reuse works, including across the periodic context recreate:
@@ -270,6 +292,8 @@ record.
    above). The 44k–53k end is still one-sided (the MTP-on run died of a GPU reset
    there); a bracket run with MTP back on would close it, as would a thermal
    bracket to confirm the ~9% prefill cost is structural.
+   **Re-opened 2026-10-19 at depth 2** — re-measure with the depth-2 section
+   above.
 2. **KV q4_0** — this model qualifies (`head_dim 256 % 32 == 0`, flash-attn
    forced). Halves the KV (843 MB → ~466 MB at 48k) and the snapshot; measure
    the t/s gain and the quality cost.

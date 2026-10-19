@@ -54,12 +54,16 @@ by an explicit count) and the verify batch `maxDraft + 1`.
 
 ### Depth
 
-`mtpMaxDraft = 1` (hard-coded, no UI toggle). The round machinery is depth-N
-capable (chained drafts, N-row verify, draft seed rows), but depth 2 measured
-**~9–13% slower** on device.
+`mtpMaxDraft = 2` (hard-coded, no UI toggle; raised from 1 on 2026-10-19 for a
+fresh A/B). The round machinery is depth-N capable (chained drafts, N-row verify,
+draft seed rows). The earlier depth-2 run (2026-10-18) measured **~9–13%
+slower** than plain decoding, but its "sample" phase billed both GPU waits (the
+phases were split afterwards), so that number is being re-measured with the
+current instrumentation — method in `docs/PERFORMANCE.md`.
 
-Depth 1 is a measured net win on *generation*, not on prefill — paired A/B, same
-prompts, temperature 0, byte-identical output, 2026-10-18:
+The depth-1 result (the previous configuration) is a measured net win on
+*generation*, not on prefill — paired A/B, same prompts, temperature 0,
+byte-identical output, 2026-10-18:
 
 - first pair: **+6–11% generation** at 9k–35k context, **~9% slower prefill**
 - thermal-bracket re-run: **+11–16% / −4%** (the first pair was taken straight off

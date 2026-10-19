@@ -15,8 +15,8 @@ enum MtpSpec {
     /// plain single-token decode of the same position, which costs nearly the
     /// same (one fewer target row) and can never yield a bonus token. A gate
     /// above zero therefore only ever throws away work. Upstream's p_min is
-    /// used to cut deeper chain links *before* they are decoded; at depth 1
-    /// (`mtpMaxDraft == 1`) there are no chain links to cut.
+    /// used to cut deeper chain links *before* they are decoded; with the gate
+    /// disabled every computed link is verified, at any configured depth.
     static let pMin: Float = 0.0
 
     /// Whether the confidence gate can ever discard a computed draft. When

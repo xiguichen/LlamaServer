@@ -82,17 +82,17 @@ final class LlamaInference: @unchecked Sendable {
     private var nEmbd = 0
 
     /// Max speculative draft depth per round. The round machinery is
-    /// depth-N capable (chained drafts, N-row verify, catch-up), but the
-    /// configured depth is 1: on-device depth-2 measured ~9-13% SLOWER than
-    /// plain decoding. That run's "sample" phase, once read as sampler cost,
-    /// was really the draft and verify GPU time (async decode, waited on at
-    /// the first logits read); the phases are now split (MtpPhaseStats
-    /// draft-gpu / verify-gpu). Depth 1 keeps the target
-    /// rollback distance at 1, covered by the recurrent-state ring (n_rs_seq,
-    /// derived from this value) so rejected drafts are rolled back with a
-    /// cheap `seq_rm` (the upstream "RS" path) rather than a full-state
-    /// checkpoint restore. Raising this to 2 requires re-checking the device
-    /// A/B (`ab-device.sh`).
+    /// depth-N capable (chained drafts, N-row verify, catch-up); the
+    /// configured depth is 2 (raised from 1 on 2026-10-19 for a fresh A/B).
+    /// The earlier depth-2 run measured ~9-13% SLOWER than plain decoding,
+    /// but that run's "sample" phase was really the draft and verify GPU time
+    /// (async decode, waited on at the first logits read); the phases are now
+    /// split (MtpPhaseStats draft-gpu / verify-gpu), so the comparison has to
+    /// be redone. The target rollback distance is covered by the
+    /// recurrent-state ring (`n_rs_seq`, derived from this value), so rejected
+    /// drafts roll back with a cheap `seq_rm` (the upstream "RS" path) rather
+    /// than a full-state checkpoint restore. Measure with the method in
+    /// `docs/PERFORMANCE.md`.
     private let mtpMaxDraft = 2
 
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model
@@ -1817,9 +1817,10 @@ final class LlamaInference: @unchecked Sendable {
 
             // Softmax probability the draft model assigns to `token`. Only
             // consulted when MtpSpec.gateEnabled — i.e. for depth>1 chain
-            // links, to cut a link before the deeper one is decoded. At depth 1
-            // the gate is disabled so a computed draft is always verified, and
-            // this vocab-wide softmax (248K exps) is never evaluated.
+            // links, to cut a link before the deeper one is decoded. The gate
+            // is disabled, so a computed draft (including a depth-2 chain
+            // link) is always verified, and this vocab-wide softmax
+            // (248K exps) is never evaluated.
             func draftConfidence(_ token: llama_token) -> Float {
                 guard let row = draftLogits() else { return 0 }
                 return MtpSpec.draftConfidence(row: row, token: token)
@@ -1871,8 +1872,8 @@ final class LlamaInference: @unchecked Sendable {
                         //    MTP head. The chained draft is self-conditioned
                         //    (its h comes from the draft's own output), so a
                         //    low-confidence link is cut before the deeper link
-                        //    is decoded (MtpSpec.pMin); at depth 1 pMin is 0
-                        //    and the computed draft is always verified.
+                        //    is decoded (MtpSpec.pMin); the gate is off (pMin
+                        //    0), so every computed draft is verified.
                         var drafts: [llama_token] = []
                         // Positions actually written into the draft context this
                         // round, counting from nextPos. A gated chain-cut still
