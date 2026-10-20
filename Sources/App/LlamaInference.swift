@@ -83,16 +83,18 @@ final class LlamaInference: @unchecked Sendable {
 
     /// Max speculative draft depth per round. The round machinery is
     /// depth-N capable (chained drafts, N-row verify, catch-up); the
-    /// configured depth is 2 (raised from 1 on 2026-10-19 for a fresh A/B).
-    /// The earlier depth-2 run measured ~9-13% SLOWER than plain decoding,
-    /// but that run's "sample" phase was really the draft and verify GPU time
-    /// (async decode, waited on at the first logits read); the phases are now
-    /// split (MtpPhaseStats draft-gpu / verify-gpu), so the comparison has to
-    /// be redone. The target rollback distance is covered by the
-    /// recurrent-state ring (`n_rs_seq`, derived from this value), so rejected
-    /// drafts roll back with a cheap `seq_rm` (the upstream "RS" path) rather
-    /// than a full-state checkpoint restore. Measure with the method in
-    /// `docs/PERFORMANCE.md`.
+    /// configured depth is 2 (raised from 1 on 2026-10-19). Paired re-test
+    /// 2026-10-20 (single build, temperature 0, fresh prompt per case):
+    /// +1.6-4.8% generation at 48-14k prompt tokens, -2.5% at 21k (within
+    /// run-to-run noise). The second link is accepted in ~35-43% of rounds,
+    /// so a round emits ~20% more tokens for ~19% more wall (a chained draft
+    /// plus a third verify row). The earlier depth-2 run's ~9-13% slowdown
+    /// was a cross-build comparison that billed GPU waits to "sample"; the
+    /// phases are now split (MtpPhaseStats draft-gpu / verify-gpu). The target
+    /// rollback distance is covered by the recurrent-state ring (`n_rs_seq`,
+    /// derived from this value), so rejected drafts roll back with a cheap
+    /// `seq_rm` (the upstream "RS" path) rather than a full-state checkpoint
+    /// restore. Measure with the method in `docs/PERFORMANCE.md`.
     private let mtpMaxDraft = 2
 
     /// Whether to use Multi-Token Prediction (MTP). When enabled the model

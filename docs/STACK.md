@@ -65,8 +65,9 @@ The repo publishes the full quant ladder (sizes from the HF repo tree API,
   flags — the engine is in-process — so they are set as context params, and
   `llama.cpp` re-sets `n_ctx_train = yarn_orig_ctx / rope_freq_scale` to match.
 - **MTP.** The card benchmarks "MTP n=2" against the Qwen3.5-4B-MTP reference.
-  We run depth 2 (`mtpMaxDraft`, raised from 1 on 2026-10-19; the recorded A/B
-  is depth 1), with the output-slot count resolved from the
+  We run depth 2 (`mtpMaxDraft`, raised from 1 on 2026-10-19; paired re-test
+  gave +1.6–4.8% generation at 48–14k prompt tokens and −2.5% at 21k — see
+  `docs/PERFORMANCE.md`), with the output-slot count resolved from the
   GGUF's own head count — see `docs/ENGINE.md` (*MTP*).
 
 #### What we verified ourselves (provenance matters)

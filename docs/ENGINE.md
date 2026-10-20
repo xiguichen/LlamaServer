@@ -54,12 +54,16 @@ by an explicit count) and the verify batch `maxDraft + 1`.
 
 ### Depth
 
-`mtpMaxDraft = 2` (hard-coded, no UI toggle; raised from 1 on 2026-10-19 for a
-fresh A/B). The round machinery is depth-N capable (chained drafts, N-row verify,
-draft seed rows). The earlier depth-2 run (2026-10-18) measured **~9–13%
-slower** than plain decoding, but its "sample" phase billed both GPU waits (the
-phases were split afterwards), so that number is being re-measured with the
-current instrumentation — method in `docs/PERFORMANCE.md`.
+`mtpMaxDraft = 2` (hard-coded, no UI toggle; raised from 1 on 2026-10-19 and kept
+after the paired re-test). The round machinery is depth-N capable (chained
+drafts, N-row verify, draft seed rows). Measured 2026-10-20 against depth 1 on
+one build, one harness, identical prompts: **+1.6% / +4.8% / +3.7%** generation
+at 48 / 6.9k / 14k prompt tokens, **−2.5%** at 21k (inside run-to-run noise).
+Depth 2 emits ~20% more tokens per round (the second link is accepted in ~35–43%
+of rounds) for ~19% more wall per round — a chained draft plus a third verify
+row. The 2026-10-18 "~9–13% slower" number is superseded: it billed both GPU
+waits to `sample` and compared across builds. Method and tables in
+`docs/PERFORMANCE.md`.
 
 The depth-1 result (the previous configuration) is a measured net win on
 *generation*, not on prefill — paired A/B, same prompts, temperature 0,

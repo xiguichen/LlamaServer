@@ -176,9 +176,10 @@ The earlier depth-2 run (2026-10-18) measured ~9–13% **slower** than plain
 decoding, but that run billed both GPU waits to `sample` (the draft's and the
 verify's) — `MtpPhaseStats` now splits `draft-gpu` and `verify-gpu`, and a
 deeper chain adds exactly that kind of work (one more chained draft decode per
-round). The comparison therefore has to be redone.
+round). It also compared against a different build and day, so the 2026-10-20
+paired run below supersedes it.
 
-Re-run the same paired protocol as depth 1:
+Protocol:
 
 - identical prompt sequences, `temperature: 0`, byte-identical output required
 - one engine restart between configs; same model, context, KV type
@@ -206,13 +207,18 @@ round: +10 ms of `draft-gpu` (the chained draft, roughly constant) and
 +3.5–15 ms of `verify-gpu` (the third verify row, growing with the KV the
 verify attends over).
 
-So depth 2 is a small win up to ~14k (+2–5%) and gives it back at 21k (−2.5%),
-where the wider verify has grown to +15 ms/round. Those gaps are near
-single-run thermal noise: a repeat of the 21k case with a reused prefix
-(21,021 of 21,028 tokens reused) measured `verify-gpu` 74–84 ms/round instead
-of 102 ms — up to ~20% from clock state alone. Read the result as **depth 2 is
-not a win**, not as a precise ranking; settling a ±5% question needs run-to-run
-repeats, not another single pair.
+So depth 2 is ahead at three of the four sizes and only −2.5% at 21k, where the
+wider verify has grown to +15 ms/round. Those gaps are near single-run thermal
+noise: a repeat of the 21k case with a reused prefix (21,021 of 21,028 tokens
+reused) measured `verify-gpu` 74–84 ms/round instead of 102 ms — up to ~20% from
+clock state alone.
+
+**Verdict: keep depth 2.** It emits ~20% more tokens per round for ~19% more
+wall, which is a net +1.6–4.8% generation at 48–14k prompt tokens, and a −2.5%
+wash at 21k (inside the run-to-run spread above, so not evidence that depth 2
+loses there — just that its advantage fades as the third verify row grows). A
+workload dominated by ≥20k contexts sees no benefit; below that depth 2 is the
+better setting.
 
 This supersedes the 2026-10-19 estimate of "~9–13% slower": that compared
 against a different build and day, and the phase split now shows where the cost

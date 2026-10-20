@@ -83,7 +83,7 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 **Measured, not inferred — [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) is the baseline.** Read it before making or repeating a claim; add a row when you measure something.
 
-Headlines (A19 Pro, 4B Q4_K_M, ctx 131072, KV q8_0, build `470957a`): prompt 170–350 t/s for new tokens; generation 10–17 t/s falling with context; `verify-gpu` is 80–90% of every MTP round (CPU work is ~3 ms/round); thermals swing results ~30%, so quote context length and pair A/B runs. The MTP figures below are **depth 1** (the recorded baseline; depth 2 is the current default and is being re-measured): depth 1 is **+11–16% generation / ~4% slower prefill**.
+Headlines (A19 Pro, 4B Q4_K_M, ctx 131072, KV q8_0, build `470957a`): prompt 170–350 t/s for new tokens; generation 10–17 t/s falling with context; `verify-gpu` is 80–90% of every MTP round (CPU work is ~3 ms/round); thermals swing results ~30%, so quote context length and pair A/B runs. The MTP baseline below is **depth 1**: **+11–16% generation / ~4% slower prefill**. Depth 2 (current) re-tested paired on 2026-10-20: **+1.6–4.8%** at 48–14k prompt tokens, **−2.5%** at 21k (within run-to-run noise).
 
 ## Tests
 
