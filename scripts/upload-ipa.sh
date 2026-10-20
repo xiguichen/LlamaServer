@@ -55,6 +55,16 @@ if [ -z "$URL" ]; then
 fi
 URL="${URL%/}"
 
+# Fail fast instead of hanging on a suspended app: iOS suspends LlamaServer when
+# it is backgrounded, which leaves the TCP connection silent rather than refused.
+echo "==> Checking $URL is reachable"
+if ! curl -fsS --connect-timeout 5 --max-time 5 "$URL/health" >/dev/null 2>&1; then
+  echo "ERROR: no answer from $URL/health within 5s." >&2
+  echo "       Foreground LlamaServer on the phone (iOS suspends it in the background)" >&2
+  echo "       and confirm the server is running, then retry." >&2
+  exit 1
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -128,6 +138,7 @@ fi
 echo "==> Uploading to $URL/v1/updates/ipa?build=$BUILD"
 RESPONSE="$(curl -sS -X PUT --data-binary @"$IPA" \
   -H 'Content-Type: application/octet-stream' \
+  --connect-timeout 5 --max-time 180 \
   --write-out '\n%{http_code}' \
   "$URL/v1/updates/ipa?build=$BUILD" 2>&1)" || {
     echo "ERROR: could not reach $URL/." >&2
