@@ -1,0 +1,41 @@
+{
+  "engine": {
+    "model": "Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf",
+    "output_slots": 2,
+    "max_draft": 1
+  },
+  "results": [
+    {
+      "target": 27000,
+      "wall_s": 15.13,
+      "prompt_tokens": 21028,
+      "completion_tokens": 256,
+      "finish": "length",
+      "text_chars": 1461,
+      "prefill_s": 0.38,
+      "prefill_tps": 18.33,
+      "decoded": "7",
+      "prompt": "21028",
+      "reused": "21021",
+      "gen_s": 14.59,
+      "gen_tps": 17.54,
+      "engine_finish": "length",
+      "rounds": 147,
+      "hits_pct": 73,
+      "accepted": 108,
+      "depth": 0.73,
+      "no_draft": 0,
+      "mtp_emitted": 256,
+      "phases": {
+        "draft": 0.91,
+        "verify": 1.37,
+        "sample": 0.17,
+        "draft-gpu": 12.9,
+        "verify-gpu": 83.64,
+        "emit": 0.02,
+        "host": 0.23,
+        "wall": 99.25
+      }
+    }
+  ]
+}

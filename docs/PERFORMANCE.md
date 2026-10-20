@@ -12,6 +12,8 @@ measured; do not replace a measurement with a theory.
 
 ## Rig
 
+Baseline rig for the tables below unless a section says otherwise (2026-10-18):
+
 | | |
 |---|---|
 | Device | A19 Pro GPU (`ggml_metal_init: picking default device: Apple A19 Pro GPU`) |
@@ -107,8 +109,8 @@ wall clock of an agent turn (the 499-token turn took 51 s to generate).
   per pass. Reducing context or KV bytes is the only lever on this number.
 - Host/CPU work is **negligible**: `draft + verify + sample` CPU is ~3 ms/round,
   `host` ~0.3 ms/round. Micro-optimising the Swift decode loop cannot help.
-- MTP emits 1.5–2.0 tokens/round; acceptance (`hits`) tracked 36–100% and fell
-  as context grew.
+- Depth 1 emits 1.5–2.0 tokens/round; acceptance (`hits`) tracked 36–100% and
+  fell as context grew.
 
 ### MTP depth 1: paired on/off A/B (2026-10-18, build `46c215d`)
 
@@ -179,14 +181,9 @@ deeper chain adds exactly that kind of work (one more chained draft decode per
 round). It also compared against a different build and day, so the 2026-10-20
 paired run below supersedes it.
 
-Protocol:
-
-- identical prompt sequences, `temperature: 0`, byte-identical output required
-- one engine restart between configs; same model, context, KV type
-- read `accepted`/`depth` from the `MTP stats:` line — depth 2 should raise
-  emitted tokens/round; if emitted/round stays ~2.0, the second draft is wasted
-  work and the round is slower by construction
-- quote context length and pair the runs (thermals swing ~30%)
+Protocol: identical prompts, `temperature: 0`, one install per config, context
+quoted. The reused-prefix repeat below shows why a single run cannot settle a
+±5% question.
 
 **Measured 2026-10-20, paired** (builds `e192d3e` = depth 2 and `7980625` =
 depth 1 — the same code, only the constant differs; ctx 160,512, KV q8_0,
@@ -220,10 +217,8 @@ loses there — just that its advantage fades as the third verify row grows). A
 workload dominated by ≥20k contexts sees no benefit; below that depth 2 is the
 better setting.
 
-This supersedes the 2026-10-19 estimate of "~9–13% slower": that compared
-against a different build and day, and the phase split now shows where the cost
-actually goes. Prefill is unaffected by depth (296–400 t/s at 6.9k–21k) — the
-prompt is mirrored into the draft context once either way.
+Prefill is unaffected by depth (296–400 t/s at 6.9k–21k) — the prompt is
+mirrored into the draft context once either way.
 
 ### KV cache and prefix reuse
 
@@ -253,38 +248,26 @@ Every turn saves a prompt-state snapshot and the next turn loads it back:
 **664 MB at 31.8k tokens → 897 MB at 48.4k tokens** (~1.2 s/turn fixed cost,
 visible on small turns where 66 new tokens still took 1.45 s). It is written to
 `NSTemporaryDirectory()` and only needed (a) across a recreate and (b) because
-the MTP path wipes `cachedTokenIds`/both caches at the end of `generate`
-(`LlamaInference.swift:2164`) instead of leaving the live KV reusable.
+the MTP path wipes `cachedTokenIds`/both caches at the end of `generate` (the
+`usedMtp` branch) instead of leaving the live KV reusable.
 
-### 262,144 context: what it costs (derived, not yet measured)
+### 262,144 context: what it costs
 
-The ceiling is no longer 131,072. This model's own GGUF window is 262,144
-(llama.cpp logs `n_ctx_train = 262144` at load) and the YaRN factor is now
-derived from the context being built (`KVCacheSpec.yarnFactor(forContext:)`:
-×4 at 131,072, ×8 at 262,144). The model card documents exactly those two
-recipes (`--rope-scale 4 … 131072`, `--rope-scale 8 … 256K`, both
-`--yarn-orig-ctx 32768`). The old fixed ×4 *halved* the native window:
-`llama-context.cpp` re-sets `n_ctx_train = yarn_orig_ctx / rope_freq_scale`, so
-`32768 / 0.25 = 131072`, and the ×8 recipe lands it back on 262,144.
+The model's GGUF window is 262,144, and the YaRN factor is derived from the
+context being built (×4 at 131,072, ×8 at 262,144) — see `docs/MEMORY.md`.
 
-The KV figures below are **arithmetic on measured inputs** (17,408 B/token for
-q8_0 measured on device; 5,346 MB KV budget after the memory fix) — nothing
-here has run on the device:
+Measured on device:
 
-| config at 262,144 | KV | fits the 5,346 MB KV budget? |
-|---|---|---|
-| q8_0, MTP **off** | 4,352 MB | yes — 781 MB slack |
-| q8_0, MTP **on** | 8,704 MB (two caches) | **no** — clamped to 160,768 |
-| f16, MTP off | 8,704 MB | no |
+| config | result |
+|---|---|
+| q8_0, MTP on (build `e192d3e`) | clamped to **160,512** by the memory budget |
+| q4_0, MTP off (build `f6793a4`) | **loads at 262,144**, YaRN off |
 
-So the full window is reachable only with MTP off; with MTP on the (now
-cache-count-aware) clamp reduces it to ~160,768 and reports it as a memory cap.
-The dominant unmeasured risk is the snapshot: on the measured slope
-(664 MB at 31.8k → 897 MB at 48.4k, i.e. ~14–19 KB/token) the per-turn blob at
-262,144 extrapolates to **~3.9–4.9 GB of writes per turn**, on a process whose
-commitments (model 2.78 GB + KV 4.35 GB + compute ~0.32 GB ≈ 7.45 GB) already
-sit under a ~9.26 GB limit. That is the argument for doing the snapshot
-round-trip removal (open question 3) before the long end is used in anger.
+KV at the full window: **4,352 MiB** for q8_0 (17,408 B/token) and **2,304 MiB**
+for q4_0 (9,216 B/token charged). Coherence at 256K is unmeasured (open
+question 5), and the per-turn snapshot extrapolates to ~4 GB of writes at the
+full window (open question 3) — measure both before using the long end in
+anger.
 
 ## Stability: a GPU reset invalidates a run
 
@@ -292,8 +275,8 @@ Both A/B runs hit `kIOGPUCommandBufferCallbackErrorInnocentVictim` (the GPU was
 reset by something outside the process). `DecodeRetry` retried once; one run
 recovered, the other did not — so the MTP-on run stopped at 44k while the off
 run completed to 53k. The fault is environmental, not config-specific. Memory
-was tight throughout: rss 5.3–5.6 GB against ~2.8–3.1 GB available on an 11.7 GB
-device, climbing across the run.
+was tight throughout: rss 5.3–5.6 GB against the 6 GiB per-process ceiling
+(`docs/MEMORY.md`), climbing across the run.
 
 Recognise it in a log by `llama_decode failed — recreating context to recover`
 followed by `ggml_metal_graph_compute: backend is in error state … recreate the
@@ -317,20 +300,17 @@ record.
 | Claim | Reality |
 |---|---|
 | "Hybrid models **cannot reuse KV** — `llama_memory_clear` wipes the cache, forcing full prompt re-decode" | False. Reuse is the normal path: `KV snapshot restored (48337 tokens, prompt 48450); decoding 113 new`. What's unavailable is the *cheap* `seq_rm` suffix trim; the snapshot replaces it. `llama_memory_clear(_, false)` runs on the fallback/recreate paths, not per request. |
-| "Token limit **wastes 1 decode** per step — the last token is decoded but never sampled" | False, backwards. `LlamaInference.swift:2109` breaks *before* the useless decode (`if generated >= limit { break }`). |
+| "Token limit **wastes 1 decode** per step — the last token is decoded but never sampled" | False, backwards. The generation loop breaks *before* the useless decode (`if generated >= limit { break }`). |
 | "MTP is **slower** (2 decode cycles per output token)" | False, measured. A paired A/B (see above) puts depth 1 at **+6–11% generation** at 9k–35k context with byte-identical output; the draft pass is ~11 ms/round against a flat 2.03 tokens/round. |
 | "**Cannot be improved** without changing the serial decode+sample model" | False. The measured bottlenecks — KV bytes per token, snapshot round-trip, delta re-decode — are all addressable without touching the decode loop. |
 | "Serial queue / async GPU + CPU sample per token" are the bottleneck | True as facts, but not the bottleneck here: CPU time is ~3 ms/round vs 95–150 ms of GPU verify wait. |
 
 ## Open questions / next measurements
 
-1. ~~**MTP on/off at long context**~~ — **answered** 2026-10-18: MTP depth 1 is
-   +6–11% on generation at 9k–35k context but ~9% slower on prefill (see the A/B
-   above). The 44k–53k end is still one-sided (the MTP-on run died of a GPU reset
-   there); a bracket run with MTP back on would close it, as would a thermal
-   bracket to confirm the ~9% prefill cost is structural.
-   **Re-opened 2026-10-19 at depth 2** — re-measure with the depth-2 section
-   above.
+1. ~~**MTP on/off at long context**~~ — **answered** 2026-10-18 (depth 1:
+   +6–11% generation at 9k–35k, ~9% slower prefill) and **2026-10-20** (depth 2:
+   +1.6–4.8% at 48–14k prompt tokens, −2.5% at 21k). The 44k–53k end is still
+   one-sided: the depth-1 MTP-on run died of a GPU reset there.
 2. **KV q4_0** — this model qualifies (`head_dim 256 % 32 == 0`, flash-attn
    forced). Halves the KV (843 MB → ~466 MB at 48k) and the snapshot; measure
    the t/s gain and the quality cost.
@@ -341,15 +321,9 @@ record.
 4. **Is the verify pass bandwidth-bound or compute-bound?** ~3.3 GB of traffic
    per 164 ms round ≈ 20 GB/s — far below the SoC's peak, so attention compute
    or kernel overhead is likely involved. Needs a profiler.
-5. **Does 262,144 actually work and is it coherent?** Load it on device
-   (MTP off, q8_0): the load line should report `YaRN long-context on (x8.0,
-   orig 32768)` and a 262,144-token context, and `n_ctx_train adjusted to 262144`
-   should appear in the llama.cpp log. Then measure prefill/gen at the top of the
-   range, the snapshot size and time, and — most importantly — compare output
-   against the ×4/131,072 config on the same long prompt. The ×8 recipe is
-   documented by the model author, but this fine-tune's *behaviour* at 256K is
-   unobserved, and the snapshot extrapolation above predicts the first
-   operational problem.
+5. **Is 262,144 coherent?** Loading it is answered: q4_0 reaches 262,144
+   (measured). Still open: compare output against the ×4/131,072 config on the
+   same long prompt, and measure snapshot size/time at the top of the range.
 
 ## Log-line semantics
 

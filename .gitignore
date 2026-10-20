@@ -16,3 +16,6 @@ vendor/
 
 # OMC session state (not part of the project)
 .omc/
+
+# Session checkpoint (agent scratch, not project docs)
+checkpoint.md

@@ -51,6 +51,7 @@ llm-comply's pinned spec marks `logprobs` (per choice), `refusal` and `content`
 
 | Route | Notes |
 |---|---|
+| `GET /health`, `GET /v1/health` | `{"status":"ok"}`; used by `scripts/upload-ipa.sh` as a reachability check |
 | `POST /v1/chat/completions` | streaming and non-streaming |
 | `POST /v1/completions` | legacy completions |
 | `GET /v1/models` | model list |

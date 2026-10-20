@@ -23,10 +23,9 @@ detail in `AGENTS.md`.
   `savePromptSnapshot` → `llama_state_seq_save_file` into `NSTemporaryDirectory()`)
   and decodes only the suffix. This is real reuse:
   `KV snapshot restored (48337 tokens, prompt 48450); decoding 113 new`.
-- The snapshot is not free: ~664 MB at 32k tokens → ~897 MB at 48k
-  (**~1.2 s and ~700 MB of writes per turn**, measured). The next turn re-decodes
-  the previous turn's generation (the snapshot is the *stable* prefix, taken
-  before generation).
+- The snapshot is not free (size and per-turn write cost are measured in
+  `docs/PERFORMANCE.md`). The next turn re-decodes the previous turn's
+  generation (the snapshot is the *stable* prefix, taken before generation).
 - The per-turn save is only needed because the MTP path ends by wiping
   `cachedTokenIds` and both caches (the `usedMtp` branch at the end of
   `generate`) instead of leaving the live KV reusable. Removing that wipe is the
@@ -54,30 +53,15 @@ by an explicit count) and the verify batch `maxDraft + 1`.
 
 ### Depth
 
-`mtpMaxDraft = 2` (hard-coded, no UI toggle; raised from 1 on 2026-10-19 and kept
-after the paired re-test). The round machinery is depth-N capable (chained
-drafts, N-row verify, draft seed rows). Measured 2026-10-20 against depth 1 on
-one build, one harness, identical prompts: **+1.6% / +4.8% / +3.7%** generation
-at 48 / 6.9k / 14k prompt tokens, **−2.5%** at 21k (inside run-to-run noise).
-Depth 2 emits ~20% more tokens per round (the second link is accepted in ~35–43%
-of rounds) for ~19% more wall per round — a chained draft plus a third verify
-row. The 2026-10-18 "~9–13% slower" number is superseded: it billed both GPU
-waits to `sample` and compared across builds. Method and tables in
-`docs/PERFORMANCE.md`.
+`mtpMaxDraft = 2` (hard-coded, no UI toggle; raised from 1 on 2026-10-19). The
+round machinery is depth-N capable (chained drafts, N-row verify, draft seed
+rows). A deeper chain adds a chained draft decode and another verify row, so its
+marginal gain fades as context grows. The measured depth-1/depth-2 comparison
+and the rationale for keeping 2 are in `docs/PERFORMANCE.md` — do not restate
+the numbers here.
 
-The depth-1 result (the previous configuration) is a measured net win on
-*generation*, not on prefill — paired A/B, same prompts, temperature 0,
-byte-identical output, 2026-10-18:
-
-- first pair: **+6–11% generation** at 9k–35k context, **~9% slower prefill**
-- thermal-bracket re-run: **+11–16% / −4%** (the first pair was taken straight off
-  a long session)
-
-The prefill cost is that the MTP path also mirrors each prompt chunk into the
-draft context; the win is the 2-row verify sharing one weight read (acceptance
-flat at 2.03 tokens/round). For a pi-style turn (small delta prefill + a few
-hundred generated tokens at ~35k) the two roughly cancel. See
-`docs/PERFORMANCE.md`.
+The MTP path also pays a prefill cost: it mirrors each prompt chunk into the
+draft context (`mirrorPromptChunkIntoDraft`).
 
 ### One round
 

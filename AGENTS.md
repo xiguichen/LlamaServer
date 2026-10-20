@@ -11,7 +11,7 @@ turn, and a long prompt measurably degrades the model's tool calling
 
 | Doc | Load it when |
 |---|---|
-| [`docs/STACK.md`](docs/STACK.md) | you need upstream links (model card, llama.cpp, Telegraph, XcodeGen), how pi discovers these docs, or how to point a client at the server |
+| [`docs/STACK.md`](docs/STACK.md) | upstream links and versions (model card, llama.cpp, Telegraph, XcodeGen) or pointing a client at the server |
 | [`docs/ENGINE.md`](docs/ENGINE.md) | touching `LlamaInference.swift`: MTP rounds, sampling, generation loop/timings, context recreate, decode-failure recovery |
 | [`docs/MEMORY.md`](docs/MEMORY.md) | touching KV cache, context sizing/clamping, YaRN, or the memory budget |
 | [`docs/TOOL-CALLS.md`](docs/TOOL-CALLS.md) | touching tool prompts, parsing, streaming filters, thinking switches — or debugging a turn that fails to call a tool |
@@ -22,20 +22,19 @@ turn, and a long prompt measurably degrades the model's tool calling
 
 ## Build & test (CI only)
 
-No local Xcode required. Everything runs in GitHub Actions:
+No local Xcode. Push to `main` (or open a PR); `.github/workflows/build.yml` runs
+on an `xcode-27` runner (macOS 27, Xcode 27 → iOS 27 SDK):
 
-1. Commit and push to `main`/`master` (or open a PR).
-2. `.github/workflows/build.yml` on an `xcode-27` runner (macOS 27 arm64, Xcode 27 → iOS 27 SDK) runs two jobs:
-   - **test**: `xcodegen generate` → `xcodebuild test` (simulator; destination `iPhone 17` — Xcode 27 images have no iPhone 16 device type)
-   - **build**: `xcodegen generate` → `xcodebuild` (unsigned Release) → `bash scripts/package-ipa.sh` → upload artifact.
-3. The test job must pass; the build job produces `LlamaServer-unsigned.ipa`.
+- **test**: `xcodegen generate` → `xcodebuild test` (simulator, `iPhone 17`)
+- **build**: `xcodegen generate` → unsigned Release → `scripts/package-ipa.sh` → `LlamaServer-unsigned.ipa`
+
+The test job must pass; the build job produces the IPA.
 
 ## CI notes
 
 - **No `Package.swift`.** The project is defined in `project.yml` (XcodeGen). Always edit `project.yml`, never the `.xcodeproj`; CI regenerates it and it is never committed.
 - `vendor/llama.xcframework` is prebuilt, fetched by `bash scripts/fetch-llama-xcframework.sh`, pinned to tag `b11557`. There is no local llama.cpp compilation.
 - The framework download is cached across runs by release tag + script hash.
-- New test-target sources must be listed in `project.yml` and must **not** `import` the app module (tests compile app sources directly).
 
 ## Architecture
 
@@ -81,15 +80,14 @@ No local Xcode required. Everything runs in GitHub Actions:
 
 ## Performance
 
-**Measured, not inferred — [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) is the baseline.** Read it before making or repeating a claim; add a row when you measure something.
+**Measured, not inferred — [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) is the only source of numbers.** Read it before quoting or measuring; add a row when you measure. Never infer performance from code.
 
-Headlines (A19 Pro, 4B Q4_K_M, ctx 131072, KV q8_0, build `470957a`): prompt 170–350 t/s for new tokens; generation 10–17 t/s falling with context; `verify-gpu` is 80–90% of every MTP round (CPU work is ~3 ms/round); thermals swing results ~30%, so quote context length and pair A/B runs. The MTP baseline below is **depth 1**: **+11–16% generation / ~4% slower prefill**. Depth 2 (current) re-tested paired on 2026-10-20: **+1.6–4.8%** at 48–14k prompt tokens, **−2.5%** at 21k (within run-to-run noise).
+A19 Pro, 4B Q4_K_M: prefill 170–350 t/s for new tokens; generation 10–17 t/s at 24–48k context (shorter context is faster); `verify-gpu` is 80–90% of each MTP round. Thermals swing ~30%: quote the context and pair A/B runs. MTP depth 2 (current): **+1.6–4.8%** vs depth 1 at ≤14k prompt tokens, **−2.5%** at 21k; depth 1 vs MTP off is **+11–16%** generation / −4% prefill.
 
 ## Tests
 
-- Pure-logic specs in `Tests/LlamaServerTests/`: `OpenAIModelsTests`, `ToolCallParserTests`, `ToolPromptTests`, `ThinkingSwitchTests`, `ChatSpecComplianceTests`, `LogFetchSpecTests`, `LogRoutingTests`, `PrefillStatsTests`, `UpdateSpecTests`, `UpdateStoreTests`, and the engine specs (`MtpSpecTests`, `MtpSpeculatorTests`, `KVCacheSpecTests`, `MemoryBudgetTests`, `DecodeRetryTests`, …).
-- All are pure Swift — no model file, no inference. They run on the simulator in CI.
-- Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
+- Pure-logic specs in `Tests/LlamaServerTests/` — no model file, no inference, all run in CI: OpenAI models, tool parser/prompt, thinking switch, chat-spec compliance, log routing/fetch, prefill stats, update spec/store, and the engine specs (`Mtp*`, `KVCacheSpec`, `MemoryBudget`, `DecodeRetry`). Add new sources to `project.yml`; do not `import` the app module (tests compile app sources directly).
+- Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
 - Local machine is CLT-only (no XCTest): `xcodegen generate` is the local syntax/project validator; CI runs the tests.
 
 ## Style

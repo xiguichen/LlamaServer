@@ -1,14 +1,11 @@
 # Stack: the models and frameworks this server rests on
 
-**Why this file exists.** Questions about the model (its window, its RoPE
-recipe, its MTP layers, which quant to run) and about an upstream library (what
-its API can and cannot do) should be answered from the upstream source, not
-inferred from our call sites. This is the canonical list of what we build on,
-with the link to read and the version we pin. Measured *performance* lives in
-[`PERFORMANCE.md`](PERFORMANCE.md); the engine/memory/tool-call decisions live
-in [`ENGINE.md`](ENGINE.md), [`MEMORY.md`](MEMORY.md) and
-[`TOOL-CALLS.md`](TOOL-CALLS.md) — all reached from the map in
-[`../AGENTS.md`](../AGENTS.md). This file is the index to both worlds.
+**Why this file exists.** Model and upstream-library questions are answered from
+the upstream source, not inferred from our call sites. This is the canonical
+list: the link to read and the version we pin. Performance numbers live **only**
+in [`PERFORMANCE.md`](PERFORMANCE.md); engine/memory/tool-call decisions live in
+[`ENGINE.md`](ENGINE.md), [`MEMORY.md`](MEMORY.md) and
+[`TOOL-CALLS.md`](TOOL-CALLS.md).
 
 Every link below was verified to return HTTP 200 on **2026-10-18**.
 
@@ -65,10 +62,9 @@ The repo publishes the full quant ladder (sizes from the HF repo tree API,
   flags — the engine is in-process — so they are set as context params, and
   `llama.cpp` re-sets `n_ctx_train = yarn_orig_ctx / rope_freq_scale` to match.
 - **MTP.** The card benchmarks "MTP n=2" against the Qwen3.5-4B-MTP reference.
-  We run depth 2 (`mtpMaxDraft`, raised from 1 on 2026-10-19; paired re-test
-  gave +1.6–4.8% generation at 48–14k prompt tokens and −2.5% at 21k — see
-  `docs/PERFORMANCE.md`), with the output-slot count resolved from the
-  GGUF's own head count — see `docs/ENGINE.md` (*MTP*).
+  We run depth 2 (`mtpMaxDraft`), with the output-slot count resolved from the
+  GGUF's own head count — see `docs/ENGINE.md` (*MTP*). The measured depth-1 vs
+  depth-2 result is in `docs/PERFORMANCE.md`.
 
 #### What we verified ourselves (provenance matters)
 
@@ -78,7 +74,7 @@ The repo publishes the full quant ladder (sizes from the HF repo tree API,
 | Architecture | 32 layers, hybrid: 3 × linear attention + 1 × full attention, repeating (`full_attention_interval = 4`) | base `config.json` `layer_types`; device log `kv layers 8/32` |
 | KV-bearing layers | 8 of 32 (only the full-attention ones) | as above |
 | Head geometry | `head_dim` 256, `num_key_value_heads` 4, `num_attention_heads` 16, `hidden_size` 2560 | base `config.json`; device log `head_dim K=256 V=256` |
-| MTP layers | `nextn_predict_layers` present → output slots 2 | GGUF metadata read at load |
+| MTP layers | `nextn_predict_layers` present → 2 output slots at depth 1, 3 at depth 2 | GGUF metadata read at load |
 
 **Cross-check that the two sources agree.** The KV arithmetic that the codebase
 depends on follows from the config alone:
@@ -143,19 +139,13 @@ project file is always a change to `project.yml`.
 **CI toolchain for reference:** GitHub Actions runner `xcode-27` (macOS 27
 arm64, Xcode 27 → iOS 27 SDK).
 
-## How an agent (pi) finds this file
+## How an agent finds these docs
 
-pi (`pi --help`, v1.1.0) **auto-discovers and loads `AGENTS.md` and
-`CLAUDE.md`** from the project at startup; `--no-context-files` is the opt-out,
-and nothing disables it in `~/.pi/agent/settings.json`. `AGENTS.md` is
-deliberately a short **map**: it links this file and the subsystem docs under
-`docs/`, so a pi session has the pointers before its first turn and can `read`
-only the doc a question needs.
-
-That is why there is no pi-specific copy of this documentation: one
-auto-loaded entry point (`AGENTS.md`), a table saying which doc to load when,
-and one canonical file per subsystem. The small entry point is not just tidiness
-— a long system prompt measurably suppresses the model's tool calls (see
+Agents auto-load `AGENTS.md` at startup (pi: `--no-context-files` opts out;
+OpenCode uses the same convention). It is deliberately a short **map**: a table
+of which doc to load when, so a session reads only what a question needs. One
+canonical file per subsystem, no per-client copies. This is not just tidiness —
+a long system prompt measurably suppresses tool calls (see
 `docs/TOOL-CALLS.md` → *Prompt dilution*).
 
 ## Consuming this server as a backend
@@ -170,7 +160,7 @@ provider entry, for example:
       "baseUrl": "http://<device>:8443/v1",
       "api": "openai-completions",
       "apiKey": "ollama",
-      "models": [{ "id": "qwen3.5:4b", "contextWindow": 256000 }]
+      "models": [{ "id": "qwen3.5:4b", "contextWindow": 160000 }]
     }
   }
 }

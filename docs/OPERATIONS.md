@@ -40,11 +40,12 @@ Store fetched logs on the filesystem before analysing them (e.g.
 `Documents/updates/` (`LlamaServer-unsigned.ipa`, rotated
 `LlamaServer-unsigned.prev.ipa`, `latest.json`); the user taps the `.ipa` in Files
 and AltStore installs it in place (models survive). Full runbook: the
-`upload-ipa` skill.
+`upload-ipa` skill. A healthy run is ~15 s (artifact download ~11 s, 4 MB over
+Wi-Fi <1 s). If the phone is unreachable the script fails in ~5 s instead of
+hanging — foreground the app, since iOS suspends it in the background.
 
-Three things to hold onto:
+Two things to hold onto:
 
-- **Build id in `latest.json`/the log, not the file name** (see above).
 - **The routes exist only while a model is loaded** — they ride the inference
   listener (no second port, no second permission prompt). A build that cannot
   start a model cannot be replaced this way; pick a smaller model in the UI as

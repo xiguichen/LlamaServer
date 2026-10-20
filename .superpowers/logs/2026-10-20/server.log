@@ -1,0 +1,201 @@
+===== llamaserver.log — 200 lines, 21733 bytes, last 200 lines =====
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: sent tool_calls chunk
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: finish_reason chunk sent (tool_calls)
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: usage chunk sent
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: stream summary — finish_reason_sent=true didDisconnect=false genTokens=181
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: [DONE] sent
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: closing connection
+[2026-10-19 22:55:56.505] [DEBUG  ] streaming #11: stream ended (total active: 0, recreate count: 1)
+[2026-10-19 22:55:58.819] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 22:55:58.820] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 22:55:58.820] [DEBUG  ] streaming #12: connection OPENED (total active: 1)
+[2026-10-19 22:55:58.821] [DEBUG  ] streaming chat request #12: total=11695MB available=3496732560B(3334MB) footprint=2945718384B(2809MB) rss=3615MB
+[2026-10-19 22:55:58.821] [DEBUG  ] streaming #12: SSE headers sent, token count=42
+[2026-10-19 22:55:58.821] [DEBUG  ] streaming #12: role chunk sent
+[2026-10-19 22:55:58.821] [DEBUG  ] streaming #12: keep-alive timer started
+[2026-10-19 22:55:58.821] [DEBUG  ] streaming #12: async block started (queue wait ended)
+[2026-10-19 22:55:58.823] [INFO   ] streaming #12: prompt built (187736 chars), starting generation
+[2026-10-19 22:55:58.823] [DEBUG  ] streaming #12: thinking=false
+[2026-10-19 22:56:00.912] [DEBUG  ] [heartbeat] total=11695MB available=3414566752B(3256MB) footprint=3027884192B(2887MB) rss=3673MB
+[2026-10-19 22:56:03.639] [INFO   ] streaming #12: generation done, 43 tokens, finish=eog
+[2026-10-19 22:56:03.639] [DEBUG  ] streaming #12: tools active, parsing tool calls
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: content already streamed during generation
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: finish_reason chunk sent (stop)
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: usage chunk sent
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: stream summary — finish_reason_sent=true didDisconnect=false genTokens=43
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: [DONE] sent
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: closing connection
+[2026-10-19 22:56:03.643] [DEBUG  ] streaming #12: stream ended (total active: 0, recreate count: 2)
+[2026-10-19 22:56:10.911] [DEBUG  ] [heartbeat] total=11695MB available=3498616720B(3336MB) footprint=2943834224B(2807MB) rss=3616MB
+[2026-10-19 22:56:20.912] [DEBUG  ] [heartbeat] total=11695MB available=3498682256B(3336MB) footprint=2943768688B(2807MB) rss=3615MB
+[2026-10-19 22:56:30.912] [DEBUG  ] [heartbeat] total=11695MB available=3498682256B(3336MB) footprint=2943768688B(2807MB) rss=3615MB
+[2026-10-19 22:56:40.912] [DEBUG  ] [heartbeat] total=11695MB available=3498682256B(3336MB) footprint=2943768688B(2807MB) rss=3615MB
+[2026-10-19 22:56:50.912] [DEBUG  ] [heartbeat] total=11695MB available=3498682256B(3336MB) footprint=2943768688B(2807MB) rss=3615MB
+[2026-10-19 22:57:00.913] [DEBUG  ] [heartbeat] total=11695MB available=3498682256B(3336MB) footprint=2943768688B(2807MB) rss=3616MB
+[2026-10-19 22:57:10.912] [DEBUG  ] [heartbeat] total=11695MB available=3498698640B(3336MB) footprint=2943752304B(2807MB) rss=3616MB
+[2026-10-19 22:57:20.913] [DEBUG  ] [heartbeat] total=11695MB available=3498698640B(3336MB) footprint=2943752304B(2807MB) rss=3616MB
+[2026-10-19 22:57:30.913] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:57:40.913] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:57:50.913] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:00.913] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:10.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:20.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:30.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:40.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:58:50.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:00.914] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:10.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:20.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:30.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:40.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 22:59:50.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:00.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:10.915] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:20.916] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:30.916] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:40.916] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:00:50.916] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:01:00.916] [DEBUG  ] [heartbeat] total=11695MB available=3498665872B(3336MB) footprint=2943785072B(2807MB) rss=3616MB
+[2026-10-19 23:01:10.917] [DEBUG  ] [heartbeat] total=11695MB available=3498518416B(3336MB) footprint=2943932528B(2807MB) rss=3624MB
+[2026-10-19 23:01:20.917] [DEBUG  ] [heartbeat] total=11695MB available=3498502032B(3336MB) footprint=2943948912B(2807MB) rss=3624MB
+[2026-10-19 23:01:30.917] [DEBUG  ] [heartbeat] total=11695MB available=3498338192B(3336MB) footprint=2944112752B(2807MB) rss=3626MB
+[2026-10-19 23:01:40.921] [DEBUG  ] [heartbeat] total=11695MB available=3497617296B(3335MB) footprint=2944833648B(2808MB) rss=3578MB
+[2026-10-19 23:01:50.921] [DEBUG  ] [heartbeat] total=11695MB available=3498502032B(3336MB) footprint=2943948912B(2807MB) rss=2606MB
+[2026-10-19 23:02:00.921] [DEBUG  ] [heartbeat] total=11695MB available=3498534800B(3336MB) footprint=2943916144B(2807MB) rss=2502MB
+[2026-10-19 23:02:10.920] [DEBUG  ] [heartbeat] total=11695MB available=3498534800B(3336MB) footprint=2943916144B(2807MB) rss=2502MB
+[2026-10-19 23:02:20.922] [DEBUG  ] [heartbeat] total=11695MB available=3498534800B(3336MB) footprint=2943916144B(2807MB) rss=2501MB
+[2026-10-19 23:02:30.919] [DEBUG  ] [heartbeat] total=11695MB available=3498370960B(3336MB) footprint=2944079984B(2807MB) rss=2482MB
+[2026-10-19 23:02:40.919] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:02:50.919] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:03:00.919] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:03:10.919] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:03:20.920] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:03:30.920] [DEBUG  ] [heartbeat] total=11695MB available=3498174352B(3336MB) footprint=2944276592B(2807MB) rss=2479MB
+[2026-10-19 23:03:40.920] [DEBUG  ] [heartbeat] total=11695MB available=3498174352B(3336MB) footprint=2944276592B(2807MB) rss=2479MB
+[2026-10-19 23:03:50.920] [DEBUG  ] [heartbeat] total=11695MB available=3498207120B(3336MB) footprint=2944243824B(2807MB) rss=2479MB
+[2026-10-19 23:04:00.923] [DEBUG  ] [heartbeat] total=11695MB available=3497469840B(3335MB) footprint=2944981104B(2808MB) rss=2427MB
+[2026-10-19 23:04:10.923] [DEBUG  ] [heartbeat] total=11695MB available=3497469840B(3335MB) footprint=2944981104B(2808MB) rss=2427MB
+[2026-10-19 23:04:20.922] [DEBUG  ] [heartbeat] total=11695MB available=3497469840B(3335MB) footprint=2944981104B(2808MB) rss=2427MB
+[2026-10-19 23:04:30.923] [DEBUG  ] [heartbeat] total=11695MB available=3497469840B(3335MB) footprint=2944981104B(2808MB) rss=2427MB
+[2026-10-19 23:04:40.923] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:04:50.923] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:05:00.923] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:05:10.923] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:05:20.923] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:05:30.924] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:05:40.923] [DEBUG  ] [heartbeat] total=11695MB available=3497535376B(3335MB) footprint=2944915568B(2808MB) rss=2427MB
+[2026-10-19 23:05:50.924] [DEBUG  ] [heartbeat] total=11695MB available=3497502608B(3335MB) footprint=2944948336B(2808MB) rss=2427MB
+[2026-10-19 23:06:00.921] [DEBUG  ] [heartbeat] total=11695MB available=3494324112B(3332MB) footprint=2948126832B(2811MB) rss=2368MB
+[2026-10-19 23:06:08.459] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 23:06:08.460] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 23:06:08.460] [DEBUG  ] streaming #13: connection OPENED (total active: 1)
+[2026-10-19 23:06:08.463] [DEBUG  ] streaming chat request #13: total=11695MB available=3494012816B(3332MB) footprint=2948438128B(2811MB) rss=2367MB
+[2026-10-19 23:06:08.463] [DEBUG  ] streaming #13: SSE headers sent, token count=44
+[2026-10-19 23:06:08.463] [DEBUG  ] streaming #13: role chunk sent
+[2026-10-19 23:06:08.463] [DEBUG  ] streaming #13: keep-alive timer started
+[2026-10-19 23:06:08.463] [DEBUG  ] streaming #13: async block started (queue wait ended)
+[2026-10-19 23:06:08.464] [INFO   ] streaming #13: prompt built (187986 chars), starting generation
+[2026-10-19 23:06:08.464] [DEBUG  ] streaming #13: thinking=false
+[2026-10-19 23:06:10.921] [DEBUG  ] [heartbeat] total=11695MB available=3407193952B(3249MB) footprint=3035256992B(2894MB) rss=1889MB
+[2026-10-19 23:06:15.808] [INFO   ] streaming #13: generation done, 62 tokens, finish=eog
+[2026-10-19 23:06:15.808] [DEBUG  ] streaming #13: tools active, parsing tool calls
+[2026-10-19 23:06:15.812] [INFO   ] streaming #13: found 1 tool calls
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: sent tool_calls chunk
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: finish_reason chunk sent (tool_calls)
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: usage chunk sent
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: stream summary — finish_reason_sent=true didDisconnect=false genTokens=62
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: [DONE] sent
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: closing connection
+[2026-10-19 23:06:15.812] [DEBUG  ] streaming #13: stream ended (total active: 0, recreate count: 3)
+[2026-10-19 23:06:18.619] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 23:06:18.619] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 23:06:18.619] [DEBUG  ] streaming #14: connection OPENED (total active: 1)
+[2026-10-19 23:06:18.619] [DEBUG  ] streaming chat request #14: total=11695MB available=3434178400B(3275MB) footprint=3008272544B(2868MB) rss=1888MB
+[2026-10-19 23:06:18.619] [DEBUG  ] streaming #14: SSE headers sent, token count=46
+[2026-10-19 23:06:18.620] [DEBUG  ] streaming #14: role chunk sent
+[2026-10-19 23:06:18.620] [DEBUG  ] streaming #14: keep-alive timer started
+[2026-10-19 23:06:18.620] [DEBUG  ] streaming #14: async block started (queue wait ended)
+[2026-10-19 23:06:18.624] [INFO   ] streaming #14: prompt built (191278 chars), starting generation
+[2026-10-19 23:06:18.624] [DEBUG  ] streaming #14: thinking=false
+[2026-10-19 23:06:20.921] [DEBUG  ] [heartbeat] total=11695MB available=3399313248B(3241MB) footprint=3043137696B(2902MB) rss=2189MB
+[2026-10-19 23:06:28.701] [DEBUG  ] streaming #14: generated 12 tokens so far
+[2026-10-19 23:06:30.921] [DEBUG  ] [heartbeat] total=11695MB available=3463686032B(3303MB) footprint=2978764912B(2840MB) rss=2156MB
+[2026-10-19 23:06:35.476] [INFO   ] streaming #14: generation done, 95 tokens, finish=eog
+[2026-10-19 23:06:35.477] [DEBUG  ] streaming #14: tools active, parsing tool calls
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: content already streamed during generation
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: finish_reason chunk sent (stop)
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: usage chunk sent
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: stream summary — finish_reason_sent=true didDisconnect=false genTokens=95
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: [DONE] sent
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: closing connection
+[2026-10-19 23:06:35.482] [DEBUG  ] streaming #14: stream ended (total active: 0, recreate count: 4)
+[2026-10-19 23:06:40.921] [DEBUG  ] [heartbeat] total=11695MB available=3486066576B(3324MB) footprint=2956384368B(2819MB) rss=2157MB
+[2026-10-19 23:06:50.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:00.921] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:10.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:20.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:30.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:40.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:07:50.922] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:08:00.923] [DEBUG  ] [heartbeat] total=11695MB available=3486082960B(3324MB) footprint=2956367984B(2819MB) rss=2157MB
+[2026-10-19 23:08:04.504] [INFO   ] chat/completions body.stream=true tools=17
+[2026-10-19 23:08:04.504] [DEBUG  ] intercept: claiming streaming request
+[2026-10-19 23:08:04.504] [DEBUG  ] streaming #15: connection OPENED (total active: 1)
+[2026-10-19 23:08:04.505] [DEBUG  ] streaming chat request #15: total=11695MB available=3486050192B(3324MB) footprint=2956400752B(2819MB) rss=2157MB
+[2026-10-19 23:08:04.505] [DEBUG  ] streaming #15: SSE headers sent, token count=48
+[2026-10-19 23:08:04.505] [DEBUG  ] streaming #15: role chunk sent
+[2026-10-19 23:08:04.505] [DEBUG  ] streaming #15: keep-alive timer started
+[2026-10-19 23:08:04.505] [DEBUG  ] streaming #15: async block started (queue wait ended)
+[2026-10-19 23:08:04.508] [INFO   ] streaming #15: prompt built (191763 chars), starting generation
+[2026-10-19 23:08:04.508] [DEBUG  ] streaming #15: thinking=false
+[2026-10-19 23:08:10.923] [DEBUG  ] [heartbeat] total=11695MB available=3461179280B(3300MB) footprint=2981271664B(2843MB) rss=2145MB
+[2026-10-19 23:08:14.548] [DEBUG  ] streaming #15: generated 121 tokens so far
+[2026-10-19 23:08:20.923] [DEBUG  ] [heartbeat] total=11695MB available=3461162896B(3300MB) footprint=2981288048B(2843MB) rss=2146MB
+[2026-10-19 23:08:24.613] [DEBUG  ] streaming #15: generated 255 tokens so far
+[2026-10-19 23:08:27.157] [INFO   ] PUT /v1/updates/ipa build=e192d3e 4134640 bytes -> LlamaServer-unsigned.ipa (replaced 4134621 bytes, rollback kept)
+[2026-10-19 23:08:27.240] [INFO   ] GET /v1/updates current=LlamaServer-unsigned.ipa 4134640B build=e192d3e previous=LlamaServer-unsigned.prev.ipa 4134621B build=unknown uploaded=2026-10-19T15:08:27Z
+[2026-10-19 23:08:30.923] [DEBUG  ] [heartbeat] total=11695MB available=3456903056B(3296MB) footprint=2985547888B(2847MB) rss=2151MB
+[2026-10-19 23:08:34.689] [DEBUG  ] streaming #15: generated 378 tokens so far
+[2026-10-19 23:08:40.923] [DEBUG  ] [heartbeat] total=11695MB available=3456919440B(3296MB) footprint=2985531504B(2847MB) rss=2151MB
+[2026-10-19 23:08:44.756] [DEBUG  ] streaming #15: generated 492 tokens so far
+[2026-10-19 23:08:50.923] [DEBUG  ] [heartbeat] total=11695MB available=3458869136B(3298MB) footprint=2983581808B(2845MB) rss=2152MB
+[2026-10-19 23:08:54.828] [DEBUG  ] streaming #15: generated 610 tokens so far
+[2026-10-19 23:09:00.923] [DEBUG  ] [heartbeat] total=11695MB available=3458869136B(3298MB) footprint=2983581808B(2845MB) rss=2152MB
+[2026-10-19 23:09:04.892] [DEBUG  ] streaming #15: generated 724 tokens so far
+[2026-10-19 23:09:10.924] [DEBUG  ] [heartbeat] total=11695MB available=3459950480B(3299MB) footprint=2982500464B(2844MB) rss=2153MB
+[2026-10-19 23:09:14.926] [DEBUG  ] streaming #15: generated 834 tokens so far
+[2026-10-19 23:09:21.177] [DEBUG  ] [heartbeat] total=11695MB available=3459901328B(3299MB) footprint=2982549616B(2844MB) rss=2153MB
+[2026-10-19 23:09:24.978] [DEBUG  ] streaming #15: generated 942 tokens so far
+[2026-10-19 23:09:30.964] [DEBUG  ] [heartbeat] total=11695MB available=3459770256B(3299MB) footprint=2982680688B(2844MB) rss=2153MB
+[2026-10-19 23:09:34.172] [DEBUG  ] DisconnectWatcher: didCloseWithError domain=GCDAsyncSocketErrorDomain code=7 "Socket closed by remote peer"
+[2026-10-19 23:09:34.177] [DEBUG  ] streaming #15: token callback aborted — client disconnected
+[2026-10-19 23:09:34.177] [INFO   ] streaming #15: generation done, 1038 tokens, finish=stopped
+[2026-10-19 23:09:34.177] [DEBUG  ] streaming #15: tools active, parsing tool calls
+[2026-10-19 23:09:34.177] [WARN   ] streaming #15: stripped incomplete tool call, text before=
+[2026-10-19 23:09:34.183] [WARN   ] streaming #15: tool call unrecoverable after cutoff
+[2026-10-19 23:09:34.183] [WARN   ] streaming #15: no tool calls and no content
+[2026-10-19 23:09:34.183] [WARN   ] streaming #15: finish_reason dropped — client disconnected
+[2026-10-19 23:09:34.183] [DEBUG  ] streaming #15: finish_reason chunk sent (error)
+[2026-10-19 23:09:34.183] [DEBUG  ] streaming #15: usage chunk sent
+[2026-10-19 23:09:34.183] [DEBUG  ] streaming #15: stream summary — finish_reason_sent=true didDisconnect=true genTokens=1038
+[2026-10-19 23:09:34.183] [DEBUG  ] streaming #15: closing connection
+[2026-10-19 23:09:34.183] [DEBUG  ] streaming #15: stream ended (total active: 0, recreate count: 5)
+[2026-10-19 23:09:38.139] [INFO   ] background keep-alive stopped
+[2026-10-19 23:09:38.139] [DEBUG  ] stop: active connections=0
+[2026-10-19 23:09:38.140] [INFO   ] Server stopped (model kept in memory for fast restart).
+[2026-10-20 19:14:41.704] [INFO   ] Selected model: Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf
+[2026-10-20 19:14:49.126] [INFO   ] Starting… loading Qwopus3.5-4B-Coder-MTP-Q4_K_M.gguf into memory
+[2026-10-20 19:14:52.990] [INFO   ] background keep-alive started (silent audio session active)
+[2026-10-20 19:14:52.990] [INFO   ] Startup gap: engine init 3.66s + server start 0.21s = 3.86s
+[2026-10-20 19:14:52.992] [INFO   ] Startup gap: engine init 3.66s + server start 0.21s = 3.86s
+[2026-10-20 19:14:52.992] [INFO   ] Context reduced to 160512 tokens by the device memory budget (requested 262144).
+[2026-10-20 19:14:52.992] [INFO   ] KV cache q8_0.
+[2026-10-20 19:14:52.992] [INFO   ] Model loaded (context 160512, build llamaserver-e192d3e). HTTP server listening on port 8443.
+[2026-10-20 19:14:52.992] [INFO   ] Reachable at http://192.168.3.3:8443
+[2026-10-20 19:15:02.991] [DEBUG  ] [heartbeat] total=11695MB available=3424626696B(3265MB) footprint=3017824248B(2878MB) rss=5278MB
+[2026-10-20 19:15:12.990] [DEBUG  ] [heartbeat] total=11695MB available=3425216520B(3266MB) footprint=3017234424B(2877MB) rss=5264MB
+[2026-10-20 19:15:22.991] [DEBUG  ] [heartbeat] total=11695MB available=3425183752B(3266MB) footprint=3017267192B(2877MB) rss=5265MB
+[2026-10-20 19:15:32.991] [DEBUG  ] [heartbeat] total=11695MB available=3425544200B(3266MB) footprint=3016906744B(2877MB) rss=5265MB
+[2026-10-20 19:15:39.096] [INFO   ] GET /v1/updates current=LlamaServer-unsigned.ipa 4134640B build=e192d3e previous=LlamaServer-unsigned.prev.ipa 4134621B build=unknown uploaded=2026-10-19T15:08:27Z
+[2026-10-20 19:15:42.991] [DEBUG  ] [heartbeat] total=11695MB available=3423037448B(3264MB) footprint=3019413496B(2879MB) rss=5269MB
+[2026-10-20 19:15:48.822] [INFO   ] GET /logs name=inference tail=400 backups=true -> llamaserver-inference.log:400 lines

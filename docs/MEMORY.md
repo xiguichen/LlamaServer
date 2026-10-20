@@ -19,13 +19,10 @@ in `ProcessMemory`; the policy stays pure).
 - A low but *valid* reading is deliberately respected: a config that no longer
   fits is refused by the pre-check with its numbers logged, which is the
   intended trade.
-- **No assumed fraction of RAM may override a successful measurement.** The
-  55%-of-physical floor was removed on 2026-10-18 because it silently overrode a
-  measurement: the device logged
-  `memory budget 6208012288B (6.21 GB) [limit 6442450944B (6.44 GB) = process-available 6350387288B + footprint 92063656B, physical 12263424000B]`
-  — 6.21 GB is 55% of physical minus headroom, a number no measurement produced,
-  and the floor sat *above* the measured 6.44 GB limit, so the measurement never
-  got a vote. That is why the line was unexplainable.
+- **No assumed fraction of RAM may override a successful measurement.** A
+  55%-of-physical floor was removed on 2026-10-18: it sat *above* the measured
+  6.44 GB limit, so the measurement never got a vote and the logged budget was a
+  number no reading produced.
 
 ### What this device actually reports
 
@@ -49,18 +46,14 @@ measures the same 6144 MB *with* the entitlement). The only knob above it,
 `increased-debugging-memory-limit`, opens the whole DRAM config and needs a
 profile that sideloading cannot carry.
 
-Corrections to older notes:
+Disproved (do not reuse):
 
-- The `~3.3 GB un-entitled` figure was a *class assumption* (`de71b9e`), never a
-  reading on this device.
-- The **~9 GB class was never real**: it came from adding `available` to a
-  4.58 GB reading that `MemoryBudget` records as **rss**, and rss is not the
+- "~3.3 GB un-entitled" — a *class assumption*, never a reading on this device.
+- "~9 GB" — came from adding `available` to an `rss` reading; rss is not the
   ceiling operand.
-- `MemoryLimitProbe` logs `base per-process limit N MB (kern.max_task_pmem)`,
-  but that half is uninformative: `sysctl kern.max_task_pmem` returns `0` even on
-  unsandboxed macOS, and `kern.max_task_footprint_mb` does not exist. Use the
-  measured ceiling half of the line; "equal numbers ⇒ entitlement decorative"
-  cannot be tested from that field.
+- `MemoryLimitProbe`'s "base per-process limit" half (`kern.max_task_pmem`) is
+  uninformative: it returns 0 even on unsandboxed macOS, and
+  `kern.max_task_footprint_mb` does not exist. Use the measured ceiling half.
 
 ### What the ceiling does not cover
 
@@ -136,13 +129,13 @@ fixed-size state. Counting all layers over-estimates KV cost interval× (observe
 ### Quantized KV cache
 
 `kvCacheType` q8_0/q4_0 is allowed only when `head_dim % 32 == 0` (llama.cpp
-b9553 validates per-head). Quantized `type_v` requires flash attention, so
+b11557 validates per-head). Quantized `type_v` requires flash attention, so
 `flash_attn_type` is forced `ENABLED` (AUTO can resolve off → constructor throw →
 NULL). Ineligible models fall back to f16 with a warn log
 (`KVCacheSpec.resolveCacheType`).
 
 Measured on device: **q4_0 reaches the full 262,144 context** where q8_0 clamps
-to ~160,512.
+to **160,512**.
 
 ### YaRN long-context
 

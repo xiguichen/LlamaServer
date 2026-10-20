@@ -1,5 +1,7 @@
 # MTP: Fuse the Draft Catch-up into the Next Draft Decode — Implementation Plan
 
+> **Historical (2026-10-14).** Completed. Current facts live in `docs/ENGINE.md`; do not use this plan as reference.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the one remaining full draft-model weight pass per full-acceptance MTP round by decoding the accepted tokens into the draft context as one multi-row batch instead of a separate one-row "catch-up" decode plus the next round's one-row draft decode.
