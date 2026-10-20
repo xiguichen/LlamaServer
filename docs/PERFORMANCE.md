@@ -168,8 +168,9 @@ suggested MTP was a loss.
 
 ### MTP depth 2: re-test (2026-10-20)
 
-The configured draft depth is now **2** (`mtpMaxDraft`, build `3e56c47`), so the
-depth-1 figures above are the baseline, not the current configuration.
+The draft depth was raised to **2** (`mtpMaxDraft`, build `3e56c47`) and then
+measured against depth 1 on the same harness — result below. The depth-1
+figures earlier in this file are the baseline, not the raised configuration.
 
 The earlier depth-2 run (2026-10-18) measured ~9–13% **slower** than plain
 decoding, but that run billed both GPU waits to `sample` (the draft's and the
@@ -182,41 +183,41 @@ Re-run the same paired protocol as depth 1:
 - identical prompt sequences, `temperature: 0`, byte-identical output required
 - one engine restart between configs; same model, context, KV type
 - read `accepted`/`depth` from the `MTP stats:` line — depth 2 should raise
-  accepted tokens/round; if acceptance stays ~2.0, the second draft is wasted
+  emitted tokens/round; if emitted/round stays ~2.0, the second draft is wasted
   work and the round is slower by construction
 - quote context length and pair the runs (thermals swing ~30%)
 
-**Measured 2026-10-20** (build `e192d3e`, `mtpMaxDraft = 2`, ctx 160,512, KV
-q8_0, `temperature: 0`, 256-token generations, a distinct prompt per size so
-none of the prefix is reused). Single run at depth 2; the depth-1 figures quoted
-below are the earlier baseline, so this is not a paired A/B:
+**Measured 2026-10-20, paired** (builds `e192d3e` = depth 2 and `7980625` =
+depth 1 — the same code, only the constant differs; ctx 160,512, KV q8_0,
+`temperature: 0`, 256-token generations, a distinct header per size so each
+case prefills from scratch, same case order on both builds):
 
-| prompt | emitted/round | accepted/round | hits | draft-gpu | verify-gpu | wall/round | gen t/s |
-|---|---|---|---|---|---|---|---|
-| 48 | 2.04 | 1.04 | 70% | 19.2 ms | 55.6 ms | 77.0 ms | 26.59 |
-| 6,883 | 2.16 | 1.16 | 80% | 21.2 ms | 75.8 ms | 99.0 ms | 21.90 |
-| 13,957 | 2.12 | 1.12 | 71% | 22.2 ms | 98.5 ms | 123.2 ms | 17.16 |
-| 21,028 | 2.08 | 1.08 | 73% | 24.4 ms | 117.1 ms | 144.2 ms | 14.43 |
+| prompt | d1 t/s | d2 t/s | Δ | d1 emit/rd | d2 emit/rd | d1 draft-gpu | d2 draft-gpu | d1 verify-gpu | d2 verify-gpu | d1 wall/rd | d2 wall/rd |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 48 | 26.16 | 26.59 | +1.6% | 1.69 | 2.04 | 9.7 ms | 19.2 ms | 52.1 ms | 55.6 ms | 64.8 ms | 77.0 ms |
+| 6,883 | 20.89 | 21.90 | +4.8% | 1.73 | 2.16 | 10.9 ms | 21.2 ms | 69.8 ms | 75.8 ms | 83.3 ms | 99.0 ms |
+| 13,957 | 16.55 | 17.16 | +3.7% | 1.74 | 2.12 | 12.2 ms | 22.2 ms | 90.4 ms | 98.5 ms | 105.2 ms | 123.2 ms |
+| 21,028 | 14.80 | 14.43 | −2.5% | 1.73 | 2.08 | 13.5 ms | 24.4 ms | 101.9 ms | 117.1 ms | 117.7 ms | 144.2 ms |
 
-**The second draft is mostly wasted.** With two drafts per round,
-accepted/round is 1.04–1.16 — the depth-2 link is accepted in only ~4–16% of
-rounds. Emitted/round therefore rises from depth 1's 2.03 to 2.04–2.16, while
-every round pays an extra chained draft (~19–24 ms of GPU) and a wider
-(3-row) verify.
+Depth 1 accepts 0.69–0.74 drafts/round (its single draft lands in ~70% of
+rounds); depth 2 accepts 1.04–1.16, so the **second link lands in ~35–43% of
+rounds**. That buys ~+20% emitted tokens per round, paid for by ~+19% wall per
+round: +10 ms of `draft-gpu` (the chained draft, roughly constant) and
++3.5–15 ms of `verify-gpu` (the third verify row, growing with the KV the
+verify attends over).
 
-- **Short context: a wash.** 26.59 t/s at 48 tokens, against depth 1's
-  27.84 t/s at 43 tokens (first pair) / 28.36 (thermal bracket).
-- **Long context: a loss.** 14.43 t/s at 21,028 tokens, against ~17.0 t/s
-  interpolated from the depth-1 table (18.10 at 17,711; 15.23 at 26,558) —
-  ~15% slower. The gap widens with context because the extra draft and the
-  third verify row scale with the KV the verify attends over.
-- **Prefill is unaffected** by depth (296–399 t/s at 6.9k–21k): the prompt is
-  mirrored into the draft context once either way.
+So depth 2 is a small win up to ~14k (+2–5%) and gives it back at 21k (−2.5%),
+where the wider verify has grown to +15 ms/round. Those gaps are near
+single-run thermal noise: a repeat of the 21k case with a reused prefix
+(21,021 of 21,028 tokens reused) measured `verify-gpu` 74–84 ms/round instead
+of 102 ms — up to ~20% from clock state alone. Read the result as **depth 2 is
+not a win**, not as a precise ranking; settling a ±5% question needs run-to-run
+repeats, not another single pair.
 
-Conclusion so far: depth 2 cannot pay for itself on this model — the MTP head's
-second prediction is accepted far too rarely. A paired depth-1/depth-2 run on
-one build and one thermal bracket would tighten the long-context number, but it
-cannot change the mechanism.
+This supersedes the 2026-10-19 estimate of "~9–13% slower": that compared
+against a different build and day, and the phase split now shows where the cost
+actually goes. Prefill is unaffected by depth (296–400 t/s at 6.9k–21k) — the
+prompt is mirrored into the draft context once either way.
 
 ### KV cache and prefix reuse
 
