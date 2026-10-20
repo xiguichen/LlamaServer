@@ -166,7 +166,7 @@ The paired numbers supersede the earlier unpaired note in the repo
 (`MTP-on 18.3/17.5` vs `off 19.9/19.7` t/s, context unrecorded), which had
 suggested MTP was a loss.
 
-### MTP depth 2: re-test (pending, 2026-10-19)
+### MTP depth 2: re-test (2026-10-20)
 
 The configured draft depth is now **2** (`mtpMaxDraft`, build `3e56c47`), so the
 depth-1 figures above are the baseline, not the current configuration.
@@ -186,7 +186,37 @@ Re-run the same paired protocol as depth 1:
   work and the round is slower by construction
 - quote context length and pair the runs (thermals swing ~30%)
 
-Rows go here once measured.
+**Measured 2026-10-20** (build `e192d3e`, `mtpMaxDraft = 2`, ctx 160,512, KV
+q8_0, `temperature: 0`, 256-token generations, a distinct prompt per size so
+none of the prefix is reused). Single run at depth 2; the depth-1 figures quoted
+below are the earlier baseline, so this is not a paired A/B:
+
+| prompt | emitted/round | accepted/round | hits | draft-gpu | verify-gpu | wall/round | gen t/s |
+|---|---|---|---|---|---|---|---|
+| 48 | 2.04 | 1.04 | 70% | 19.2 ms | 55.6 ms | 77.0 ms | 26.59 |
+| 6,883 | 2.16 | 1.16 | 80% | 21.2 ms | 75.8 ms | 99.0 ms | 21.90 |
+| 13,957 | 2.12 | 1.12 | 71% | 22.2 ms | 98.5 ms | 123.2 ms | 17.16 |
+| 21,028 | 2.08 | 1.08 | 73% | 24.4 ms | 117.1 ms | 144.2 ms | 14.43 |
+
+**The second draft is mostly wasted.** With two drafts per round,
+accepted/round is 1.04–1.16 — the depth-2 link is accepted in only ~4–16% of
+rounds. Emitted/round therefore rises from depth 1's 2.03 to 2.04–2.16, while
+every round pays an extra chained draft (~19–24 ms of GPU) and a wider
+(3-row) verify.
+
+- **Short context: a wash.** 26.59 t/s at 48 tokens, against depth 1's
+  27.84 t/s at 43 tokens (first pair) / 28.36 (thermal bracket).
+- **Long context: a loss.** 14.43 t/s at 21,028 tokens, against ~17.0 t/s
+  interpolated from the depth-1 table (18.10 at 17,711; 15.23 at 26,558) —
+  ~15% slower. The gap widens with context because the extra draft and the
+  third verify row scale with the KV the verify attends over.
+- **Prefill is unaffected** by depth (296–399 t/s at 6.9k–21k): the prompt is
+  mirrored into the draft context once either way.
+
+Conclusion so far: depth 2 cannot pay for itself on this model — the MTP head's
+second prediction is accepted far too rarely. A paired depth-1/depth-2 run on
+one build and one thermal bracket would tighten the long-context number, but it
+cannot change the mechanism.
 
 ### KV cache and prefix reuse
 
