@@ -3,22 +3,25 @@ import XCTest
 /// The budget follows the per-process ceiling the device *reports*, and nothing
 /// else: no assumed fraction of RAM may override a successful measurement.
 ///
-/// Four measured facts pin this policy (all on the 12.26GB test device):
+/// Measured facts that pin this policy (all on the 12.26GB test device):
 /// - A 12GB device's per-process ceiling sits well below total RAM, so budgeting
 ///   against full physical RAM plans memory the process can never hold and
 ///   jetsam SIGKILLs the app with no log.
 /// - `os_proc_available_memory()` reports **headroom, not the ceiling**: it
 ///   subtracts the caller's current footprint, so the ceiling is
-///   `available + footprint`. On its own the raw reading under-reports the
-///   device's real allowance (6.35GB available with a 92MB footprint at init,
-///   while the same run held 4.58GB with 4.16GB still available).
-/// - The ceiling really is raised by `com.apple.developer.kernel.increased-memory-limit`:
-///   entitled installs reach the ~9GB class, un-entitled ones land near half of
-///   physical.
-/// - **The ceiling rises with the process**, so one reading is not enough: the
-///   same launch reported 6.44GB at the end of backend init and ~8.74GiB once
-///   the model was loaded. The largest successful reading is the one to plan
-///   against.
+///   `available + footprint`.
+/// - The device's ceiling is **exactly 6 GiB (6,442,450,944B)** — every clean
+///   reading of the launch sums to it, whatever the footprint. It is Apple's
+///   per-device tier, not a fraction of RAM, and no app-side choice exceeds it.
+/// - The ceiling is a **constant of the launch, not something that rises with
+///   the process**. When readings disagree, one operand was stale. The policy
+///   resolves that conservatively — the smallest successful reading wins —
+///   because the failure modes are asymmetric: planning above the real limit is
+///   a SIGKILL, planning below it only costs context tokens.
+///
+/// The ~9GB class the notes used to claim was never real: it came from adding
+/// `available` to an **rss** reading, and rss is not the ceiling operand. A
+/// policy that lets such a reading win budgets KV the kernel will not grant.
 ///
 /// The 55%-of-physical floor was removed on 2026-10-18: it silently overrode a
 /// *successful* measurement, and it is exactly why the device logged a number
@@ -39,12 +42,19 @@ final class MemoryBudgetTests: XCTestCase {
     private let initAvailable = 6_350_387_288
     private let initFootprint = 92_063_656
 
-    /// The same run later: the heartbeat logged `available=4359432632B(4157MB)`
-    /// with the model resident, so `available + footprint` was ≈9.17GB. The
-    /// footprint here is chosen to land on that class (the pre-change heartbeat
-    /// only carried rss; the line now prints the footprint itself).
-    private let loadedAvailable = 4_359_432_632
-    private let loadedFootprint = 4_806_000_000
+    /// The same run later, idle with both contexts live: `available` 4.36GB
+    /// with a 1.78GB footprint. The sum is the *same* 6,442,450,944B — the
+    /// ceiling did not rise when the model loaded.
+    private let loadedAvailable = 4_576_193_192
+    private let loadedFootprint = 1_866_257_752
+
+    /// The disproved reading the old policy planned against: `available` paired
+    /// with a 4.58GB **rss** number instead of `phys_footprint`, summing to
+    /// ≈9.17GB. rss is not the ceiling operand; no reading on the device ever
+    /// produced this sum. It exists here only to prove it cannot inflate the
+    /// budget.
+    private let inflatedAvailable = 4_359_432_632
+    private let inflatedFootprint = 4_806_000_000
 
     private var initReading: MemoryBudget.Reading {
         MemoryBudget.Reading("at init", available: initAvailable, footprint: initFootprint)
@@ -52,17 +62,20 @@ final class MemoryBudgetTests: XCTestCase {
     private var loadedReading: MemoryBudget.Reading {
         MemoryBudget.Reading("after model load", available: loadedAvailable, footprint: loadedFootprint)
     }
+    private var inflatedReading: MemoryBudget.Reading {
+        MemoryBudget.Reading("rss mixed in", available: inflatedAvailable, footprint: inflatedFootprint)
+    }
 
     // MARK: - The ceiling, reconstructed from headroom + footprint
 
     func testLimitIsAvailablePlusFootprint() {
         // os_proc_available_memory() = ceiling − footprint, so the ceiling is
-        // their sum. This is the number the entitlement actually grants.
+        // their sum. On this device every real reading sums to 6 GiB.
         XCTAssertEqual(
             MemoryBudget.processLimit(physicalRAM: devicePhysical,
-                                      available: 6_368_557_120,
-                                      footprint: 2_890_000_000),
-            9_258_557_120)
+                                      available: initAvailable,
+                                      footprint: initFootprint),
+            6_442_450_944)
     }
 
     func testLimitIsZeroWhenAvailableIsUnknown() {
@@ -87,24 +100,41 @@ final class MemoryBudgetTests: XCTestCase {
 
     // MARK: - Which reading wins
 
-    func testLargestSuccessfulReadingWins() {
-        // The case the device actually presents: a low reading at init, a higher
-        // one once the model is in. The higher ceiling is the real allowance.
-        let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical,
-                                           readings: [initReading, loadedReading])
+    func testConsistentReadingsAllMeasureTheSameCeiling() {
+        // The case the device actually presents: every reading of the launch
+        // sums to the same 6 GiB tier, whatever the footprint at the time.
+        let readings = [initReading, loadedReading]
+        let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical, readings: readings)
+        XCTAssertEqual(ceiling.bytes, 6_442_450_944)
+        XCTAssertEqual(ceiling.bytes, initAvailable + initFootprint)
         XCTAssertEqual(ceiling.bytes, loadedAvailable + loadedFootprint)
-        XCTAssertEqual(ceiling.readingIndex, 1)
-        XCTAssertEqual(ceiling.source([initReading, loadedReading]), "after model load")
+        XCTAssertEqual(ceiling.readingIndex, 0)
+        XCTAssertEqual(ceiling.source(readings), "at init")
         XCTAssertFalse(ceiling.usedFallback)
     }
 
-    func testMoreReadingsDoNotRaiseTheCeilingAboveTheBestMeasurement() {
-        // Guard against "average" or "latest wins" creeping in: a *later* low
-        // reading must not shrink the ceiling either.
+    func testDisagreeingReadingsResolveToTheSmallest() {
+        // A reading that sums above another is arithmetically inconsistent —
+        // one operand was stale. The smallest wins regardless of order: the
+        // failure modes are asymmetric, since planning above the real limit is
+        // a jetsam SIGKILL while planning below it only costs context tokens.
+        let forward = MemoryBudget.ceiling(physicalRAM: devicePhysical,
+                                           readings: [initReading, inflatedReading])
+        XCTAssertEqual(forward.bytes, initAvailable + initFootprint)
+        let reversed = MemoryBudget.ceiling(physicalRAM: devicePhysical,
+                                            readings: [inflatedReading, initReading])
+        XCTAssertEqual(reversed.bytes, initAvailable + initFootprint)
+    }
+
+    func testInflatedRssReadingCannotRaiseTheBudget() {
+        // The regression: pairing `available` with a 4.58GB rss number produced
+        // a ~9.17GB "ceiling", which approved a 262,144-token q8_0 KV the
+        // device cannot hold. The budget must stay under the measured 6 GiB.
         let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical,
-                                           readings: [loadedReading, initReading])
-        XCTAssertEqual(ceiling.bytes, loadedAvailable + loadedFootprint)
-        XCTAssertEqual(ceiling.readingIndex, 0)
+                                           readings: [initReading, inflatedReading])
+        let budget = MemoryBudget.budgetBytes(physicalRAM: devicePhysical, ceiling: ceiling.bytes)
+        XCTAssertEqual(budget, 6_442_450_944 - 512 * MB)
+        XCTAssertLessThan(budget, 6 * GB, "the budget can never reach the whole 6 GiB tier")
     }
 
     func testFailedReadingNeverWins() {
@@ -142,26 +172,30 @@ final class MemoryBudgetTests: XCTestCase {
     // MARK: - The regression: the measured ceiling drives the budget
 
     func testMeasuredCeilingDrivesTheBudget() {
-        // The device grants ~9.17GB once loaded; the budget must not throw a
-        // third of it away (the old floor computed 6,208,012,288B, below the
-        // *init* ceiling of 6,442,450,944B even before the second reading).
+        // The device grants exactly 6 GiB; the budget is that minus the
+        // transient headroom, and never a byte above the tier itself.
         let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical,
                                            readings: [initReading, loadedReading])
         let budget = MemoryBudget.budgetBytes(physicalRAM: devicePhysical, ceiling: ceiling.bytes)
         XCTAssertEqual(budget, ceiling.bytes - 512 * MB)
-        XCTAssertGreaterThan(budget, 8_000_000_000)
+        XCTAssertEqual(budget, 5_905_580_032)
+        XCTAssertLessThan(budget, 6 * GB)
     }
 
-    func testMeasuredBudgetFitsTheConfiguredKVWithHeadroomToSpare() {
-        // The consequence that matters: at 131,072 context and 17,408 B/token the
-        // q8_0 KV is 2.28GB. Under the old 6.21GB budget only ~0.78GB of slack
-        // was left, so a slightly bigger model or KV type got clamped.
+    func testMeasuredBudgetFitsTheMeasuredQ8Context() {
+        // Consequence that matters at 131,072 context and 17,408 B/token: the
+        // q8_0 KV is 2.28GB. Under the real 5.91GB budget (2.78GB model plus
+        // the 320MB compute reserve) it fits with ~0.5GB of slack — which is
+        // exactly why the device measures 160,512 tokens for q8_0, while the
+        // disproved 9.17GB budget would have approved the full 262,144.
         let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical,
                                            readings: [initReading, loadedReading])
         let budget = MemoryBudget.budgetBytes(physicalRAM: devicePhysical, ceiling: ceiling.bytes)
         let kvBudget = budget - 2_780_000_000 - 320 * MB
-        XCTAssertGreaterThan(kvBudget, 131_072 * 17_408 + 1024 * MB,
-                             "131,072-token q8_0 KV must leave real slack, not ~0.8GB")
+        XCTAssertGreaterThan(kvBudget, 131_072 * 17_408 + 400 * MB,
+                             "131,072-token q8_0 KV must fit the measured budget")
+        XCTAssertLessThan(kvBudget, 262_144 * 17_408,
+                          "the full window does not fit q8_0 on this device")
     }
 
     // MARK: - A low but valid reading is respected, not overridden
@@ -233,7 +267,7 @@ final class MemoryBudgetTests: XCTestCase {
                                         readings: readings, physicalRAM: devicePhysical)
         XCTAssertTrue(line.contains("memory budget \(budget)B"), line)
         XCTAssertTrue(line.contains("ceiling \(loadedAvailable + loadedFootprint)B"), line)
-        XCTAssertTrue(line.contains("from after model load"), line)
+        XCTAssertTrue(line.contains("from at init"), line)
         XCTAssertTrue(line.contains("at init: available \(initAvailable)B"), line)
         XCTAssertTrue(line.contains("footprint \(initFootprint)B"), line)
         XCTAssertTrue(line.contains("-> \(initAvailable + initFootprint)B"), line)

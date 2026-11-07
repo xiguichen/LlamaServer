@@ -209,14 +209,14 @@ final class LlamaInference: @unchecked Sendable {
         //
         // The budget is the device's own measured ceiling minus transient
         // headroom (see MemoryBudget) — no assumed fraction of RAM may override
-        // a successful measurement. One reading is not enough, though: the
-        // allowance is granted lazily, so the earliest sample can be the
-        // smallest (measured 2026-10-18, one launch: 6.35GB available + a 90.2MB
-        // footprint at init, then 6.29GB available + a 153.8MB footprint after
-        // the model loaded — the sum is exactly 6,442,450,944B both times). So
-        // the first reading is taken here and the second right after the load, and
-        // the larger wins; the pre-check can only use the reading that exists
-        // before memory is committed.
+        // a successful measurement. The ceiling is a constant of the launch:
+        // measured 2026-10-18, one launch gave 6.35GB available + a 90.2MB
+        // footprint at init and 6.29GB available + a 153.8MB footprint after the
+        // model loaded — each sum is exactly 6,442,450,944B. A second reading
+        // is taken after the load to check that (and to catch a stale operand),
+        // but the policy resolves any disagreement downward, so a bad reading
+        // can never plan memory the kernel will not grant. The pre-check can
+        // only use the reading that exists before memory is committed.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
         var readings = [MemoryBudget.Reading("at init",
                                              available: ProcessMemory.availableBytes(),
@@ -317,11 +317,11 @@ final class LlamaInference: @unchecked Sendable {
         }
         self.vocab = loadedVocab
 
-        // Second memory reading, now that the model's pages are committed. The
-        // allowance rises as the process settles (the init sample sees a
-        // container that is still being set up), so the ceiling — and the KV
-        // budget below — is the larger of the readings. Logged here, so the
-        // clamp that follows and the line that justifies it agree.
+        // Second memory reading, now that the model's pages are committed. It
+        // is a consistency check on the init reading, not an upgrade: the
+        // device's ceiling is a constant of the launch, and when readings
+        // disagree the policy resolves downward (see MemoryBudget). Logged
+        // here, so the clamp that follows and the line that justifies it agree.
         readings.append(MemoryBudget.Reading("after model load",
                                              available: ProcessMemory.availableBytes(),
                                              footprint: ProcessMemory.footprintBytes()))

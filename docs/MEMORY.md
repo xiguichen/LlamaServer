@@ -12,8 +12,14 @@ in `ProcessMemory`; the policy stays pure).
 - `os_proc_available_memory()` returns the limit **minus the caller's current
   footprint**, so the ceiling is their **sum** (capped at physical).
 - `available == 0` is a **failed read**, not a zero ceiling.
-- **The largest successful reading of the launch wins.** Half of physical applies
-  only when *every* reading failed, and the line says
+- **Readings of one launch all measure the same constant.** The ceiling is a
+  property of the device+launch, not something that rises as the process
+  settles.
+- **When readings disagree, the smallest successful reading wins.** A
+  disagreement means one operand was stale, and the failure modes are
+  asymmetric: planning above the real ceiling is a jetsam SIGKILL, planning
+  below it only costs context tokens. A failed reading never wins.
+- Half of physical applies only when *every* reading failed, and the line says
   `from fallback (every reading failed)` so an assumption is never read as a
   measurement.
 - A low but *valid* reading is deliberately respected: a config that no longer
@@ -23,6 +29,11 @@ in `ProcessMemory`; the policy stays pure).
   55%-of-physical floor was removed on 2026-10-18: it sat *above* the measured
   6.44 GB limit, so the measurement never got a vote and the logged budget was a
   number no reading produced.
+- **No stale reading may inflate the budget either.** The old "largest reading
+  wins" rule let `available` paired with a 4.58 GB **rss** value (not
+  `phys_footprint`) produce a ~9.17 GB ceiling, which approved a 262,144-token
+  q8_0 KV the device cannot hold. Resolving downward is what makes the 6 GiB
+  tier a hard limit rather than a suggestion.
 
 ### What this device actually reports
 
@@ -65,8 +76,9 @@ measurement of the engine's total.
 ### When readings are taken
 
 `LlamaInference.init` reads **twice** (`at init`, `after model load`), plans the
-KV clamp on the larger, and logs the budget line twice (the pre-load one exists
-so a refusal leaves the numbers on disk; the post-load one is authoritative).
+KV clamp on the conservative consensus (the smaller when they disagree), and
+logs the budget line twice (the pre-load one exists so a refusal leaves the
+numbers on disk; the post-load one is authoritative).
 The file-size pre-check keeps the pre-load reading — it must run before memory is
 committed, so it is deliberately conservative.
 

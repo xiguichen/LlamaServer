@@ -28,17 +28,18 @@ import Foundation
 /// and it is reported as a fallback so it can never be mistaken for a
 /// measurement.
 ///
-/// Why one reading is not enough: the allowance can rise as the process
-/// settles, so the earliest sample can be the smallest — that is why every
-/// reading is taken and the largest wins. Three clean samples of 2026-10-18
-/// (build `698dbbf`) all give the *same* ceiling — 6,352,271,400 + 90,179,544
-/// at init, 6,288,683,008 + 153,767,936 after the model load, 4,576,193,192 +
+/// Why one reading is not enough: three clean samples of 2026-10-18 (build
+/// `698dbbf`) all give the *same* ceiling — 6,352,271,400 + 90,179,544 at
+/// init, 6,288,683,008 + 153,767,936 after the model load, 4,576,193,192 +
 /// 1,866,257,752 idle with both contexts live; each sum is exactly
-/// 6,442,450,944B (6GiB) — so here the policy has nothing to choose between.
-/// 6GiB is the **entitled** class (`project.yml`: ~3.3GB un-entitled → ~6GB+
-/// entitled), so the uplift is working. What is *not* real is the ~9GB class
-/// these notes used to claim: that came from adding `available` to a 4.58GB
-/// reading recorded as **rss**, and rss is not the ceiling operand.
+/// 6,442,450,944B (6GiB). The ceiling is a constant of the launch, not
+/// something that grows as the process settles. When readings disagree, at
+/// least one operand was stale, and the choice is asymmetric: **the smallest
+/// successful reading wins**, because planning *above* the real ceiling is a
+/// jetsam SIGKILL while planning below it only costs context tokens. The
+/// ~9GB class these notes once chased came from adding `available` to a
+/// 4.58GB reading recorded as **rss**; rss is not the ceiling operand, and
+/// the policy must never let such a reading inflate the budget.
 ///
 /// What the ceiling does *not* cover is just as important as what it does: the
 /// model's mmap (loading a 2.78GB model moved the footprint by 63.6MB) and the
@@ -68,11 +69,11 @@ struct MemoryBudget {
 
     /// Reconstructs the per-process ceiling from one reading.
     ///
-    /// The API returns `ceiling − footprint`, so the ceiling is the sum. This is
-    /// where the increased-memory-limit entitlement shows up, as a larger sum:
-    /// on this install every sample of 2026-10-18 sums to 6,442,450,944B (6GiB),
-    /// the ~6GB+ entitled class the entitlement is documented to grant (the
-    /// un-entitled limit is ~3.3GB) — see the type comment for the samples.
+    /// The API returns `ceiling − footprint`, so the ceiling is the sum. On this
+    /// install every sample of 2026-10-18 sums to 6,442,450,944B (6GiB), the
+    /// device-tree tier the entitlement unlocks — see the type comment for the
+    /// samples. One reading is not the ceiling by itself: `ceiling` reconciles
+    /// every reading, and a disagreement can only lower the answer.
     ///
     /// - Parameters:
     ///   - physicalRAM: total physical memory (`ProcessInfo.physicalMemory`).
@@ -90,11 +91,15 @@ struct MemoryBudget {
 
     /// The ceiling to plan against, chosen from every reading of this launch.
     ///
-    /// The largest *successful* reading wins: the allowance rises as the process
-    /// grows, so the earliest sample is the smallest. Nothing here may raise the
-    /// ceiling above what the device reported, and a failed reading
+    /// The ceiling is a property of the device+launch, so every consistent
+    /// reading measures the same constant. When they disagree, one of the two
+    /// operands was read at a different moment (or is not the footprint at
+    /// all), and the disagreement is resolved **conservatively**: the smallest
+    /// successful reading wins. The failure modes are asymmetric — a ceiling
+    /// above the real limit plans memory the kernel will SIGKILL, while one
+    /// below it merely clamps the context. A failed reading
     /// (`available == 0`) never wins. Only when every reading failed does the
-    /// documented un-entitled half-of-physical value apply, flagged by
+    /// documented half-of-physical value apply, flagged by
     /// `readingIndex == nil` so callers can log it as an assumption.
     struct Ceiling {
         /// The ceiling in bytes.
@@ -114,13 +119,15 @@ struct MemoryBudget {
     }
 
     static func ceiling(physicalRAM: Int, readings: [Reading]) -> Ceiling {
-        var best = 0
+        var best = Int.max
         var bestIndex: Int?
         for (i, reading) in readings.enumerated() {
             let limit = processLimit(physicalRAM: physicalRAM,
                                      available: reading.available,
                                      footprint: reading.footprint)
-            if limit > best {
+            // `processLimit` returns 0 for a failed read; 0 never wins.
+            guard limit > 0 else { continue }
+            if limit < best {
                 best = limit
                 bestIndex = i
             }
