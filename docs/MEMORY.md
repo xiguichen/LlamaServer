@@ -52,16 +52,17 @@ Three samples of 2026-10-18 (build `698dbbf`) each sum to **exactly
 | after model load | 6.29 GB | 153.8 MB |
 | idle, both contexts live | 4.36 GB | 1.78 GB |
 
-That is **exactly the 6 GiB tier the kernel bakes for this device**, an Apple
+That is **the iOS 26 6 GiB tier the kernel bakes for this device**, an Apple
 per-device constant rather than a fraction of RAM: xnu's
 `memorystatus_get_default_task_active_limit` takes
 `MAX(max_task_footprint_mb, memorystatus_entitled_max_task_footprint_mb)` and the
 second term is a **device-tree tunable** (`entitled_max_task_pmem`,
-`TUNABLE_DT_WRITEABLE`). The entitlement only *unlocks* the tier; no SDK, build
-flag or app-side choice can exceed it (an independent report from the same model
-measures the same 6144 MB *with* the entitlement). The only knob above it,
+`TUNABLE_DT_WRITEABLE`). The entitlement only *unlocks* the tier; on iOS 26 no
+SDK, build flag or app-side choice exceeds it (an independent report from the
+same model measures the same 6144 MB *with* the entitlement). The next knob,
 `increased-debugging-memory-limit`, opens the whole DRAM config and needs a
-profile that sideloading cannot carry.
+profile that sideloading cannot carry. iOS 27's Game Mode tier (below) is the
+supported way past 6 GiB without that profile.
 
 ### iOS 27 Game Mode raises the tier to 8 GiB
 
@@ -91,6 +92,16 @@ the model load (up to 5 s) and stops when three consecutive readings agree.
 `MemoryBudget.settledCeiling` accepts the highest *corroborated* plateau and
 still falls back to smallest-wins when no plateau exists, so a lone high reading
 (the old `available + rss` 9.17 GB shape) never wins.
+
+**Measured 2026-11-07 (build `85e00fc`, iOS 27, Game Mode on):** the init
+reading was already `8,499,427,416 B + 90,507,176 B = 8,589,934,592 B`
+(**8 GiB**); the post-load plateau settled at `8,412,803,144 B + 177,131,448 B
+= 8,589,934,592 B` after 0.51 s. The budget became **8,053,063,680 B
+(7.5 GiB)**, up from 5,905,580,032 B (5.91 GB) on the 6 GiB tier, with no
+jetsam or error lines. q4_0 still reaches the model's full 262,144-token
+window. The extra budget is available to the KV clamp, but q8_0's new ceiling
+has **not** been re-measured yet (it clamped to 160,512 tokens on the 6 GiB
+tier); run it before quoting a q8_0 context.
 
 Disproved (do not reuse):
 
