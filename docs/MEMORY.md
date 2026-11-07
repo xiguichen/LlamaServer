@@ -5,20 +5,24 @@ clamping, KV quantization, YaRN, or Metal pre-warm.
 
 ## The memory ceiling is measured, never assumed
 
-`MemoryBudget.ceiling` derives the ceiling from readings of
+`MemoryBudget.settledCeiling` derives the planning ceiling from readings of
 `os_proc_available_memory()` + `task_vm_info.phys_footprint` (the syscalls live
-in `ProcessMemory`; the policy stays pure).
+in `ProcessMemory`; the policy stays pure). `MemoryBudget.ceiling` is the
+conservative smallest-wins fallback it uses when no plateau exists.
 
 - `os_proc_available_memory()` returns the limit **minus the caller's current
   footprint**, so the ceiling is their **sum** (capped at physical).
 - `available == 0` is a **failed read**, not a zero ceiling.
-- **Readings of one launch all measure the same constant.** The ceiling is a
-  property of the device+launch, not something that rises as the process
-  settles.
-- **When readings disagree, the smallest successful reading wins.** A
-  disagreement means one operand was stale, and the failure modes are
+- **While the tier is unchanged, readings measure the same constant.** The
+  ceiling is a property of the device+state, not something that rises as the
+  process settles. iOS 27 adds one deliberate exception: Game Mode raises the
+  12GB A19 Pro tier from 6GiB to 8GiB mid-launch (see below).
+- **Within a state, when readings disagree, the smallest successful reading
+  wins.** A disagreement means one operand was stale, and the failure modes are
   asymmetric: planning above the real ceiling is a jetsam SIGKILL, planning
-  below it only costs context tokens. A failed reading never wins.
+  below it only costs context tokens. A failed reading never wins. A *rise* is
+  accepted only as a **corroborated plateau** (three consecutive readings at the
+  same new limit); a lone high reading still loses.
 - Half of physical applies only when *every* reading failed, and the line says
   `from fallback (every reading failed)` so an assumption is never read as a
   measurement.
@@ -33,7 +37,9 @@ in `ProcessMemory`; the policy stays pure).
   wins" rule let `available` paired with a 4.58 GB **rss** value (not
   `phys_footprint`) produce a ~9.17 GB ceiling, which approved a 262,144-token
   q8_0 KV the device cannot hold. Resolving downward is what makes the 6 GiB
-  tier a hard limit rather than a suggestion.
+  tier a hard limit rather than a suggestion. The later Game Mode uplift is
+  accepted only as a corroborated plateau, so the same guard still rejects a
+  single stale reading.
 
 ### What this device actually reports
 
@@ -57,6 +63,35 @@ measures the same 6144 MB *with* the entitlement). The only knob above it,
 `increased-debugging-memory-limit`, opens the whole DRAM config and needs a
 profile that sideloading cannot carry.
 
+### iOS 27 Game Mode raises the tier to 8 GiB
+
+iOS 27 raises the 12 GB A19 Pro per-process ceiling from **6 GiB (6,144 MiB)
+to 8 GiB (8,192 MiB) while Game Mode is active**. This is not a larger
+entitlement: `increased-memory-limit` still unlocks only the 6 GiB tier, and
+the extra 2 GiB appears only when the OS turns Game Mode on for the app. Game
+Mode activates a few seconds after a Game-Mode-capable app is foregrounded, so
+the same launch can read 6,144 MiB first and 8,192 MiB moments later. Sources:
+the LiveContainer iOS 27 report (8 GB requires Game Mode; add
+`GCSupportsGameMode`), a Playport device trace (6,144 MiB at app start, 8,192
+MiB once Game Mode's banner appeared), and the iOS 27 beta 3 report of the
+raised cap on 12 GB phones.
+
+The app opts in through `LSSupportsGameMode` (iOS 26+), `GCSupportsGameMode`
+(iOS 18+) and `LSApplicationCategoryType: public.app-category.games` in
+`project.yml`. Consequences:
+
+- the system shows the Game Mode banner while it is on;
+- App Review rejects non-games that opt in, so this is for the sideloaded build;
+- if the user disables Game Mode for the app, the ceiling drops back to 6 GiB
+  and the budget follows the measurement.
+
+Because the tier moves mid-launch, the planning reading is a **settled plateau**,
+not a single sample: `ProcessMemory.settleCeiling` samples every 250 ms after
+the model load (up to 5 s) and stops when three consecutive readings agree.
+`MemoryBudget.settledCeiling` accepts the highest *corroborated* plateau and
+still falls back to smallest-wins when no plateau exists, so a lone high reading
+(the old `available + rss` 9.17 GB shape) never wins.
+
 Disproved (do not reuse):
 
 - "~3.3 GB un-entitled" — a *class assumption*, never a reading on this device.
@@ -75,12 +110,16 @@ measurement of the engine's total.
 
 ### When readings are taken
 
-`LlamaInference.init` reads **twice** (`at init`, `after model load`), plans the
-KV clamp on the conservative consensus (the smaller when they disagree), and
-logs the budget line twice (the pre-load one exists so a refusal leaves the
-numbers on disk; the post-load one is authoritative).
-The file-size pre-check keeps the pre-load reading — it must run before memory is
-committed, so it is deliberately conservative.
+`LlamaInference.init` takes a conservative reading at init (for the file-size
+pre-check and so a refusal leaves the numbers on disk), then after the model
+load samples the ceiling until it is stable (`ProcessMemory.settleCeiling`:
+three agreeing readings 250 ms apart) and plans the KV clamp on
+`MemoryBudget.settledCeiling`. The log line lists every sample and names the
+settled winner; a 6 GiB init followed by an 8 GiB settled plateau is therefore
+visible in one line. The probe line (`MemoryLimitProbe`) is logged at both
+points, so a reader can see which ceiling the context was actually planned
+against. If the sampler never sees a plateau, `settledCeiling` falls back to the
+conservative smallest-successful rule.
 
 The budget line prints each reading's raw `available` + `footprint` + derived
 ceiling and names the winner, so the derivation is checkable from one line. The

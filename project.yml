@@ -45,6 +45,18 @@ targets:
         # Let users add .gguf models via the Files app / Finder file sharing.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # iOS 27 raises the per-process ceiling from 6GiB to 8GiB on 12GB
+        # A19 Pro devices only while Game Mode is active. Game Mode is the OS's
+        # supported trigger; the increased-memory-limit entitlement alone still
+        # tops out at 6GiB. GCSupportsGameMode is the iOS 18+ key,
+        # LSSupportsGameMode the iOS 26+ key, and the application category is
+        # part of Game Mode eligibility. This is a sideloaded build: App Review
+        # rejects non-games that opt in, and the system shows a Game Mode
+        # banner while it is active. If Game Mode is disabled for the app, the
+        # measured ceiling drops back to 6GiB and the budget follows it.
+        LSSupportsGameMode: true
+        GCSupportsGameMode: true
+        LSApplicationCategoryType: public.app-category.games
         # We are an HTTP *server*; allow local networking prompts.
         NSLocalNetworkUsageDescription: "LlamaServer serves LLM requests to other devices on your local network."
         # Bonjour services trigger the iOS local network permission dialog

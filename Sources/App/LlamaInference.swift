@@ -209,14 +209,16 @@ final class LlamaInference: @unchecked Sendable {
         //
         // The budget is the device's own measured ceiling minus transient
         // headroom (see MemoryBudget) — no assumed fraction of RAM may override
-        // a successful measurement. The ceiling is a constant of the launch:
-        // measured 2026-10-18, one launch gave 6.35GB available + a 90.2MB
-        // footprint at init and 6.29GB available + a 153.8MB footprint after the
-        // model loaded — each sum is exactly 6,442,450,944B. A second reading
-        // is taken after the load to check that (and to catch a stale operand),
-        // but the policy resolves any disagreement downward, so a bad reading
-        // can never plan memory the kernel will not grant. The pre-check can
-        // only use the reading that exists before memory is committed.
+        // a successful measurement. While the tier is unchanged the ceiling is
+        // a constant of the launch: measured 2026-10-18, one launch gave 6.35GB
+        // available + a 90.2MB footprint at init and 6.29GB available + a
+        // 153.8MB footprint after the model loaded — each sum is exactly
+        // 6,442,450,944B. iOS 27 can raise that tier once, to 8GiB, when Game
+        // Mode activates; the post-load sample below waits for the new plateau
+        // and `settledCeiling` accepts only a corroborated rise. A single bad
+        // reading still cannot plan memory the kernel will not grant. The
+        // pre-check can only use the reading that exists before memory is
+        // committed.
         let totalRAM = Int(ProcessInfo.processInfo.physicalMemory)
         var readings = [MemoryBudget.Reading("at init",
                                              available: ProcessMemory.availableBytes(),
@@ -317,22 +319,37 @@ final class LlamaInference: @unchecked Sendable {
         }
         self.vocab = loadedVocab
 
-        // Second memory reading, now that the model's pages are committed. It
-        // is a consistency check on the init reading, not an upgrade: the
-        // device's ceiling is a constant of the launch, and when readings
-        // disagree the policy resolves downward (see MemoryBudget). Logged
-        // here, so the clamp that follows and the line that justifies it agree.
-        readings.append(MemoryBudget.Reading("after model load",
-                                             available: ProcessMemory.availableBytes(),
-                                             footprint: ProcessMemory.footprintBytes()))
-        let ceiling = MemoryBudget.ceiling(physicalRAM: totalRAM, readings: readings)
+        // Second memory snapshot, now that the model's pages are committed.
+        // The model load is also the window in which iOS 27's Game Mode can
+        // raise the per-process tier from 6GiB to 8GiB (it activates a few
+        // seconds after a Game-Mode-capable app is foregrounded). Sample until
+        // the ceiling holds still, then accept only a corroborated plateau: the
+        // one legitimate rise is allowed, while a single high reading still
+        // loses to the conservative rule (the 9.17GB `available + rss`
+        // regression). The pre-load reading stays in the array so the log shows
+        // both states and the weight of evidence.
+        let settleStart = Date()
+        let settled = ProcessMemory.settleCeiling(physicalRAM: totalRAM,
+                                                  label: "after model load")
+        let settleSeconds = Date().timeIntervalSince(settleStart)
+        readings.append(contentsOf: settled.readings)
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: totalRAM,
+                                                  readings: readings,
+                                                  stableSamples: settled.stableSamples)
         let budget = MemoryBudget.budgetBytes(physicalRAM: totalRAM, ceiling: ceiling.bytes)
         FileLogger.shared.info(MemoryBudget.logLine(budget: budget, ceiling: ceiling,
                                                     readings: readings, physicalRAM: totalRAM))
+        // Re-log the probe with the final ceiling: the init line above may
+        // legitimately show the pre-Game-Mode 6GiB tier, and a reader must be
+        // able to see which ceiling the context was actually planned against.
+        FileLogger.shared.info(MemoryLimitProbe.line(
+            baseLimitMB: MemoryLimitProbe.baseLimitMB(),
+            ceilingBytes: ceiling.bytes,
+            entitlement: MemoryLimitProbe.entitlementPresent()))
         if ceiling.usedFallback {
             FileLogger.shared.warn(
                 "memory ceiling fell back to half of physical (\(ceiling.bytes)B) — " +
-                "neither reading was usable")
+                "every sample failed")
         }
 
         // Clamp the context size to (a) the model's trained window, (b) a hard
@@ -595,6 +612,7 @@ final class LlamaInference: @unchecked Sendable {
         var loadPhases = StartupTimer()
         loadPhases.record("backend init", seconds: backendInitSeconds)
         loadPhases.record("model load", seconds: modelLoadSeconds)
+        loadPhases.record("memory settle", seconds: settleSeconds)
         loadPhases.record("context", seconds: ctxCreateSeconds)
         if wantMtp { loadPhases.record("mtp draft", seconds: mtpSetupSeconds) }
         FileLogger.shared.info("load phases: \(loadPhases.summary())")

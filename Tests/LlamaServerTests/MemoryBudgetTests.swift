@@ -13,11 +13,15 @@ import XCTest
 /// - The device's ceiling is **exactly 6 GiB (6,442,450,944B)** — every clean
 ///   reading of the launch sums to it, whatever the footprint. It is Apple's
 ///   per-device tier, not a fraction of RAM, and no app-side choice exceeds it.
-/// - The ceiling is a **constant of the launch, not something that rises with
-///   the process**. When readings disagree, one operand was stale. The policy
-///   resolves that conservatively — the smallest successful reading wins —
-///   because the failure modes are asymmetric: planning above the real limit is
-///   a SIGKILL, planning below it only costs context tokens.
+/// - While the tier is unchanged, the ceiling is **constant for the launch, not
+///   something that rises with the process**. When readings disagree, one
+///   operand was stale. The policy resolves that conservatively — the smallest
+///   successful reading wins — because the failure modes are asymmetric:
+///   planning above the real limit is a SIGKILL, planning below it only costs
+///   context tokens.
+/// - iOS 27 adds one legitimate mid-launch rise: Game Mode raises the 12GB
+///   A19 Pro tier from 6 GiB to 8 GiB. `settledCeiling` accepts it only when the
+///   new limit is corroborated by a plateau; a single high reading still loses.
 ///
 /// The ~9GB class the notes used to claim was never real: it came from adding
 /// `available` to an **rss** reading, and rss is not the ceiling operand. A
@@ -167,6 +171,125 @@ final class MemoryBudgetTests: XCTestCase {
         let reading = MemoryBudget.Reading("garbage", available: 3 * GB, footprint: 9 * GB)
         let ceiling = MemoryBudget.ceiling(physicalRAM: 4 * GB, readings: [reading])
         XCTAssertEqual(ceiling.bytes, 4 * GB)
+    }
+
+    // MARK: - iOS 27 Game Mode can raise the tier mid-launch
+
+    /// The Game Mode tier the 12GB A19 Pro devices expose under iOS 27:
+    /// 8,192 MiB = 8 GiB. It is only available while Game Mode is active.
+    private let gameModeLimit = 8 * 1024 * 1024 * 1024
+
+    private func gameModeReading(_ label: String) -> MemoryBudget.Reading {
+        MemoryBudget.Reading(label,
+                             available: gameModeLimit - 128 * MB,
+                             footprint: 128 * MB)
+    }
+
+    func testGameModeUpliftWinsOnlyAfterAStablePlateau() {
+        // iOS 27 turns Game Mode on a few seconds after the app is foregrounded
+        // and then raises the per-process ceiling from 6 GiB to 8 GiB. The
+        // planning reading must follow the settled plateau, not the earlier
+        // 6 GiB sample (which is a real reading of the pre-uplift state).
+        let readings = [initReading,
+                        gameModeReading("after model load"),
+                        gameModeReading("after model load +0.25s"),
+                        gameModeReading("after model load +0.50s")]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, gameModeLimit)
+        XCTAssertEqual(ceiling.readingIndex, 3)
+        XCTAssertEqual(ceiling.source(readings), "after model load +0.50s")
+        XCTAssertFalse(ceiling.usedFallback)
+    }
+
+    func testGameModeUpliftWinsAfterAStableBaseRun() {
+        // The real sampler shape: the 6 GiB tier is stable first, then Game Mode
+        // raises it and the 8 GiB tier becomes the last stable plateau. The
+        // earlier run must not pin the budget to 6 GiB.
+        let readings = [initReading, loadedReading, loadedReading,
+                        gameModeReading("after model load +0.75s"),
+                        gameModeReading("after model load +1.00s"),
+                        gameModeReading("after model load +1.25s")]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, gameModeLimit)
+        XCTAssertEqual(ceiling.readingIndex, 5)
+        XCTAssertEqual(ceiling.source(readings), "after model load +1.25s")
+    }
+
+    func testGameModeUpliftIsNotAcceptedFromASingleSample() {
+        // A single high reading is exactly the 9.17GB-rss regression shape. It
+        // must never win: only a repeated plateau is evidence of a state change.
+        let readings = [initReading, gameModeReading("after model load")]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, initAvailable + initFootprint)
+        XCTAssertEqual(ceiling.readingIndex, 0)
+    }
+
+    func testSingleInflatedReadingCannotDisplaceAStableBasePlateau() {
+        // A stable 6 GiB run followed by one 9.17GB outlier: the outlier is not
+        // a plateau, so the stable base remains the answer. This is the exact
+        // failure mode the smallest-wins rule was introduced to prevent.
+        let readings = [initReading, loadedReading, loadedReading, inflatedReading]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, initAvailable + initFootprint)
+        XCTAssertEqual(ceiling.readingIndex, 2)
+    }
+
+    func testStableBaseTierStillWinsWhenGameModeDoesNotRaiseTheCeiling() {
+        // No Game Mode (8GB device, older iOS, or the user disabled it): the
+        // ceiling stays 6 GiB and the settled policy must return it unchanged.
+        let readings = [initReading, loadedReading, loadedReading]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, 6_442_450_944)
+        XCTAssertEqual(ceiling.readingIndex, 2)
+    }
+
+    func testSettledCeilingFallsBackToTheSmallestWhenNothingSettles() {
+        // Two different valid ceilings and no plateau: the conservative rule
+        // still applies. This is the guard that keeps a one-off inflated
+        // reading from raising the budget.
+        let readings = [initReading, inflatedReading]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, initAvailable + initFootprint)
+    }
+
+    func testSettledCeilingFallsBackWhenEveryReadingFailed() {
+        let failed = MemoryBudget.Reading("after model load", available: 0, footprint: 0)
+        let readings = [failed, failed, failed]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        XCTAssertEqual(ceiling.bytes, devicePhysical / 2)
+        XCTAssertNil(ceiling.readingIndex)
+        XCTAssertTrue(ceiling.usedFallback)
+    }
+
+    func testSettledCeilingLogLineShowsTheUpliftAndTheSettledSource() {
+        let readings = [initReading,
+                        gameModeReading("after model load"),
+                        gameModeReading("after model load +0.25s"),
+                        gameModeReading("after model load +0.50s")]
+        let ceiling = MemoryBudget.settledCeiling(physicalRAM: devicePhysical,
+                                                  readings: readings,
+                                                  stableSamples: 3)
+        let budget = MemoryBudget.budgetBytes(physicalRAM: devicePhysical, ceiling: ceiling.bytes)
+        let line = MemoryBudget.logLine(budget: budget, ceiling: ceiling,
+                                        readings: readings, physicalRAM: devicePhysical)
+        XCTAssertTrue(line.contains("ceiling \(gameModeLimit)B"), line)
+        XCTAssertTrue(line.contains("from after model load +0.50s"), line)
+        XCTAssertTrue(line.contains("at init: available \(initAvailable)B"), line)
+        XCTAssertTrue(line.contains("after model load +0.50s: available \(gameModeLimit - 128 * MB)B"), line)
     }
 
     // MARK: - The regression: the measured ceiling drives the budget

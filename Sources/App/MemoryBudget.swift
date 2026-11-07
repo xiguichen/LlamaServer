@@ -32,14 +32,19 @@ import Foundation
 /// `698dbbf`) all give the *same* ceiling — 6,352,271,400 + 90,179,544 at
 /// init, 6,288,683,008 + 153,767,936 after the model load, 4,576,193,192 +
 /// 1,866,257,752 idle with both contexts live; each sum is exactly
-/// 6,442,450,944B (6GiB). The ceiling is a constant of the launch, not
-/// something that grows as the process settles. When readings disagree, at
-/// least one operand was stale, and the choice is asymmetric: **the smallest
-/// successful reading wins**, because planning *above* the real ceiling is a
-/// jetsam SIGKILL while planning below it only costs context tokens. The
-/// ~9GB class these notes once chased came from adding `available` to a
-/// 4.58GB reading recorded as **rss**; rss is not the ceiling operand, and
-/// the policy must never let such a reading inflate the budget.
+/// 6,442,450,944B (6GiB). While the app's game-mode state is unchanged, the
+/// ceiling is a constant of the launch, not something that grows as the
+/// process settles. iOS 27 adds one legitimate exception: Game Mode raises the
+/// 12GB A19 Pro tier from 6GiB to 8GiB a few seconds after a
+/// Game-Mode-capable app is foregrounded, so a later reading can measure a
+/// *different, higher* tier. `settledCeiling` accepts that only as a repeated
+/// plateau; a lone high reading is still a stale operand. Within one state,
+/// when readings disagree, the choice is asymmetric: **the smallest successful
+/// reading wins**, because planning *above* the real ceiling is a jetsam
+/// SIGKILL while planning below it only costs context tokens. The ~9GB class
+/// these notes once chased came from adding `available` to a 4.58GB reading
+/// recorded as **rss**; rss is not the ceiling operand, and the policy must
+/// never let such a reading inflate the budget.
 ///
 /// What the ceiling does *not* cover is just as important as what it does: the
 /// model's mmap (loading a 2.78GB model moved the footprint by 63.6MB) and the
@@ -89,18 +94,21 @@ struct MemoryBudget {
         return min(physicalRAM, available + max(0, footprint))
     }
 
-    /// The ceiling to plan against, chosen from every reading of this launch.
+    /// The conservative ceiling from every reading of this launch.
     ///
-    /// The ceiling is a property of the device+launch, so every consistent
-    /// reading measures the same constant. When they disagree, one of the two
-    /// operands was read at a different moment (or is not the footprint at
-    /// all), and the disagreement is resolved **conservatively**: the smallest
-    /// successful reading wins. The failure modes are asymmetric — a ceiling
-    /// above the real limit plans memory the kernel will SIGKILL, while one
-    /// below it merely clamps the context. A failed reading
-    /// (`available == 0`) never wins. Only when every reading failed does the
-    /// documented half-of-physical value apply, flagged by
-    /// `readingIndex == nil` so callers can log it as an assumption.
+    /// While the tier is unchanged every consistent reading measures the same
+    /// constant. When they disagree, one of the two operands was read at a
+    /// different moment (or is not the footprint at all), and the disagreement
+    /// is resolved **conservatively**: the smallest successful reading wins.
+    /// The failure modes are asymmetric — a ceiling above the real limit plans
+    /// memory the kernel will SIGKILL, while one below it merely clamps the
+    /// context. A failed reading (`available == 0`) never wins. Only when every
+    /// reading failed does the documented half-of-physical value apply, flagged
+    /// by `readingIndex == nil` so callers can log it as an assumption.
+    ///
+    /// Use `settledCeiling` for the planning decision: it can accept the one
+    /// legitimate rise (Game Mode) when the new limit is corroborated by a
+    /// stable plateau, while still falling back to this rule when it is not.
     struct Ceiling {
         /// The ceiling in bytes.
         let bytes: Int
@@ -136,6 +144,47 @@ struct MemoryBudget {
             return Ceiling(bytes: physicalRAM / 2, readingIndex: nil)
         }
         return Ceiling(bytes: best, readingIndex: index)
+    }
+
+    /// The ceiling a *planning* decision should use once the launch's tier has
+    /// settled.
+    ///
+    /// iOS 27 can raise the per-process ceiling mid-launch: when Game Mode turns
+    /// on (a few seconds after a Game-Mode-capable app is foregrounded), the
+    /// 12GB A19 Pro tier rises from 6 GiB to 8 GiB. The pre-uplift reading is a
+    /// real reading of the old state, so "smallest wins" would keep planning at
+    /// 6 GiB forever. This function accepts a rise only when it is corroborated
+    /// by `stableSamples` consecutive readings at the same limit — a plateau.
+    /// A single high sample is still rejected and falls back to `ceiling`'s
+    /// smallest-successful rule, which is the guard against the 9.17 GB
+    /// `available + rss` regression.
+    ///
+    /// The *last* qualifying plateau wins, so a 6 GiB run followed by a settled
+    /// 8 GiB run resolves to 8 GiB. A rise that has not yet held for
+    /// `stableSamples` readings (e.g. the sampler timed out mid-change) is not
+    /// accepted; the earlier stable run remains the answer.
+    static func settledCeiling(physicalRAM: Int, readings: [Reading],
+                               stableSamples: Int) -> Ceiling {
+        let required = max(1, stableSamples)
+        let limits = readings.map {
+            processLimit(physicalRAM: physicalRAM,
+                         available: $0.available, footprint: $0.footprint)
+        }
+        var runStart = 0
+        var settledIndex: Int?
+        for i in limits.indices {
+            if i == 0 || limits[i] == 0 || limits[i] != limits[i - 1] {
+                runStart = i
+            }
+            if limits[i] > 0, i - runStart + 1 >= required {
+                settledIndex = i
+            }
+        }
+        if let index = settledIndex {
+            return Ceiling(bytes: limits[index], readingIndex: index)
+        }
+        // No plateau: keep the conservative rule (and its fallback).
+        return ceiling(physicalRAM: physicalRAM, readings: readings)
     }
 
     /// Returns the memory budget in bytes: the ceiling minus transient headroom
