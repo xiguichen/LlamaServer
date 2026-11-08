@@ -970,19 +970,26 @@ final class LlamaHTTPServer {
     /// Counts a successful generation and runs the periodic context recreate
     /// if due. MUST be called on the inference queue, after the client's
     /// response has been fully delivered: the recreate re-allocates the KV
-    /// cache (~0.3-0.5 s) and used to stall every 10th streamed response
-    /// between the last token and finish_reason. A failure only logs — the
-    /// engine marks itself unusable and the NEXT request surfaces the error
+    /// cache and used to stall every 10th streamed response between the
+    /// last token and finish_reason. A failure only logs — the engine
+    /// marks itself unusable and the NEXT request surfaces the error
     /// cleanly (RecreateTracker retries the flush on the next generation).
     private func runPendingRecreate(request: Int, kind: String) {
-        guard recreateTracker.record() else { return }
+        let runStart = Date()
+        guard recreateTracker.record() else {
+            let duration = Date().timeIntervalSince(runStart)
+            FileLogger.shared.debug("runPendingRecreate skipped (not due), took \(duration * 1000) ms")
+            return
+        }
         do {
             try inference.recreateContext()
             recreateTracker.recreateFinished(success: true)
-            FileLogger.shared.info("\(kind) request #\(request): periodic context recreate done (every \(contextRecreateThreshold) generations, off response path)")
+            let duration = Date().timeIntervalSince(runStart)
+            FileLogger.shared.info("\(kind) request #\(request): periodic context recreate done (every \(contextRecreateThreshold) generations, off response path, took \(duration * 1000) ms)")
         } catch {
             recreateTracker.recreateFinished(success: false)
-            FileLogger.shared.error("\(kind) request #\(request): periodic recreateContext failed: \(error.localizedDescription)")
+            let duration = Date().timeIntervalSince(runStart)
+            FileLogger.shared.error("\(kind) request #\(request): periodic recreateContext failed (took \(duration * 1000) ms): \(error.localizedDescription)")
         }
     }
 

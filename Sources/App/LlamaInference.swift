@@ -842,6 +842,9 @@ final class LlamaInference: @unchecked Sendable {
     /// many generations to flush any accumulated GPU/allocator state that could
     /// cause Metal to hang on `llama_sampler_sample`.
     func recreateContext() throws {
+        // Start timing the entire recreate operation
+        let recreateStart = Date()
+        
         llama_free(context)
         // The old context is now gone; until the new one is created the pointer
         // is dangling. Mark it invalid so a failure below can't be used.
@@ -853,7 +856,7 @@ final class LlamaInference: @unchecked Sendable {
             mtpContext = nil
         }
         mtpEnabled = false
-
+        
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
         ctxParams.n_batch = UInt32(batchSize)
@@ -868,7 +871,7 @@ final class LlamaInference: @unchecked Sendable {
             ctxParams.n_rs_seq = UInt32(max(1, mtpMaxDraft))
         }
         Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext, context: contextSize)
-
+        
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             // `context` still holds the freed pointer; leave `contextValid` false
             // so generate()/unload() never touch it. The engine is now unusable
@@ -893,6 +896,10 @@ final class LlamaInference: @unchecked Sendable {
             cachedTokenIds = []
             FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled))")
         }
+        
+        // End timing — report the total recreate duration
+        let recreateDuration = Date().timeIntervalSince(recreateStart)
+        FileLogger.shared.info("recreateContext took \(recreateDuration * 1000) ms")
     }
 
     /// Last llama.cpp native log lines, for post-mortem dumps (see
