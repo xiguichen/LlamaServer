@@ -307,8 +307,9 @@ final class ServerViewModel: ObservableObject {
                 // client actually experiences, split into engine init (model
                 // load + context, broken down further by LlamaInference's
                 // "load phases" line) and HTTP server start. Durable record via
-                // FileLogger; also surfaced on-device so the gap is readable
-                // without pulling the log.
+                // FileLogger; its onLine mirror also surfaces it in the in-app
+                // panel, so this must NOT call self.log() again — that emitted
+                // the same line twice.
                 var gap = StartupTimer()
                 gap.record("engine init", seconds: engineSeconds)
                 gap.record("server start", seconds: serverSeconds)
@@ -322,7 +323,6 @@ final class ServerViewModel: ObservableObject {
                     self.loadedModelKey = modelKey
                     self.status = .running
                     UIApplication.shared.isIdleTimerDisabled = true
-                    self.log(gapLine)
                     // Say which cap decided the context. The old message blamed
                     // device memory for *any* reduction — including a hard
                     // ceiling, which a larger request tripped on every start

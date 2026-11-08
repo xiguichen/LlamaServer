@@ -129,4 +129,28 @@ final class MtpSpecTests: XCTestCase {
         // is not an argmax over the raw logits.
         XCTAssertFalse(MtpSpec.isPureGreedy(temperature: 0, hasPenalties: true))
     }
+
+    // MARK: - Draft prompt-mirror chunking
+
+    func testMirrorChunksSplitTargetChunkIntoDraftSizedPieces() {
+        // The draft context is built with a much smaller n_ubatch than the
+        // target so its attention-mask workspace stays small. A target prompt
+        // chunk (up to 1024 tokens) therefore has to reach the draft in
+        // draftBatchSize pieces, not one oversized llama_decode.
+        XCTAssertEqual(MtpSpec.mirrorChunks(total: 512, batchSize: 64),
+                       (0..<8).map { MtpSpec.MirrorChunk(offset: $0 * 64, length: 64) })
+    }
+
+    func testMirrorChunksKeepTheFinalPartialPiece() {
+        XCTAssertEqual(MtpSpec.mirrorChunks(total: 130, batchSize: 64),
+                       [MtpSpec.MirrorChunk(offset: 0, length: 64),
+                        MtpSpec.MirrorChunk(offset: 64, length: 64),
+                        MtpSpec.MirrorChunk(offset: 128, length: 2)])
+    }
+
+    func testMirrorChunksHandleEmptyAndInvalidBatch() {
+        XCTAssertEqual(MtpSpec.mirrorChunks(total: 0, batchSize: 64), [])
+        XCTAssertEqual(MtpSpec.mirrorChunks(total: 5, batchSize: 0), [])
+        XCTAssertEqual(MtpSpec.mirrorChunks(total: -1, batchSize: 64), [])
+    }
 }

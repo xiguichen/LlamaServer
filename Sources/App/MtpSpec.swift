@@ -91,4 +91,28 @@ enum MtpSpec {
     static func isPureGreedy(temperature: Float, hasPenalties: Bool) -> Bool {
         temperature <= 0 && !hasPenalties
     }
+
+    /// One `llama_decode` piece of the prompt mirror: `length` rows starting
+    /// at `offset` within the target's just-decoded prompt chunk.
+    struct MirrorChunk: Equatable {
+        let offset: Int
+        let length: Int
+    }
+
+    /// Splits a target prompt chunk into batches no larger than the draft
+    /// context's own `n_batch`/`n_ubatch`.
+    ///
+    /// The draft context is deliberately built with a much smaller batch than
+    /// the target (see `LlamaInference.draftBatchSize`): its compute workspace
+    /// is dominated by the attention mask over the full context, which scales
+    /// with n_ubatch, not by the one-layer MTP weights. The target still
+    /// prefills in 512/1024-token chunks; the mirror must not hand the draft
+    /// one of those chunks in a single `llama_decode`, or the draft reserves
+    /// the target-sized workspace again.
+    static func mirrorChunks(total: Int, batchSize: Int) -> [MirrorChunk] {
+        guard total > 0, batchSize > 0 else { return [] }
+        return stride(from: 0, to: total, by: batchSize).map { offset in
+            MirrorChunk(offset: offset, length: min(batchSize, total - offset))
+        }
+    }
 }

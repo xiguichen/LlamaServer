@@ -141,6 +141,15 @@ final class LlamaInference: @unchecked Sendable {
     /// this or llama.cpp aborts (ggml_abort) — the prompt is decoded in chunks.
     let batchSize: Int
 
+    /// Logical max tokens per draft-context llama_decode. Deliberately much
+    /// smaller than the target's `batchSize`: the draft's compute workspace is
+    /// dominated by the attention mask over the full context, which scales with
+    /// n_ubatch, not by its one-layer MTP weights. The prompt mirror splits the
+    /// target's chunk into pieces of this size (see `mirrorPromptChunkIntoDraft`
+    /// and `MtpSpec.mirrorChunks`). Draft generation itself only decodes
+    /// `mtpMaxDraft` rows, so it is unaffected.
+    let draftBatchSize: Int
+
     let modelName: String
 
     /// Which cap decided the effective context, when it came out below the
@@ -479,8 +488,13 @@ final class LlamaInference: @unchecked Sendable {
         // chosen on memory the draft context is about to consume.
         let kvSlack = kvBudget - chargedBytesPerToken * effective
         let fastPrefill = kvSlack > KVCacheSpec.ubatchSlackBytes
-        self.batchSize = min(effective, KVCacheSpec.ubatchSize(contextSize: effective,
-                                                                kvSlackBytes: kvSlack))
+        let effectiveBatch = min(effective, KVCacheSpec.ubatchSize(contextSize: effective,
+                                                                   kvSlackBytes: kvSlack))
+        self.batchSize = effectiveBatch
+        // The draft only ever decodes one to `mtpMaxDraft` rows outside the
+        // prompt mirror. Cap its batch at 64 so its n_ubatch-sized attention
+        // mask stays small; the mirror chunks accordingly.
+        self.draftBatchSize = min(effectiveBatch, 64)
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(effective)
@@ -602,7 +616,7 @@ final class LlamaInference: @unchecked Sendable {
             let mtpSetupStart = Date()
             self.mtpEnabled = setupDraftContext(target: ctx)
             mtpSetupSeconds = Date().timeIntervalSince(mtpSetupStart)
-            FileLogger.shared.info("MTP \(self.mtpEnabled ? "enabled" : "unavailable") (two-context speculative, n_embd \(nEmbd), output slots \(mtpOutputCount), max draft \(mtpMaxDraft))")
+            FileLogger.shared.info("MTP \(self.mtpEnabled ? "enabled" : "unavailable") (two-context speculative, n_embd \(nEmbd), output slots \(mtpOutputCount), max draft \(mtpMaxDraft), draft batch \(draftBatchSize))")
         }
 
         // Load-gap breakdown (#6): where the engine's startup time went. The
@@ -705,8 +719,12 @@ final class LlamaInference: @unchecked Sendable {
     private func setupDraftContext(target: OpaquePointer) -> Bool {
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
-        ctxParams.n_batch = UInt32(batchSize)
-        ctxParams.n_ubatch = UInt32(batchSize)
+        // Not the target's batch: the draft's compute workspace (the attention
+        // mask over the full context) scales with n_ubatch. The target prefills
+        // in batchSize chunks; the draft mirrors those chunks in draftBatchSize
+        // pieces. Draft generation decodes only mtpMaxDraft rows.
+        ctxParams.n_batch = UInt32(draftBatchSize)
+        ctxParams.n_ubatch = UInt32(draftBatchSize)
         ctxParams.n_threads = threadCount
         ctxParams.n_threads_batch = threadCount
         ctxParams.swa_full = true
@@ -745,31 +763,55 @@ final class LlamaInference: @unchecked Sendable {
         guard mtpEnabled, let dft = mtpContext, nEmbd > 0, count > 0,
               let hTgt = cllama_get_embeddings_nextn(UnsafeMutableRawPointer(context))
         else { return false }
-        var batch = llama_batch_init(Int32(count), Int32(nEmbd), 1)
-        var ownTok: UnsafeMutablePointer<llama_token>? = nil
-        if batch.token == nil {
-            ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: count)
-            batch.token = ownTok
+        // The draft context's n_ubatch is draftBatchSize (64), not the target's
+        // batch. Feeding it the target's 512/1024-token chunk in one decode
+        // would reserve the target-sized attention mask again — the exact
+        // 1.3 GiB workspace that made q8_0+MTP OOM at 252k. Split the chunk.
+        let pieces = MtpSpec.mirrorChunks(total: count, batchSize: draftBatchSize)
+        guard !pieces.isEmpty else { return false }
+        let previousH = carryH
+
+        // Local so each piece frees its llama_batch on every exit path.
+        func decodePiece(_ piece: MtpSpec.MirrorChunk) -> Bool {
+            var batch = llama_batch_init(Int32(piece.length), Int32(nEmbd), 1)
+            var ownTok: UnsafeMutablePointer<llama_token>? = nil
+            if batch.token == nil {
+                ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: piece.length)
+                batch.token = ownTok
+            }
+            defer {
+                if let ot = ownTok { batch.token = nil; ot.deallocate() }
+                llama_batch_free(batch)
+            }
+            batch.n_tokens = Int32(piece.length)
+            for k in 0..<piece.length {
+                batch.token[k] = tokens[piece.offset + k]
+                batch.pos[k] = llama_pos(start + piece.offset + k)
+                batch.n_seq_id[k] = 1
+                batch.seq_id[k]![0] = 0
+                batch.logits[k] = 0
+            }
+            guard let embd = batch.embd else { return false }
+            // Row k pairs token x_{start+offset+k} with h_{start+offset+k-1}.
+            // For the first piece row 0 uses the previous target chunk's last
+            // h (carryH); later pieces use the preceding row in the same target
+            // chunk. Rows 1... come from the target's h buffer.
+            if piece.offset == 0 {
+                previousH.withUnsafeBufferPointer { embd.update(from: $0.baseAddress!, count: nEmbd) }
+            } else {
+                embd.update(from: hTgt.advanced(by: (piece.offset - 1) * nEmbd), count: nEmbd)
+            }
+            if piece.length > 1 {
+                embd.advanced(by: nEmbd).update(from: hTgt.advanced(by: piece.offset * nEmbd),
+                                                count: (piece.length - 1) * nEmbd)
+            }
+            return llama_decode(dft, batch) == 0
         }
-        defer {
-            if let ot = ownTok { batch.token = nil; ot.deallocate() }
-            llama_batch_free(batch)
-        }
-        batch.n_tokens = Int32(count)
-        for k in 0..<count {
-            batch.token[k] = tokens[k]
-            batch.pos[k] = llama_pos(start + k)
-            batch.n_seq_id[k] = 1
-            batch.seq_id[k]![0] = 0
-            batch.logits[k] = 0
-        }
-        guard let embd = batch.embd else { return false }
-        carryH.withUnsafeBufferPointer { embd.update(from: $0.baseAddress!, count: nEmbd) }
-        if count > 1 {
-            embd.advanced(by: nEmbd).update(from: hTgt, count: (count - 1) * nEmbd)
+
+        for piece in pieces {
+            guard decodePiece(piece) else { return false }
         }
         let lastH = Array(UnsafeBufferPointer(start: hTgt.advanced(by: (count - 1) * nEmbd), count: nEmbd))
-        guard llama_decode(dft, batch) == 0 else { return false }
         carryH = lastH
         return true
     }
