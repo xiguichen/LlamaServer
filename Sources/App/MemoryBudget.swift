@@ -46,11 +46,17 @@ import Foundation
 /// recorded as **rss**; rss is not the ceiling operand, and the policy must
 /// never let such a reading inflate the budget.
 ///
-/// What the ceiling does *not* cover is just as important as what it does: the
-/// model's mmap (loading a 2.78GB model moved the footprint by 63.6MB) and the
-/// Metal compute buffers (1.23GB of `sched_reserve` buffer lines, private
-/// storage) are outside it. A KV budget derived from this ceiling is therefore
-/// a **bound on what to attempt**, not a measurement of the engine's total.
+/// What the ceiling covers is just as important as what it does not: the
+/// model's file-backed mmap is mostly outside the charged footprint (loading
+/// 2.78GB of weights moved it by 63.6MB), but the Metal compute buffers are
+/// private storage and **are** part of it. A KV budget derived from this
+/// ceiling must therefore reserve the compute buffers it will allocate. The
+/// 2026-11-08 q8_0+MTP run at 252,416 tokens measured target+draft
+/// `sched_reserve` buffers of ≈3.29GB (MTL0 + CPU) while the plan held back
+/// only 320MB, and the first decode hit a GPU command-buffer OOM. The context
+/// plan now reserves 1,800/2,600 MiB for the target micro-batch and
+/// 3,000/3,800 MiB when MTP's draft context is live. The ceiling is still a
+/// **bound on what to attempt**; the reserve is what makes it honest.
 struct MemoryBudget {
 
     /// Transient headroom held back from the budget: request buffers,

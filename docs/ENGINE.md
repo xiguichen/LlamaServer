@@ -99,6 +99,16 @@ draft-mtp `process()`. It is skipped when the draft shares the target's memory
   starts empty.
 - A failed mirror leaves the draft **empty**, never with a position gap, because
   a gap makes every later draft decode fail.
+- The draft context is built with a much smaller `n_batch`/`n_ubatch`
+  (`draftBatchSize`, 64) than the target. Its compute workspace is dominated by
+  the attention mask over `n_ctx` and scales with `n_ubatch`, not with the
+  one-layer MTP weights, so mirroring a target-sized 512/1024-token chunk in one
+  decode reserves a target-sized buffer. `MtpSpec.mirrorChunks` splits the
+  chunk; draft generation itself decodes only `mtpMaxDraft` rows. Measured at
+  262,144 (q4_0, build `2b6dd82`): the draft still reserved 1,079.56 MiB MTL0 +
+  33.52 MiB CPU at batch 64, down from 1,304.46 + 256.78 MiB at batch 512. The
+  cap buys ≈448 MiB but ≈1.1 GiB of fixed MTP-graph workspace remains, which
+  is why `KVCacheSpec.contextPlan` reserves the draft compute for MTP.
 
 ### Timings and the stats line
 

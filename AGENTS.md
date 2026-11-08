@@ -72,7 +72,7 @@ The test job must pass; the build job produces the IPA.
 - **Prefix reuse.** Dense caches trim with `seq_rm`; hybrid/SSM caches cannot trim a suffix and restore a whole-state snapshot instead. `docs/ENGINE.md`.
 - **`unload()` before discarding `LlamaInference`**, or the multi-GB Metal allocation stays resident and the next model load returns NULL (OOM).
 - **`llama_memory_clear(mem, false)`** — `true` memsets the buffers (~39 ms for a 2 GiB q8_0 KV) and buys nothing.
-- **The memory ceiling is measured**, never an assumed fraction of RAM; the MTP draft context counts at its own size. `docs/MEMORY.md`.
+- **The memory ceiling is measured**, never an assumed fraction of RAM; the MTP draft context counts at its own size and the context plan reserves its measured compute. `docs/MEMORY.md`.
 - **Tool calls use the model's own wire format**, replay assistant `tool_calls` into history, and serialize arguments with `.fragmentsAllowed` (without it a scalar argument raises an uncatchable ObjC exception → process abort). `docs/TOOL-CALLS.md`.
 - **A tool turn filters reasoning then tool envelopes** (`ReasoningStreamFilter` → `ToolStreamFilter`).
 - **OpenAI field presence is load-bearing**: `logprobs`/`refusal`/`content` are explicit null when absent, and a missing/empty `model` is a 400. These gate the compliance tests. `docs/API.md`.

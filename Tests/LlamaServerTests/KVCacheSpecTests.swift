@@ -185,24 +185,74 @@ final class KVCacheSpecTests: XCTestCase {
             256, "floor 256 applies")
     }
 
-    // MARK: - ubatch policy
+    // MARK: - Measured compute reserve and context plan
 
-    func testUbatchSizeScalesWithHeadroomAndContext() {
-        let slack = 1024 * 1024 * 1024          // 1 GB of KV-budget slack
-        let tight = 100 * 1024 * 1024           // under the 200 MB reserve
-        // Large contexts (Metal pre-warmed at init) get the 1024 micro-batch:
-        // measured ~29% faster prefill (220 vs 170 tok/s on a 5k prompt).
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: slack), 1024)
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 32_768, kvSlackBytes: slack), 1024,
-                       "the pre-warm threshold itself qualifies for 1024")
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 32_767, kvSlackBytes: slack), 512,
-                       "below the pre-warm threshold stay on the conservative batch")
-        // Tight KV slack keeps the smaller batch regardless of size
-        // (activation buffers share the budget with the cache).
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: tight), 512)
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: 0), 512)
-        // Small contexts always stayed crash-free — unchanged behavior.
-        XCTAssertEqual(KVCacheSpec.ubatchSize(contextSize: 8_192, kvSlackBytes: slack), 512)
+    func testComputeReserveCountsTheMeasuredSchedulerBuffers() {
+        // Device sched_reserve values (2026-11-08, build 2b6dd82):
+        // target 512 q8_0 = 1,309.47 + 266.79 MiB; target 1024 q4_0 =
+        // 1,673.31 + 552.32 MiB; draft 64 q4_0 = 1,079.56 + 33.52 MiB.
+        // The constants round every one of those up.
+        XCTAssertEqual(KVCacheSpec.computeReserveBytes(batchSize: 512, useMtp: false),
+                       1_800 * 1024 * 1024)
+        XCTAssertEqual(KVCacheSpec.computeReserveBytes(batchSize: 1024, useMtp: false),
+                       2_600 * 1024 * 1024)
+        XCTAssertEqual(KVCacheSpec.computeReserveBytes(batchSize: 512, useMtp: true),
+                       3_000 * 1024 * 1024, "target 512 + draft")
+        XCTAssertEqual(KVCacheSpec.computeReserveBytes(batchSize: 1024, useMtp: true),
+                       3_800 * 1024 * 1024, "target 1024 + draft")
+    }
+
+    func testContextPlanPreservesQ4MTPFullWindow() {
+        // The measured q4_0 + MTP 262,144 run completed a request (HTTP 200)
+        // with target batch 1024 and draft batch 64. The plan must not clamp
+        // it just because q8_0 cannot hold the same window.
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
+            desiredContext: 262_144, useMtp: true)
+        XCTAssertEqual(plan.contextSize, 262_144)
+        XCTAssertEqual(plan.batchSize, 1024)
+        XCTAssertEqual(plan.computeReserveBytes, 3_800 * 1024 * 1024)
+        XCTAssertGreaterThanOrEqual(plan.memoryCap, 262_144)
+    }
+
+    func testContextPlanClampsQ8MTPBelowTheOOMContext() {
+        // The 10:32 OOM ran q8_0 + MTP at 252,416 tokens and died on the first
+        // decode. The 64-token draft shrinks the compute enough for a lower
+        // context, but not for the context that OOM'd: 250,368 is the max.
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, chargedBytesPerToken: 19_584,
+            desiredContext: 262_144, useMtp: true)
+        XCTAssertEqual(plan.batchSize, 512, "1024 cannot back the requested window")
+        XCTAssertEqual(plan.contextSize, 250_368)
+        XCTAssertLessThan(plan.contextSize, 252_416, "the measured OOM context must not be approved")
+    }
+
+    func testContextPlanKeepsQ8MTPOffOn1024WhenItFits() {
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, chargedBytesPerToken: 17_408,
+            desiredContext: 262_144, useMtp: false)
+        XCTAssertEqual(plan.contextSize, 262_144)
+        XCTAssertEqual(plan.batchSize, 1024)
+        XCTAssertEqual(plan.computeReserveBytes, 2_600 * 1024 * 1024)
+    }
+
+    func testContextPlanFallsBackTo512BeforeClamping() {
+        // 1024 can back 513,536 but not 550,000; 512 can back 594,432.
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
+            desiredContext: 550_000, useMtp: false)
+        XCTAssertEqual(plan.batchSize, 512)
+        XCTAssertEqual(plan.contextSize, 550_000)
+        XCTAssertEqual(plan.memoryCap, 594_432)
+    }
+
+    func testContextPlanClampsWhenNeitherBatchCanBackTheWindow() {
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
+            desiredContext: 600_000, useMtp: false)
+        XCTAssertEqual(plan.batchSize, 512)
+        XCTAssertEqual(plan.contextSize, 594_432)
+        XCTAssertEqual(plan.memoryCap, 594_432)
     }
 
     func testMetalPrewarmIsGatedOnContextSize() {
@@ -212,9 +262,7 @@ final class KVCacheSpecTests: XCTestCase {
         XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: 32_767))
         // Regression: the gate once compared the micro-batch, which never
         // exceeds 1024, so the pre-warm never ran for any context.
-        let slack = 1024 * 1024 * 1024
-        let batch = KVCacheSpec.ubatchSize(contextSize: 131_072, kvSlackBytes: slack)
-        XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: batch))
+        XCTAssertFalse(KVCacheSpec.needsMetalPrewarm(contextSize: 1024))
     }
 
     // MARK: - Which clamp decided the context
@@ -333,9 +381,9 @@ final class KVCacheSpecTests: XCTestCase {
     }
 
     func testMaxContextByMemoryReclaimsTheDraftOverCharge() {
-        // The device's KV budget (log 2026-10-18, build 698dbbf): memory budget
-        // 5,905,580,032 − llama_model_size − 320 MiB compute ≈ 2.79 GB. Its
-        // logged clamp of 80,128 pins the exact value used here.
+        // A historical 6 GiB-tier KV budget (5,905,580,032 − model − 320 MiB).
+        // This test pins the per-token charge math only; the compute-reserve
+        // policy is covered by the context-plan tests above.
         let kvBudget = 2_789_740_288
         let target = 17_408
         // The old charge — a second full cache — is why the request was clamped.
@@ -365,5 +413,8 @@ final class KVCacheSpecTests: XCTestCase {
             KVCacheSpec.maxContextByMemory(kvBudgetBytes: 300, chargedBytesPerToken: 1), 256)
         XCTAssertEqual(
             KVCacheSpec.maxContextByMemory(kvBudgetBytes: 100, chargedBytesPerToken: 1), 0)
+        XCTAssertEqual(
+            KVCacheSpec.maxContextByMemory(kvBudgetBytes: -1, chargedBytesPerToken: 1), 0,
+            "a reserve larger than the budget must not produce a negative context")
     }
 }

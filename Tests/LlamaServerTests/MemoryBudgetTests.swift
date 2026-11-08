@@ -307,14 +307,14 @@ final class MemoryBudgetTests: XCTestCase {
 
     func testMeasuredBudgetFitsTheMeasuredQ8Context() {
         // Consequence that matters at 131,072 context and 17,408 B/token: the
-        // q8_0 KV is 2.28GB. Under the real 5.91GB budget (2.78GB model plus
-        // the 320MB compute reserve) it fits with ~0.5GB of slack — which is
-        // exactly why the device measures 160,512 tokens for q8_0, while the
-        // disproved 9.17GB budget would have approved the full 262,144.
+        // q8_0 KV is 2.28GB. Under the real 5.91GB budget minus the measured
+        // 2.6GiB compute reserve (batch 1024, MTP off) it fits with ~0.9GB of
+        // slack, while the full 262,144 window does not. The model file is only
+        // charged by the load pre-check, not by this context budget.
         let ceiling = MemoryBudget.ceiling(physicalRAM: devicePhysical,
                                            readings: [initReading, loadedReading])
         let budget = MemoryBudget.budgetBytes(physicalRAM: devicePhysical, ceiling: ceiling.bytes)
-        let kvBudget = budget - 2_780_000_000 - 320 * MB
+        let kvBudget = budget - KVCacheSpec.computeReserveBytes(batchSize: 1024, useMtp: false)
         XCTAssertGreaterThan(kvBudget, 131_072 * 17_408 + 400 * MB,
                              "131,072-token q8_0 KV must fit the measured budget")
         XCTAssertLessThan(kvBudget, 262_144 * 17_408,

@@ -95,7 +95,7 @@ enum KVCacheSpec {
     /// `chargedBytesPerToken` — the sum across every context the engine
     /// allocates, not one cache's cost and not a whole number of caches.
     static func maxContextByMemory(kvBudgetBytes: Int, chargedBytesPerToken: Int) -> Int {
-        (kvBudgetBytes / max(1, chargedBytesPerToken) / 256) * 256
+        max(0, (kvBudgetBytes / max(1, chargedBytesPerToken) / 256) * 256)
     }
 
     // MARK: Sizing
@@ -127,35 +127,83 @@ enum KVCacheSpec {
         }
     }
 
-    // MARK: Micro-batch (ubatch) policy
+    // MARK: Measured compute reserve and context plan
 
-    /// Contexts at/above this size get the 1024 micro-batch (measured ~29%
-    /// faster prefill — 220 vs 170 tok/s on a ~5k prompt) — but only via the
-    /// Metal pre-warm path in `LlamaInference`, because a >=32k context built
-    /// on a cold Metal backend crashes (async shader-set init still running).
+    /// Contexts at/above this size are built after `prewarmMetal`: a >=32k
+    /// context on a cold Metal backend hits the async shader-set init
+    /// null-deref. The 1024 micro-batch is chosen by `contextPlan`, not by this
+    /// threshold.
     static let prewarmUbatchContextSize = 32_768
 
-    /// KV-budget headroom required to double the micro-batch: activation
-    /// buffers draw from the same budget as the cache.
-    static let ubatchSlackBytes = 200 * 1024 * 1024
-
-    /// The micro-batch (`n_ubatch`) for a context of `contextSize` with
-    /// `kvSlackBytes` of KV-budget headroom. Callers then clamp to the
-    /// context size itself (a batch can't exceed the context).
+    /// Scheduler (`sched_reserve`) compute buffers at the two micro-batch
+    /// sizes, rounded up from the 2026-11-08 device log (build `2b6dd82`):
     ///
-    /// - Tight slack (<= `ubatchSlackBytes`): the conservative 512, since the
-    ///   larger batch's activation buffers would contend with the cache.
-    /// - Large, pre-warmed context: 1024 for faster prefill.
-    /// - Smaller contexts stayed crash-free at 512, so behavior is unchanged.
-    static func ubatchSize(contextSize: Int, kvSlackBytes: Int) -> Int {
-        guard kvSlackBytes > ubatchSlackBytes else { return 512 }
-        return contextSize >= prewarmUbatchContextSize ? 1024 : 512
+    /// - target 512, q8_0, 252,416 ctx: 1,309.47 MTL0 + 266.79 CPU MiB
+    /// - target 1024, q4_0, 262,144 ctx: 1,673.31 MTL0 + 552.32 CPU MiB
+    /// - draft 64, q4_0, 262,144 ctx: 1,079.56 MTL0 + 33.52 CPU MiB
+    ///
+    /// The batch, not the KV type, dominates the workspace, so these are
+    /// KV-type-agnostic upper bounds. The model's file mmap is **not** part of
+    /// this reserve: it is mostly file-backed and already inside the measured
+    /// footprint. The pre-load check still charges the file size separately.
+    static let targetCompute512Bytes = 1_800 * 1024 * 1024
+    static let targetCompute1024Bytes = 2_600 * 1024 * 1024
+    static let draftComputeBytes = 1_200 * 1024 * 1024
+
+    /// Compute that must be held back from the KV budget for `batchSize`.
+    /// The draft context is live for the whole generation, so MTP adds its
+    /// workspace even though draft generation itself decodes only 1-2 rows.
+    static func computeReserveBytes(batchSize: Int, useMtp: Bool) -> Int {
+        let target = batchSize >= 1024 ? targetCompute1024Bytes : targetCompute512Bytes
+        return target + (useMtp ? draftComputeBytes : 0)
+    }
+
+    struct ContextPlan: Equatable {
+        let contextSize: Int
+        let batchSize: Int
+        let computeReserveBytes: Int
+        /// Largest context the chosen batch's KV budget can back.
+        /// `contextSize == min(desiredContext, memoryCap)`.
+        let memoryCap: Int
+    }
+
+    /// Chooses the context and micro-batch against the **measured compute**,
+    /// not the model file:
+    ///
+    ///     kvBudget  = budgetBytes - computeReserveBytes(batch, mtp)
+    ///     memoryCap = maxContextByMemory(kvBudget, chargedBytesPerToken)
+    ///
+    /// 1024 is preferred (measured ~29% faster prefill) when it can back the
+    /// desired window. If it cannot, 512 leaves ~0.8 GiB more for KV and is
+    /// chosen even if that means clamping. The measured q8_0+MTP 252,416 OOM
+    /// must fall below the line; the working q4_0+MTP 262,144 must not.
+    static func contextPlan(budgetBytes: Int, chargedBytesPerToken: Int,
+                            desiredContext: Int, useMtp: Bool) -> ContextPlan {
+        let batches = [1024, 512]
+        var fallback: ContextPlan?
+        for batch in batches {
+            let reserve = computeReserveBytes(batchSize: batch, useMtp: useMtp)
+            let memoryCap = maxContextByMemory(
+                kvBudgetBytes: budgetBytes - reserve,
+                chargedBytesPerToken: chargedBytesPerToken)
+            let plan = ContextPlan(
+                contextSize: min(desiredContext, memoryCap),
+                batchSize: batch,
+                computeReserveBytes: reserve,
+                memoryCap: memoryCap)
+            if memoryCap >= desiredContext { return plan }
+            fallback = plan
+        }
+        return fallback ?? ContextPlan(
+            contextSize: 0, batchSize: 512,
+            computeReserveBytes: computeReserveBytes(batchSize: 512, useMtp: useMtp),
+            memoryCap: 0)
     }
 
     /// Whether a context of `contextSize` tokens needs the Metal pre-warm
     /// before it is built. Gated on the CONTEXT size, never the micro-batch:
-    /// `ubatchSize` only ever returns 512 or 1024, so a batch compared with
-    /// this 32k threshold can never pass and the pre-warm never runs.
+    /// a large context needs the pre-warm regardless of which batch the plan
+    /// chooses for it.
     static func needsMetalPrewarm(contextSize: Int) -> Bool {
         contextSize >= prewarmUbatchContextSize
     }

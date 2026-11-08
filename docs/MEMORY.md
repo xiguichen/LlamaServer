@@ -98,10 +98,11 @@ reading was already `8,499,427,416 B + 90,507,176 B = 8,589,934,592 B`
 (**8 GiB**); the post-load plateau settled at `8,412,803,144 B + 177,131,448 B
 = 8,589,934,592 B` after 0.51 s. The budget became **8,053,063,680 B
 (7.5 GiB)**, up from 5,905,580,032 B (5.91 GB) on the 6 GiB tier, with no
-jetsam or error lines. q4_0 still reaches the model's full 262,144-token
-window. The extra budget is available to the KV clamp, but q8_0's new ceiling
-has **not** been re-measured yet (it clamped to 160,512 tokens on the 6 GiB
-tier); run it before quoting a q8_0 context.
+jetsam or error lines. q4_0 + MTP still reaches the model's full 262,144-token
+window and completed a request (HTTP 200). Measured since then: q8_0 + MTP at
+252,416 tokens **OOM'd** on the first decode (see below), and q8_0 with MTP off
+at the full window is planned but has **not** been re-measured; run it before
+quoting a q8_0 context.
 
 Disproved (do not reuse):
 
@@ -112,12 +113,55 @@ Disproved (do not reuse):
   uninformative: it returns 0 even on unsandboxed macOS, and
   `kern.max_task_footprint_mb` does not exist. Use the measured ceiling half.
 
-### What the ceiling does not cover
+### What the ceiling covers (and what it does not)
 
-The model's mmap (loading 2.78 GB of weights moved the footprint by 63.6 MB) and
-the Metal compute buffers (1.23 GB of `sched_reserve` lines, private storage) are
-outside it. A KV budget derived from it is a **bound on what to attempt**, not a
-measurement of the engine's total.
+The model's file-backed mmap is mostly outside the charged footprint (loading
+2.78 GB of weights moved it by 63.6 MB). The Metal compute buffers are private
+storage and **are inside** it. A KV budget derived from the ceiling must
+therefore reserve the compute buffers it will allocate. The model file is
+charged only by the load pre-check (`fileSize + 320 MiB`), never again by the
+context budget.
+
+**Measured 2026-11-08 (8 GiB tier):**
+
+| workload (build) | batch (target / draft) | target compute (MTL0 + CPU) | draft compute (MTL0 + CPU) |
+|---|---|---|---|
+| q4_0 + MTP, 262,144 ctx (`2b6dd82`) | 1024 / 64 | 1,673.31 + 552.32 MiB | 1,079.56 + 33.52 MiB |
+| q8_0 + MTP, 252,416 ctx, OOM (`85e00fc`) | 512 / 512 | 1,309.47 + 266.79 MiB | 1,304.46 + 256.78 MiB |
+
+The draft workspace is dominated by the attention mask over `n_ctx` and scales
+with the draft's `n_ubatch`, not by the one-layer MTP weights. Capping the draft
+batch at 64 cut it from 1,304.46 + 256.78 MiB to 1,079.56 + 33.52 MiB, but
+≈1.1 GiB of fixed MTP-graph workspace remains. The q8_0 draft at batch 64 has
+not been measured separately; the reserve uses the q4_0 measurement plus
+≈90 MiB of margin.
+
+**The 10:32 OOM** (build `85e00fc`, q8_0 + MTP, 252,416 tokens, draft batch 512)
+failed on the first decode with `kIOGPUCommandBufferCallbackErrorOutOfMemory`,
+then `ggml_metal_synchronize ... status 5`, `backend is in error state`, and
+`llama_decode ... ret = -3`. The clamp had charged 19,584 B/token
+(17,408 target + 2,176 draft) and held back only 320 MiB of compute, but the
+two `sched_reserve` allocations were ≈3.29 GB. The failure was uncharged
+compute, not the KV cache itself.
+
+**Current plan** (`KVCacheSpec.contextPlan`) holds back the measured reserve:
+
+| target batch | reserve, MTP off | reserve, MTP on |
+|---|---|---|
+| 512 | 1,800 MiB | 3,000 MiB |
+| 1024 | 2,600 MiB | 3,800 MiB |
+
+`kvBudget = budget - computeReserve`; `maxContextByMemory` divides that by the
+charged KV bytes/token. The plan tries 1024 first and falls back to 512 before
+clamping. On the 8,053,063,680 B budget:
+
+- q4_0 + MTP: 262,144 at batch 1024 (measured HTTP 200).
+- q8_0 + MTP: 250,368 at batch 512 (below the 252,416 OOM; not yet re-measured).
+- q4_0, MTP off: 262,144 at batch 1024.
+- q8_0, MTP off: 262,144 at batch 1024 (planned; not yet re-measured).
+
+The constants are rounded up from the measurements above and are KV-type
+agnostic: the batch, not the KV type, dominates the workspace.
 
 ### When readings are taken
 
@@ -143,7 +187,7 @@ the live ceiling check.
 
 The MTP path creates a **second** context on the same model with the same
 `n_ctx` (`LlamaInference.setupDraftContext`), and llama.cpp commits its KV up
-front. So both the clamp and the fast-prefill slack charge
+front. So both the clamp and the batch plan charge
 `KVCacheSpec.chargedKvBytesPerToken` = target bytes/token **+ draft bytes/token**.
 
 The draft context is typed `LLAMA_CONTEXT_TYPE_MTP`, so llama.cpp builds only the
