@@ -185,7 +185,15 @@ final class KVCacheSpecTests: XCTestCase {
             256, "floor 256 applies")
     }
 
-    // MARK: - Measured compute reserve and context plan
+    // MARK: - Measured compute reserve, system wired cap, and context plan
+
+    /// The loaded model's measured size (2.78 GB). The per-process budget
+    /// charges it only in the load pre-check; the system wired cap charges it
+    /// because its Metal pages compete with the KV caches.
+    private let systemModelBytes = 2_780_000_000
+    private let MiB = 1024 * 1024
+    /// Disables the system cap so a test can isolate the per-process fallback.
+    private let unlimitedWiredBudget = 100 * 1024 * 1024 * 1024
 
     func testComputeReserveCountsTheMeasuredSchedulerBuffers() {
         // Device sched_reserve values (2026-11-08, build 2b6dd82):
@@ -202,45 +210,109 @@ final class KVCacheSpecTests: XCTestCase {
                        3_800 * 1024 * 1024, "target 1024 + draft")
     }
 
+    func testSystemComputeUsesTheMeasuredMTPBuffers() {
+        // q4_0 + MTP 262,144, build 2b6dd82: target 1024 = 1,673.31 +
+        // 552.32 = 2,225.63 MiB; draft 64 = 1,079.56 + 33.52 = 1,113.08 MiB.
+        // q8_0 + MTP 262,144, build 2287162: target 512 = 1,309.47 +
+        // 266.79 = 1,576.26 MiB; draft 64 = 1,032.12 + 32.08 = 1,064.20 MiB.
+        // The system cap rounds those up; the MTP-off path keeps the
+        // conservative per-process reserve.
+        XCTAssertEqual(KVCacheSpec.systemComputeBytes(batchSize: 1024, useMtp: true),
+                       3_370 * MiB)
+        XCTAssertEqual(KVCacheSpec.systemComputeBytes(batchSize: 512, useMtp: true),
+                       2_720 * MiB)
+        XCTAssertEqual(KVCacheSpec.systemComputeBytes(batchSize: 1024, useMtp: false),
+                       2_600 * MiB)
+        XCTAssertEqual(KVCacheSpec.systemComputeBytes(batchSize: 512, useMtp: false),
+                       1_800 * MiB)
+    }
+
+    func testSystemWiredBudgetSitsBetweenTheMeasuredWorkingAndCrashTotals() {
+        // q4_0 + MTP 262,144 completed a request; q8_0 + MTP 262,144 was
+        // jetsam-killed (vm-pageshortage, system free 75 MB, wired 10.77 GB).
+        // The cap must keep the measured-working total and reject the crash
+        // total; the q8 clamp below is the consequence.
+        let q4Working = systemModelBytes
+            + KVCacheSpec.systemComputeBytes(batchSize: 1024, useMtp: true)
+            + 262_144 * 10_368
+        let q8Crash = systemModelBytes
+            + KVCacheSpec.systemComputeBytes(batchSize: 512, useMtp: true)
+            + 262_144 * 19_584
+        XCTAssertLessThanOrEqual(q4Working, KVCacheSpec.systemWiredBudgetBytes)
+        XCTAssertGreaterThan(q8Crash, KVCacheSpec.systemWiredBudgetBytes)
+        XCTAssertEqual(KVCacheSpec.systemWiredBudgetBytes, 8_704 * MiB,
+                       "8.5 GiB")
+    }
+
     func testContextPlanPreservesQ4MTPFullWindow() {
         // The measured q4_0 + MTP 262,144 run completed a request (HTTP 200)
-        // with target batch 1024 and draft batch 64. The plan must not clamp
-        // it just because q8_0 cannot hold the same window.
+        // with target batch 1024 and draft batch 64. The system wired cap
+        // (8.5 GiB) is above its 8.411 GiB estimated total, so it must not
+        // clamp the measured-working configuration.
         let plan = KVCacheSpec.contextPlan(
-            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
+            budgetBytes: 8_053_063_680, modelBytes: systemModelBytes,
+            chargedBytesPerToken: 10_368,
             desiredContext: 262_144, useMtp: true)
         XCTAssertEqual(plan.contextSize, 262_144)
         XCTAssertEqual(plan.batchSize, 1024)
-        XCTAssertEqual(plan.computeReserveBytes, 3_800 * 1024 * 1024)
+        XCTAssertEqual(plan.computeReserveBytes, 3_800 * MiB)
+        XCTAssertEqual(plan.memoryCap, 271_104)
+        XCTAssertEqual(plan.systemCap, 271_104)
+        XCTAssertEqual(plan.processCap, 392_192)
         XCTAssertGreaterThanOrEqual(plan.memoryCap, 262_144)
     }
 
-    func testContextPlanClampsQ8MTPBelowTheOOMContext() {
-        // The 10:32 OOM ran q8_0 + MTP at 252,416 tokens and died on the first
-        // decode. The 64-token draft shrinks the compute enough for a lower
-        // context, but not for the context that OOM'd: 250,368 is the max.
+    func testContextPlanClampsQ8MTPBelowTheMeasuredJetsamContext() {
+        // q8_0 + MTP at 262,144 (build 2287162) was killed by jetsam even
+        // with a single LlamaServer process: 325,112 pages resident, only
+        // 75 MB free, 10.77 GB system wired. The per-process plan approved
+        // 250,368; the system wired cap is the binding limit and clamps to
+        // 178,432 at batch 512 (8.500 GiB estimated).
         let plan = KVCacheSpec.contextPlan(
-            budgetBytes: 8_053_063_680, chargedBytesPerToken: 19_584,
+            budgetBytes: 8_053_063_680, modelBytes: systemModelBytes,
+            chargedBytesPerToken: 19_584,
             desiredContext: 262_144, useMtp: true)
         XCTAssertEqual(plan.batchSize, 512, "1024 cannot back the requested window")
-        XCTAssertEqual(plan.contextSize, 250_368)
-        XCTAssertLessThan(plan.contextSize, 252_416, "the measured OOM context must not be approved")
+        XCTAssertEqual(plan.contextSize, 178_432)
+        XCTAssertEqual(plan.memoryCap, 178_432)
+        XCTAssertEqual(plan.systemCap, 178_432)
+        XCTAssertEqual(plan.processCap, 250_368)
+        XCTAssertLessThan(plan.contextSize, 252_416,
+                          "the measured OOM context must not be approved")
     }
 
-    func testContextPlanKeepsQ8MTPOffOn1024WhenItFits() {
+    func testContextPlanClampsQ8MTPOffToTheSystemWiredBoundary() {
+        // q8_0 with MTP off has no draft allocation, but the full 262,144
+        // window would still be ~8.6 GiB wired. 512 backs the most KV under
+        // the 8.5 GiB cap: 256,000 tokens (8.497 GiB conservative).
         let plan = KVCacheSpec.contextPlan(
-            budgetBytes: 8_053_063_680, chargedBytesPerToken: 17_408,
+            budgetBytes: 8_053_063_680, modelBytes: systemModelBytes,
+            chargedBytesPerToken: 17_408,
+            desiredContext: 262_144, useMtp: false)
+        XCTAssertEqual(plan.batchSize, 512)
+        XCTAssertEqual(plan.contextSize, 256_000)
+        XCTAssertEqual(plan.systemCap, 256_000)
+        XCTAssertLessThan(plan.contextSize, 262_144)
+    }
+
+    func testContextPlanKeepsQ4MTPOffOnTheFullWindow() {
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, modelBytes: systemModelBytes,
+            chargedBytesPerToken: 10_368,
             desiredContext: 262_144, useMtp: false)
         XCTAssertEqual(plan.contextSize, 262_144)
         XCTAssertEqual(plan.batchSize, 1024)
-        XCTAssertEqual(plan.computeReserveBytes, 2_600 * 1024 * 1024)
+        XCTAssertEqual(plan.computeReserveBytes, 2_600 * MiB)
     }
 
     func testContextPlanFallsBackTo512BeforeClamping() {
+        // With the system cap disabled, this isolates the per-process plan:
         // 1024 can back 513,536 but not 550,000; 512 can back 594,432.
         let plan = KVCacheSpec.contextPlan(
-            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
-            desiredContext: 550_000, useMtp: false)
+            budgetBytes: 8_053_063_680, modelBytes: 0,
+            chargedBytesPerToken: 10_368,
+            desiredContext: 550_000, useMtp: false,
+            wiredBudgetBytes: unlimitedWiredBudget)
         XCTAssertEqual(plan.batchSize, 512)
         XCTAssertEqual(plan.contextSize, 550_000)
         XCTAssertEqual(plan.memoryCap, 594_432)
@@ -248,11 +320,26 @@ final class KVCacheSpecTests: XCTestCase {
 
     func testContextPlanClampsWhenNeitherBatchCanBackTheWindow() {
         let plan = KVCacheSpec.contextPlan(
-            budgetBytes: 8_053_063_680, chargedBytesPerToken: 10_368,
-            desiredContext: 600_000, useMtp: false)
+            budgetBytes: 8_053_063_680, modelBytes: 0,
+            chargedBytesPerToken: 10_368,
+            desiredContext: 600_000, useMtp: false,
+            wiredBudgetBytes: unlimitedWiredBudget)
         XCTAssertEqual(plan.batchSize, 512)
         XCTAssertEqual(plan.contextSize, 594_432)
         XCTAssertEqual(plan.memoryCap, 594_432)
+    }
+
+    func testContextPlanReportsTheBindingBudget() {
+        // When the wired cap binds, the plan must expose the smaller KV budget
+        // so the refusal/slack messages can't quote the larger per-process one.
+        let plan = KVCacheSpec.contextPlan(
+            budgetBytes: 8_053_063_680, modelBytes: systemModelBytes,
+            chargedBytesPerToken: 19_584,
+            desiredContext: 262_144, useMtp: true)
+        XCTAssertEqual(plan.bindingKvBudgetBytes,
+                       KVCacheSpec.systemWiredBudgetBytes - systemModelBytes - KVCacheSpec.systemComputeBytes(batchSize: 512, useMtp: true))
+        XCTAssertLessThan(plan.bindingKvBudgetBytes,
+                          8_053_063_680 - plan.computeReserveBytes)
     }
 
     func testMetalPrewarmIsGatedOnContextSize() {

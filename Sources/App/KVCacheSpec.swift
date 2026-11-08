@@ -150,54 +150,130 @@ enum KVCacheSpec {
     static let targetCompute1024Bytes = 2_600 * 1024 * 1024
     static let draftComputeBytes = 1_200 * 1024 * 1024
 
-    /// Compute that must be held back from the KV budget for `batchSize`.
-    /// The draft context is live for the whole generation, so MTP adds its
-    /// workspace even though draft generation itself decodes only 1-2 rows.
+    /// Compute that must be held back from the **per-process** KV budget for
+    /// `batchSize`. The draft context is live for the whole generation, so MTP
+    /// adds its workspace even though draft generation itself decodes only 1-2
+    /// rows.
     static func computeReserveBytes(batchSize: Int, useMtp: Bool) -> Int {
         let target = batchSize >= 1024 ? targetCompute1024Bytes : targetCompute512Bytes
         return target + (useMtp ? draftComputeBytes : 0)
+    }
+
+    // MARK: System wired budget
+
+    /// The model's file mmap is mostly outside the per-process **charged**
+    /// footprint, but its Metal pages compete for the device's **system wired**
+    /// memory with the KV caches and the two `sched_reserve` workspaces. The
+    /// per-process ceiling therefore cannot be the only guard: the app can be
+    /// well under 8 GiB of charged footprint and still jetsam the whole machine.
+    ///
+    /// Measured on the 12.26 GB iPhone 17 Pro Max (2026-11-08):
+    /// - q4_0 + MTP, 262,144 ctx, build `2b6dd82`: completed a request with an
+    ///   estimated wired total of **8.411 GiB** (model + measured compute + KV).
+    /// - q8_0 + MTP, 262,144 ctx, build `2287162`: **jetsam**
+    ///   (`vm-pageshortage`, largest process LlamaServer, 325,112 pages, system
+    ///   free 4,613 pages, system wired 657,310 pages) with an estimated wired
+    ///   total of **10.027 GiB**.
+    ///
+    /// 8.5 GiB sits above the measured-working q4 total by ~0.09 GiB and below
+    /// the measured q8 crash by ~1.53 GiB. The q8_0 + MTP clamp lands at
+    /// 178,432 tokens (8.500 GiB); q4_0 + MTP keeps 262,144 (8.411 GiB).
+    static let systemWiredBudgetBytes = 8_704 * 1024 * 1024 // 8.5 GiB
+
+    /// System-wired compute for the **MTP-on** path, rounded up from the
+    /// measured `sched_reserve` buffers (build `2b6dd82`):
+    ///
+    /// - target 512, q8_0: 1,309.47 MTL0 + 266.79 CPU = 1,576.26 MiB
+    /// - target 1024, q4_0: 1,673.31 MTL0 + 552.32 CPU = 2,225.63 MiB
+    /// - draft 64: 1,079.56 MTL0 + 33.52 CPU = 1,113.08 MiB
+    ///
+    /// These are deliberately tighter than `computeReserveBytes`: that reserve
+    /// is a conservative per-process guard, and using it here would clamp the
+    /// measured-working q4_0 + MTP 262,144 (the reserve's 3,800 MiB is 461 MiB
+    /// above the measured 3,339 MiB). The MTP-off path has no draft workspace
+    /// and keeps the per-process reserve, which is already conservative.
+    static let systemTargetCompute512Bytes = 1_600 * 1024 * 1024
+    static let systemTargetCompute1024Bytes = 2_250 * 1024 * 1024
+    static let systemDraftComputeBytes = 1_120 * 1024 * 1024
+
+    /// Compute that counts against the system wired budget for `batchSize`.
+    static func systemComputeBytes(batchSize: Int, useMtp: Bool) -> Int {
+        if useMtp {
+            let target = batchSize >= 1024
+                ? systemTargetCompute1024Bytes : systemTargetCompute512Bytes
+            return target + systemDraftComputeBytes
+        }
+        return batchSize >= 1024 ? targetCompute1024Bytes : targetCompute512Bytes
     }
 
     struct ContextPlan: Equatable {
         let contextSize: Int
         let batchSize: Int
         let computeReserveBytes: Int
-        /// Largest context the chosen batch's KV budget can back.
+        /// Binding cap: `min(processCap, systemCap)`.
         /// `contextSize == min(desiredContext, memoryCap)`.
         let memoryCap: Int
+        /// Largest context the per-process budget can back at this batch.
+        let processCap: Int
+        /// Largest context the system wired budget can back after charging the
+        /// model and the measured compute at this batch.
+        let systemCap: Int
+        /// The smaller of the per-process and system KV budgets at this batch;
+        /// this is what the KV slack and refusal messages must use.
+        let bindingKvBudgetBytes: Int
+        /// System compute charged for this batch's wired check.
+        let systemComputeBytes: Int
     }
 
-    /// Chooses the context and micro-batch against the **measured compute**,
-    /// not the model file:
+    /// Chooses the context and micro-batch against two measured limits:
     ///
-    ///     kvBudget  = budgetBytes - computeReserveBytes(batch, mtp)
-    ///     memoryCap = maxContextByMemory(kvBudget, chargedBytesPerToken)
+    ///     processKv  = budgetBytes - computeReserveBytes(batch, mtp)
+    ///     systemKv   = systemWiredBudgetBytes - modelBytes - systemComputeBytes(batch, mtp)
+    ///     memoryCap  = min(maxContextByMemory(processKv), maxContextByMemory(systemKv))
     ///
     /// 1024 is preferred (measured ~29% faster prefill) when it can back the
-    /// desired window. If it cannot, 512 leaves ~0.8 GiB more for KV and is
-    /// chosen even if that means clamping. The measured q8_0+MTP 252,416 OOM
-    /// must fall below the line; the working q4_0+MTP 262,144 must not.
-    static func contextPlan(budgetBytes: Int, chargedBytesPerToken: Int,
-                            desiredContext: Int, useMtp: Bool) -> ContextPlan {
+    /// desired window at **both** limits. If it cannot, 512 leaves ~0.8 GiB more
+    /// KV and is chosen even if that means clamping. The system wired limit is
+    /// what keeps the measured q8_0+MTP 262,144 jetsam below the line while
+    /// leaving the measured-working q4_0+MTP 262,144 alone.
+    static func contextPlan(budgetBytes: Int, modelBytes: Int,
+                            chargedBytesPerToken: Int,
+                            desiredContext: Int, useMtp: Bool,
+                            wiredBudgetBytes: Int = systemWiredBudgetBytes) -> ContextPlan {
         let batches = [1024, 512]
         var fallback: ContextPlan?
         for batch in batches {
             let reserve = computeReserveBytes(batchSize: batch, useMtp: useMtp)
-            let memoryCap = maxContextByMemory(
-                kvBudgetBytes: budgetBytes - reserve,
+            let processKvBudget = budgetBytes - reserve
+            let processCap = maxContextByMemory(
+                kvBudgetBytes: processKvBudget,
                 chargedBytesPerToken: chargedBytesPerToken)
+
+            let systemCompute = systemComputeBytes(batchSize: batch, useMtp: useMtp)
+            let systemKvBudget = wiredBudgetBytes - modelBytes - systemCompute
+            let systemCap = maxContextByMemory(
+                kvBudgetBytes: systemKvBudget,
+                chargedBytesPerToken: chargedBytesPerToken)
+
+            let memoryCap = min(processCap, systemCap)
             let plan = ContextPlan(
                 contextSize: min(desiredContext, memoryCap),
                 batchSize: batch,
                 computeReserveBytes: reserve,
-                memoryCap: memoryCap)
+                memoryCap: memoryCap,
+                processCap: processCap,
+                systemCap: systemCap,
+                bindingKvBudgetBytes: min(processKvBudget, systemKvBudget),
+                systemComputeBytes: systemCompute)
             if memoryCap >= desiredContext { return plan }
             fallback = plan
         }
         return fallback ?? ContextPlan(
             contextSize: 0, batchSize: 512,
             computeReserveBytes: computeReserveBytes(batchSize: 512, useMtp: useMtp),
-            memoryCap: 0)
+            memoryCap: 0, processCap: 0, systemCap: 0,
+            bindingKvBudgetBytes: 0,
+            systemComputeBytes: systemComputeBytes(batchSize: 512, useMtp: useMtp))
     }
 
     /// Whether a context of `contextSize` tokens needs the Metal pre-warm

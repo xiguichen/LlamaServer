@@ -449,12 +449,21 @@ final class LlamaInference: @unchecked Sendable {
         // and falls back to 512 — which leaves ~0.8 GiB more for KV — before it
         // clamps. This is what keeps the measured q8_0+MTP 252,416 OOM below
         // the line while leaving the working q4_0+MTP 262,144 alone.
+        let modelBytes = Int(llama_model_size(loadedModel))
+        // The per-process budget cannot see the model's Metal pages, so the
+        // plan applies a second check against the measured system wired
+        // ceiling: model + compute + charged KV. Use the smaller KV budget for
+        // messages and slack; `computeReserveBytes` alone would quote headroom
+        // the machine does not have.
         let plan = KVCacheSpec.contextPlan(
             budgetBytes: budget,
+            modelBytes: modelBytes,
             chargedBytesPerToken: chargedBytesPerToken,
             desiredContext: effective,
             useMtp: useMtp)
-        let kvBudget = budget - plan.computeReserveBytes
+        let kvBudget = plan.bindingKvBudgetBytes
+        let bindingComputeBytes = plan.systemCap < plan.processCap
+            ? plan.systemComputeBytes : plan.computeReserveBytes
         let kvTokenSize = ByteCountFormatter.string(fromByteCount: Int64(chargedBytesPerToken), countStyle: .memory)
         let kvBudgetStr = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
         if kvBudget < chargedBytesPerToken * 256 {
@@ -462,8 +471,14 @@ final class LlamaInference: @unchecked Sendable {
             throw InferenceError.insufficientMemory(
                 "Not enough memory for \(requestedContext)-token context (KV cache needs ~\(kvTokenSize)/token across every context [\(chargeDesc)], only \(kvBudgetStr) available). Close other apps or reduce context size.")
         }
+        if plan.systemCap < plan.processCap {
+            let wiredStr = ByteCountFormatter.string(fromByteCount: Int64(KVCacheSpec.systemWiredBudgetBytes), countStyle: .memory)
+            let modelStr = ByteCountFormatter.string(fromByteCount: Int64(modelBytes), countStyle: .memory)
+            let computeStr = ByteCountFormatter.string(fromByteCount: Int64(plan.systemComputeBytes), countStyle: .memory)
+            FileLogger.shared.warn("system wired budget \(wiredStr): model \(modelStr) + compute \(computeStr) + KV \(kvBudgetStr) at batch \(plan.batchSize); capping context at \(plan.systemCap) tokens")
+        }
         if effective > plan.contextSize {
-            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr) KV + \(plan.computeReserveBytes / (1024 * 1024)) MB compute at batch \(plan.batchSize), \(chargedBytesPerToken) B/token charged [\(chargeDesc)]); reducing to \(plan.contextSize)")
+            FileLogger.shared.warn("requested ctx \(effective) exceeds memory budget (\(kvBudgetStr) KV + \(bindingComputeBytes / (1024 * 1024)) MB compute at batch \(plan.batchSize), \(chargedBytesPerToken) B/token charged [\(chargeDesc)]); reducing to \(plan.contextSize)")
         }
         // Classify the reduction *before* applying the memory clamp: `effective`
         // here is already the window/ceiling cap, so the pair (windowCap,
@@ -593,7 +608,7 @@ final class LlamaInference: @unchecked Sendable {
         guard let ctx = llama_init_from_model(loadedModel, ctxParams) else {
             FileLogger.shared.error("context creation returned NULL (ctx=\(effective), batch=\(batchSize))")
             let ctxMem = ByteCountFormatter.string(fromByteCount: Int64(chargedBytesPerToken * effective), countStyle: .memory)
-            let compMem = ByteCountFormatter.string(fromByteCount: Int64(plan.computeReserveBytes), countStyle: .memory)
+            let compMem = ByteCountFormatter.string(fromByteCount: Int64(bindingComputeBytes), countStyle: .memory)
             let avail = ByteCountFormatter.string(fromByteCount: Int64(kvBudget), countStyle: .memory)
             llama_model_free(loadedModel)
             throw InferenceError.insufficientMemory(
