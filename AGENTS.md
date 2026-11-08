@@ -10,6 +10,7 @@ turn, and a long prompt measurably degrades the model's tool calling
 ## Local development
 
 No local Xcode build or test runs. **Use CI** (`docs/CI.md`) for building and unit tests.
+We should use swiftc -parse command to find out syntax problems after each .swift file update.
 
 ## Read when you need it
 
@@ -26,13 +27,19 @@ No local Xcode build or test runs. **Use CI** (`docs/CI.md`) for building and un
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | making or repeating any performance claim (measured baseline, method, disproved claims) |
 | [`.github/workflows/build.yml`](.github/workflows/build.yml) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild)
 
-## Build & test (CI only)
 
-No local Xcode. Push to `main` (or open a PR); `.github/workflows/build.yml` runs
-on an `xcode-27` runner (macOS 27, Xcode 27 → iOS 27 SDK):
+## You must use swiftc to parse the .swift file before commit
 
-- **test**: `xcodegen generate` → `xcodebuild test` (simulator, `iPhone 17`)
-- **build**: `xcodegen generate` → unsigned Release → `scripts/package-ipa.sh` → `LlamaServer-unsigned.ipa`
+You must use swiftc to parse the swift file to make sure there is no syntax error
+
+
+## Build & test (Use CI to do it, you must follow below rule)
+
+Local environment does not have the required build environment, push to github for build and test. Use gh run view command to view the build and test result. For example:
+```
+gh run view 42481626865 --log-failed 2>&1
+```
+Never try to use curl command to do it as it requires authentication.
 
 The test job must pass; the build job produces the IPA.
 
