@@ -1,8 +1,6 @@
 # Operating the device build
 
-Read this when debugging a deployed build, uploading an IPA, or running on-device
-compliance tests. The app runs on device, so behaviour is diagnosed from its
-logs — there is no debugger attached and no local build to fall back on.
+Read this when deploying changes to your iPhone. Your device IP is `192.168.3.3`.
 
 ## Identify the build before concluding anything
 
@@ -20,7 +18,7 @@ newest build).
 
 ## Logs
 
-- **Pull them over HTTP** (no cable, no Files app): `curl 'http://<device>:8443/logs?name=inference&tail=500'`.
+- **Pull them over HTTP** (no cable, no Files app): `curl 'http://192.168.3.3:8443/logs?name=inference&tail=500'`.
   Full query and caveats: `docs/LOGGING.md`.
 - **The in-app panel is not the log.** It renders basic (error/warn/info) lines
   only, capped and truncated (`LogPanelSpec`); the three on-disk files are
@@ -34,7 +32,7 @@ Store fetched logs on the filesystem before analysing them (e.g.
 
 ## Deploying a new build (LAN push, not a cable)
 
-`scripts/upload-ipa.sh --url http://<device>:8443` downloads the latest green
+`scripts/upload-ipa.sh --url http://192.168.3.3:8443` downloads the latest green
 `build.yml` artifact with `gh` and `PUT`s it to
 `GET|PUT /v1/updates[/ipa?build=<sha>]`. The app stores it in
 `Documents/updates/` (`LlamaServer-unsigned.ipa`, rotated
@@ -74,5 +72,4 @@ Measured: **KV q4_0 reaches 262,144** on this device; q8_0 clamps to ~160,512.
 
 ## On-device compliance
 
-The `llm-compliance-test` skill runs `llm-comply openai-chat` against a deployed
-build. The field-presence rules it gates on are in `docs/API.md`.
+On-device compliance testing is not currently automated. Manual verification requires running the app directly on the device and checking logs / behavior.

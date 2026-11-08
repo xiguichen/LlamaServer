@@ -7,6 +7,10 @@ API (SwiftUI UI + Telegraph server). No separate server binary.
 turn, and a long prompt measurably degrades the model's tool calling
 (`docs/TOOL-CALLS.md` → *Prompt dilution*). Put detail in `docs/`, not here.
 
+## Local development
+
+No local Xcode build or test runs. **Use CI** (`docs/CI.md`) for building and unit tests.
+
 ## Read when you need it
 
 | Doc | Load it when |
@@ -18,7 +22,9 @@ turn, and a long prompt measurably degrades the model's tool calling
 | [`docs/API.md`](docs/API.md) | touching request/response types, token limits, `stop`, `enable_thinking`, OpenAI field presence |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | adding log lines, changing the in-app panel, or fetching logs |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | debugging a deployed build, uploading an IPA, or running on-device compliance tests |
+| [`docs/CI.md`](docs/CI.md) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild) |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | making or repeating any performance claim (measured baseline, method, disproved claims) |
+| [`.github/workflows/build.yml`](.github/workflows/build.yml) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild)
 
 ## Build & test (CI only)
 
