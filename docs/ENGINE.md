@@ -32,8 +32,9 @@ detail in `AGENTS.md`.
   generation (the snapshot is the *stable* prefix, taken before generation).
 - The per-turn save is only needed because the MTP path ends by wiping
   `cachedTokenIds` and both caches (the `usedMtp` branch at the end of
-  `generate`) instead of leaving the live KV reusable. Removing that wipe is the
-  open optimisation in `docs/PERFORMANCE.md`.
+  `generate`) instead of leaving the live KV reusable. Removing that wipe is an
+  open optimisation: the invariant, trim rule, draft-context consequences, and
+  required paired A/B are in [`docs/MTP-KV-REUSE.md`](MTP-KV-REUSE.md).
 
 ## MTP (Multi-Token Prediction)
 

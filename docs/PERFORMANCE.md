@@ -249,7 +249,9 @@ Every turn saves a prompt-state snapshot and the next turn loads it back:
 visible on small turns where 66 new tokens still took 1.45 s). It is written to
 `NSTemporaryDirectory()` and only needed (a) across a recreate and (b) because
 the MTP path wipes `cachedTokenIds`/both caches at the end of `generate` (the
-`usedMtp` branch) instead of leaving the live KV reusable.
+`usedMtp` branch) instead of leaving the live KV reusable. The design and the
+paired A/B required to remove that wipe are in `docs/MTP-KV-REUSE.md`; this file
+remains the source of numbers.
 
 ### 262,144 context: what it costs
 
