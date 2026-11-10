@@ -14,6 +14,9 @@ detail in `AGENTS.md`.
   serializes its live KV state to the same on-disk blob the hybrid path uses,
   then clears `cachedTokenIds`; the next turn restores from disk instead of
   re-decoding the whole prompt. Hybrid snapshots were already saved per turn.
+  A recreate triggered by a mid-generation decode failure skips this capture:
+  `cachedTokenIds` is only updated after a successful generation, so the live
+  KV would no longer match it.
 - `recreateContext()` frees the old context **before** creating the new one and
   sets `contextValid = false` immediately after the free, so a subsequent
   failure cannot use the dangling pointer.

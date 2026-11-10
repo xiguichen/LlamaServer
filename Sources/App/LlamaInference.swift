@@ -841,7 +841,13 @@ final class LlamaInference: @unchecked Sendable {
     /// Frees the old llama_context and creates a fresh one. This is called after
     /// many generations to flush any accumulated GPU/allocator state that could
     /// cause Metal to hang on `llama_sampler_sample`.
-    func recreateContext() throws {
+    ///
+    /// `captureDenseSnapshot` must be false when the recreate is recovering from
+    /// a mid-generation decode failure: the live KV then contains tokens that
+    /// `cachedTokenIds` does not describe (it is only updated at the end of a
+    /// successful generation), so serializing it would label a larger state with
+    /// stale token metadata and restore it at the wrong positions later.
+    func recreateContext(captureDenseSnapshot: Bool = true) throws {
         // Start timing the entire recreate operation
         let recreateStart = Date()
 
@@ -852,9 +858,10 @@ final class LlamaInference: @unchecked Sendable {
         // `cachedTokenIds` below and skip decoding a prefix that is no longer
         // resident. The hybrid path already saved its snapshot during
         // generation, so this only runs for dense models.
-        if ReuseSurvival.denseSnapshotCaptureNeeded(
-            supportsPartialReuse: supportsPartialCacheReuse,
-            hasCachedTokens: !cachedTokenIds.isEmpty), contextValid {
+        if captureDenseSnapshot, contextValid,
+           ReuseSurvival.denseSnapshotCaptureNeeded(
+               supportsPartialReuse: supportsPartialCacheReuse,
+               hasCachedTokens: !cachedTokenIds.isEmpty) {
             savePromptSnapshot(cachedTokenIds)
         }
 
@@ -941,7 +948,9 @@ final class LlamaInference: @unchecked Sendable {
             FileLogger.shared.error(line)
         }
         do {
-            try recreateContext()
+            // The cache and `cachedTokenIds` disagree here (the failure happened
+            // mid-generation), so never snapshot this state.
+            try recreateContext(captureDenseSnapshot: false)
         } catch {
             FileLogger.shared.error("context recreation after decode failure FAILED: \(error.localizedDescription)")
         }
