@@ -48,6 +48,27 @@ enum MemoryLimitProbe {
         return value
     }
 
+    /// Function-pointer types for the Security.framework entitlement APIs.
+    private typealias CreateTask = @convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?
+    private typealias CopyValue = @convention(c) (CFTypeRef?, CFString,
+                                                 UnsafeMutablePointer<Unmanaged<CFError>?>?) -> Unmanaged<CFTypeRef>?
+
+    /// Resolved once per process. Calling `dlopen` on every probe leaked a
+    /// reference each time (and repeated the symbol lookup); the probe only runs
+    /// at model load, but there is no reason to hold a new handle per call.
+    private static let securitySymbols: (createTask: CreateTask, copyValue: CopyValue)? = {
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW),
+              let createSym = dlsym(handle, "SecTaskCreateFromSelf"),
+              let copySym = dlsym(handle, "SecTaskCopyValueForEntitlement") else {
+            return nil
+        }
+        // The process-lifetime handle intentionally stays open: the resolved
+        // function pointers are valid for as long as the module is loaded, and
+        // Security is already linked into the process.
+        return (unsafeBitCast(createSym, to: CreateTask.self),
+                unsafeBitCast(copySym, to: CopyValue.self))
+    }()
+
     /// Whether this process's *effective* entitlements carry `name`.
     ///
     /// `SecTaskCreateFromSelf` / `SecTaskCopyValueForEntitlement` are the only
@@ -56,21 +77,14 @@ enum MemoryLimitProbe {
     /// becoming a link failure or a crash on a future SDK. `nil` never means
     /// "absent".
     static func entitlementPresent(_ name: String = entitlementName) -> Bool? {
-        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW),
-              let createSym = dlsym(handle, "SecTaskCreateFromSelf"),
-              let copySym = dlsym(handle, "SecTaskCopyValueForEntitlement") else {
+        guard let symbols = securitySymbols,
+              let task = symbols.createTask(kCFAllocatorDefault)?.takeRetainedValue() else {
             return nil
         }
         // The Create/Copy naming means the callee hands back a +1 reference; the
         // `Unmanaged` return types make that ownership explicit (Swift 6 manages
         // CF types itself, so CFRelease is unavailable and would be wrong here).
-        typealias CreateTask = @convention(c) (CFAllocator?) -> Unmanaged<CFTypeRef>?
-        typealias CopyValue = @convention(c) (CFTypeRef?, CFString,
-                                              UnsafeMutablePointer<Unmanaged<CFError>?>?) -> Unmanaged<CFTypeRef>?
-        let createTask = unsafeBitCast(createSym, to: CreateTask.self)
-        let copyValue = unsafeBitCast(copySym, to: CopyValue.self)
-        guard let task = createTask(kCFAllocatorDefault)?.takeRetainedValue() else { return nil }
-        guard let value = copyValue(task, name as CFString, nil)?.takeRetainedValue() else {
+        guard let value = symbols.copyValue(task, name as CFString, nil)?.takeRetainedValue() else {
             return false                              // task found, entitlement not in it
         }
         if let number = value as? NSNumber { return number.boolValue }

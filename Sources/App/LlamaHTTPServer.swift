@@ -150,6 +150,23 @@ final class LlamaHTTPServer {
     deinit {
         observerTokens.forEach { NotificationCenter.default.removeObserver($0) }
         observerTokens.removeAll()
+        // `stop()` is the normal teardown path; this is the safety net for an
+        // instance dropped without it. Without this the repeating heartbeat
+        // timer, the published Bonjour service, and the silent-audio session
+        // outlive the object (and can keep it/its run loop work alive).
+        if let timer = heartbeatTimer {
+            if Thread.isMainThread {
+                timer.invalidate()
+            } else {
+                DispatchQueue.main.async { timer.invalidate() }
+            }
+        }
+        heartbeatTimer = nil
+        bonjourService?.stop()
+        bonjourService = nil
+        keepAlive.stop()
+        server?.stop(immediately: true)
+        server = nil
     }
 
     var isRunning: Bool { server?.isRunning ?? false }
@@ -158,6 +175,10 @@ final class LlamaHTTPServer {
     // MARK: - Start / Stop
 
     func start(port: UInt16) throws {
+        // A new start reverses the in-flight cancellation flag from a previous
+        // stop(), so a stop→start cycle on the same instance serves requests
+        // instead of aborting at the first token.
+        _stopping.withLock { $0 = false }
         listenPort = port
         let server = makeServer()
         try server.start(port: Int(port))
@@ -173,7 +194,10 @@ final class LlamaHTTPServer {
 
         // Hold the app awake in the background so requests aren't suspended.
         keepAlive.start()
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self._stopping.withLock({ $0 }) else { return }
+            // An earlier start on this instance may have left a timer behind.
+            self.heartbeatTimer?.invalidate()
             self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 // `isRunning != true` also covers the case where a prior restart
@@ -204,6 +228,9 @@ final class LlamaHTTPServer {
         inferenceQueue.sync { }
         server?.stop(immediately: true)
         server = nil
+        // Mark this instance as stopped: the foreground observer and the
+        // heartbeat must not resurrect a listener the user turned off.
+        listenPort = 0
     }
 
     /// Guards against re-entrant calls to `restartListener()` (e.g. heartbeat
@@ -235,6 +262,13 @@ final class LlamaHTTPServer {
             // causes "Stream ended without finish_reason" errors on the client.
             self.inferenceQueue.sync { }
             DispatchQueue.main.async {
+                // stop() may have run while we were draining. Never resurrect a
+                // listener the user turned off (and don't start on port 0).
+                guard !self._stopping.withLock({ $0 }), self.listenPort > 0 else {
+                    self.restartLock.withLock { $0 = false }
+                    FileLogger.shared.debug("restartListener: server stopped meanwhile, skipping")
+                    return
+                }
                 self.server?.stop(immediately: true)
                 self.server = nil
                 let newServer = self.makeServer()
@@ -588,6 +622,9 @@ final class LlamaHTTPServer {
             out.append(bodyJSON)
             connection.send(data: out, timeout: 10)
             connection.close(immediately: false)
+            // This request was counted as active above; no SSE stream will run
+            // to the normal decrement path, so release it here.
+            activeConnections -= 1
             return
         }
 

@@ -10,9 +10,10 @@ detail in `AGENTS.md`.
   GPU/allocator state that can cause hangs.
 - The recreate runs **off the response path** (`RecreateTracker`, called after
   the finish chunk in streaming), and the prefix-reuse snapshot survives it
-  (`ReuseSurvival`) — a dense model's `cachedTokenIds` and the on-disk sequence
-  blob are preserved, so the next turn restores from disk instead of re-decoding
-  the whole prompt.
+  (`ReuseSurvival`). Before freeing a dense model's context, `recreateContext()`
+  serializes its live KV state to the same on-disk blob the hybrid path uses,
+  then clears `cachedTokenIds`; the next turn restores from disk instead of
+  re-decoding the whole prompt. Hybrid snapshots were already saved per turn.
 - `recreateContext()` frees the old context **before** creating the new one and
   sets `contextValid = false` immediately after the free, so a subsequent
   failure cannot use the dangling pointer.

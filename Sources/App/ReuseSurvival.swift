@@ -33,4 +33,18 @@ enum ReuseSurvival {
         _ = supportsPartialReuse
         return true
     }
+
+    /// Whether `recreateContext()` must serialize the live KV cache to disk
+    /// before freeing it.
+    ///
+    /// Dense models normally reuse their live KV cache via `seq_rm` and never
+    /// write a snapshot during generation. A recreate destroys that cache, so
+    /// the only way to keep prefix reuse (and to avoid treating a now-empty
+    /// cache as resident) is to save the current sequence state first. Hybrid
+    /// models already write their snapshot every turn, so they need no extra
+    /// capture.
+    static func denseSnapshotCaptureNeeded(supportsPartialReuse: Bool,
+                                           hasCachedTokens: Bool) -> Bool {
+        supportsPartialReuse && hasCachedTokens
+    }
 }

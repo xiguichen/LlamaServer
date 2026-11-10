@@ -844,18 +844,32 @@ final class LlamaInference: @unchecked Sendable {
     func recreateContext() throws {
         // Start timing the entire recreate operation
         let recreateStart = Date()
-        
-        llama_free(context)
-        // The old context is now gone; until the new one is created the pointer
-        // is dangling. Mark it invalid so a failure below can't be used.
-        contextValid = false
-        // Free and clear the linked draft context too — it points at the old
-        // target via ctx_other and must be rebuilt against the new one.
+
+        // A dense model keeps its reusable prefix in the live KV cache, so
+        // serialize it to disk BEFORE freeing the context. The new context has
+        // an empty cache; without this snapshot the next turn would either
+        // re-decode the whole prompt or — worse — trust the stale
+        // `cachedTokenIds` below and skip decoding a prefix that is no longer
+        // resident. The hybrid path already saved its snapshot during
+        // generation, so this only runs for dense models.
+        if ReuseSurvival.denseSnapshotCaptureNeeded(
+            supportsPartialReuse: supportsPartialCacheReuse,
+            hasCachedTokens: !cachedTokenIds.isEmpty), contextValid {
+            savePromptSnapshot(cachedTokenIds)
+        }
+
+        // Free the linked draft context FIRST: on shared-memory MTP models it
+        // references the target through ctx_other, so it must never outlive the
+        // target even for the duration of a free call.
         if let dft = mtpContext {
             llama_free(dft)
             mtpContext = nil
         }
         mtpEnabled = false
+        llama_free(context)
+        // The old context is now gone; until the new one is created the pointer
+        // is dangling. Mark it invalid so a failure below can't be used.
+        contextValid = false
         
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextSize)
@@ -884,16 +898,16 @@ final class LlamaInference: @unchecked Sendable {
         if useMtp {
             mtpEnabled = setupDraftContext(target: ctx)
         }
-        // A recreate rebuilds the llama_context but NOT the on-disk prompt
-        // snapshot or its token ids — both survive into the new context (see
-        // ReuseSurvival). Dense models get their `cachedTokenIds` back so the
-        // common-prefix reuse still applies; the hybrid snapshot restores from
-        // disk into the fresh context exactly as before.
-        if ReuseSurvival.snapshotSurvivesRecreate(supportsPartialReuse: supportsPartialCacheReuse) {
+        // A recreate rebuilds the llama_context and therefore starts with an
+        // EMPTY KV cache. The on-disk prompt snapshot survives (dense models
+        // just wrote it above; hybrid models save one every turn), so the next
+        // turn can restore it. Never carry `cachedTokenIds` across: they describe
+        // the freed cache, not the new one.
+        cachedTokenCount = 0
+        cachedTokenIds = []
+        if ReuseSurvival.snapshotSurvivesRecreate(supportsPartialReuse: supportsPartialCacheReuse), hasSnapshot {
             FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled)); prompt snapshot preserved for reuse")
         } else {
-            cachedTokenCount = 0
-            cachedTokenIds = []
             FileLogger.shared.info("context recreated (\(contextSize) tokens, mtp=\(mtpEnabled))")
         }
         
@@ -973,23 +987,32 @@ final class LlamaInference: @unchecked Sendable {
     func unload() {
         guard !isUnloaded else { return }
         isUnloaded = true
-        // Only free the context if it's still live: a failed recreateContext()
-        // may have already freed it (contextValid == false), and freeing again
-        // would be a double-free.
-        if contextValid { llama_free(context) }
-        // Free the linked MTP draft context (if any) before the model.
+        // Free the linked MTP draft context first: on shared-memory models it
+        // references the target through ctx_other, so it must go before the
+        // target. Freeing it first also keeps the target alive while the draft
+        // tears down.
         if let dft = mtpContext {
             llama_free(dft)
             mtpContext = nil
         }
         mtpEnabled = false
+        // Only free the context if it's still live: a failed recreateContext()
+        // may have already freed it (contextValid == false), and freeing again
+        // would be a double-free.
+        if contextValid { llama_free(context) }
         llama_model_free(model)
         // Drop the on-disk prompt-state snapshot (if any) so tmp doesn't accrue
-        // stale multi-MB state files across model reloads.
-        if hasSnapshot {
-            try? FileManager.default.removeItem(atPath: snapshotPath)
-            hasSnapshot = false
-        }
+        // stale multi-MB state files across model reloads. `hasSnapshot` can be
+        // false while a file still exists (a failed save/restore leaves a
+        // partial or unreadable blob), so remove by path, not by flag.
+        discardPromptSnapshot()
+        // Release the (small) bookkeeping arrays too. `unload()` is terminal, so
+        // nothing may keep a multi-hundred-thousand-token array alive while the
+        // instance itself is still referenced by the caller.
+        cachedTokenCount = 0
+        cachedTokenIds = []
+        draftPromptTokens = []
+        draftPromptBoundaryH = [:]
         FileLogger.shared.info("inference unloaded (model + context freed)")
     }
 
@@ -1256,6 +1279,20 @@ final class LlamaInference: @unchecked Sendable {
     /// Whether `snapshotPath` currently holds a valid, loadable snapshot.
     private var hasSnapshot = false
 
+    /// Deletes the on-disk prompt-state snapshot and forgets its tokens. Safe to
+    /// call when no file exists. Used by `unload()` and by the failure paths
+    /// that leave a partial/unreadable blob behind.
+    private func discardPromptSnapshot() {
+        hasSnapshot = false
+        snapshotTokens = []
+        guard FileManager.default.fileExists(atPath: snapshotPath) else { return }
+        do {
+            try FileManager.default.removeItem(atPath: snapshotPath)
+        } catch {
+            FileLogger.shared.warn("KV prompt-state snapshot cleanup failed: \(error.localizedDescription)")
+        }
+    }
+
     /// Serializes the current sequence-0 state (which must equal `promptTokens`)
     /// to `snapshotPath` so a later turn can restore this prompt prefix without
     /// re-decoding. Best-effort; a failure just disables reuse next turn.
@@ -1269,7 +1306,9 @@ final class LlamaInference: @unchecked Sendable {
             hasSnapshot = true
             FileLogger.shared.debug("KV prompt-state snapshot saved (\(n) tokens, \(written) bytes)")
         } else {
-            hasSnapshot = false
+            // The write may have left a partial file; remove it so a later
+            // restore can never read a truncated blob.
+            discardPromptSnapshot()
             FileLogger.shared.warn("KV prompt-state snapshot save failed")
         }
     }
@@ -1278,7 +1317,8 @@ final class LlamaInference: @unchecked Sendable {
     /// extension of the snapshotted prompt, returning the number of leading
     /// tokens now resident in the cache (so the caller decodes only the suffix).
     /// Returns 0 (after clearing the cache) when the snapshot can't be applied.
-    /// Only valid for hybrid/recurrent models, which have no seq_rm trim.
+    /// Used by hybrid/recurrent models (no seq_rm trim) and by dense models on
+    /// the fresh context built by `recreateContext()`.
     ///
     /// Every `llama_memory_clear` in this file passes `data: false`: it resets
     /// the cell metadata but skips zeroing the buffers (~39 ms for the 2 GiB
@@ -1314,7 +1354,9 @@ final class LlamaInference: @unchecked Sendable {
         guard nread > 0, nOut == snapshotTokens.count else {
             FileLogger.shared.warn("KV snapshot load failed (nread \(nread), nOut \(nOut)); full decode")
             llama_memory_clear(memory, false)
-            hasSnapshot = false
+            // The blob is unreadable; don't keep it around for the next turn (or
+            // in tmp after unload).
+            discardPromptSnapshot()
             return 0
         }
         FileLogger.shared.debug("KV snapshot restored (\(snapshotTokens.count) tokens, prompt \(promptTokens.count)); decoding \(promptTokens.count - snapshotTokens.count) new")
@@ -1425,10 +1467,12 @@ final class LlamaInference: @unchecked Sendable {
         // llama-server uses the same common-prefix + seq_rm strategy.
         var reuseLen = 0
         // A recreated context has a genuinely empty KV cache even though
-        // cachedTokenIds may still be populated (it survived the recreate). Track
-        // whether any prompt state is actually resident so we don't try seq_rm
-        // against an empty cache.
-        let cacheResident = !supportsPartialCacheReuse || !cachedTokenIds.isEmpty
+        // `cachedTokenIds` may still be populated (it survived the recreate).
+        // Track whether the live cache actually holds anything so we don't
+        // attempt seq_rm against an empty cache (or, worse, skip decoding a
+        // prefix the fresh context does not have). `recreateContext()` now
+        // clears `cachedTokenIds`, but keep this check defensive.
+        let liveCacheHasTokens = !cachedTokenIds.isEmpty
         if let memory = llama_get_memory(context) {
             if !supportsPartialCacheReuse {
                 // Hybrid/recurrent model: a KV suffix can't be trimmed, so prefix
@@ -1436,7 +1480,7 @@ final class LlamaInference: @unchecked Sendable {
                 // sequence state from a saved snapshot when the new prompt extends
                 // it; otherwise fall back to a full clear + re-decode.
                 reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
-            } else if !cacheResident, hasSnapshot {
+            } else if !liveCacheHasTokens, hasSnapshot {
                 // Dense model on a fresh context (just recreated): the KV cache is
                 // empty but the on-disk prompt snapshot survived, so restore it
                 // instead of re-decoding the whole prompt. Falls through to the

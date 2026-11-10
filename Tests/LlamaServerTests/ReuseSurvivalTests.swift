@@ -21,4 +21,22 @@ final class ReuseSurvivalTests: XCTestCase {
         XCTAssertTrue(ReuseSurvival.snapshotSurvivesRecreate(supportsPartialReuse: false),
                       "hybrid: already relied on the snapshot; the recreate must not break that")
     }
+
+    func testDenseCaptureNeededWhenCacheHasTokens() {
+        XCTAssertTrue(ReuseSurvival.denseSnapshotCaptureNeeded(supportsPartialReuse: true,
+                                                               hasCachedTokens: true),
+                      "dense + live cache: the recreate would otherwise destroy the only reusable prefix")
+    }
+
+    func testDenseCaptureSkippedWithoutCachedTokens() {
+        XCTAssertFalse(ReuseSurvival.denseSnapshotCaptureNeeded(supportsPartialReuse: true,
+                                                                hasCachedTokens: false),
+                       "nothing to capture after an MTP turn already cleared the cache")
+    }
+
+    func testHybridCaptureNotNeededAtRecreate() {
+        XCTAssertFalse(ReuseSurvival.denseSnapshotCaptureNeeded(supportsPartialReuse: false,
+                                                                hasCachedTokens: true),
+                       "hybrid already saves its snapshot during generation")
+    }
 }
