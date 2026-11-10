@@ -361,6 +361,24 @@ final class ToolCallParserTests: XCTestCase {
         // Unterminated envelope stays buffered (never streamed as content).
     }
 
+    /// A streamed tool call can be thousands of tokens long. The filter only
+    /// needs the last `</tool_call>`-worth of characters to detect the close
+    /// tag, so it must not accumulate the whole envelope while it waits — each
+    /// `feed` would then rescan an ever-growing buffer (quadratic in the call
+    /// length). Retention is capped at `closeTag.count - 1`.
+    func testToolStreamFilterDoesNotAccumulateWholeEnvelope() {
+        let filter = ToolStreamFilter()
+        XCTAssertEqual(filter.feed("prose<tool_call>"), "prose")
+        let closeTagSlack = "</tool_call>".count - 1
+        for _ in 0..<500 {
+            XCTAssertEqual(filter.feed(String(repeating: "x", count: 128)), "")
+            XCTAssertLessThanOrEqual(filter.bufferedCharacterCount, closeTagSlack,
+                                     "the discarded envelope body must not be retained")
+        }
+        XCTAssertEqual(filter.feed("</tool_call>after"), "after")
+        XCTAssertEqual(filter.bufferedCharacterCount, 0)
+    }
+
     // MARK: - ReasoningStreamFilter + ToolStreamFilter composition (tool turns)
 
     /// Regression: a tool turn must not stream a `<think>` block to the client.

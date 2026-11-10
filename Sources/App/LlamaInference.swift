@@ -793,18 +793,26 @@ final class LlamaInference: @unchecked Sendable {
         guard !pieces.isEmpty else { return false }
         let previousH = carryH
 
-        // Local so each piece frees its llama_batch on every exit path.
-        func decodePiece(_ piece: MtpSpec.MirrorChunk) -> Bool {
-            var batch = llama_batch_init(Int32(piece.length), Int32(nEmbd), 1)
-            var ownTok: UnsafeMutablePointer<llama_token>? = nil
-            if batch.token == nil {
-                ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: piece.length)
-                batch.token = ownTok
-            }
-            defer {
-                if let ot = ownTok { batch.token = nil; ot.deallocate() }
-                llama_batch_free(batch)
-            }
+        // One batch buffer for every piece. A prompt is split into hundreds of
+        // draft-sized pieces, and allocating/freeing all of llama_batch's arrays
+        // per piece is pure allocator churn. Reusing one max-sized batch is safe
+        // because llama_decode consumes the rows synchronously — the old code
+        // freed the batch immediately after each decode.
+        let maxPiece = pieces.map(\.length).max() ?? 0
+        guard maxPiece > 0 else { return false }
+        var batch = llama_batch_init(Int32(maxPiece), Int32(nEmbd), 1)
+        var ownTok: UnsafeMutablePointer<llama_token>? = nil
+        if batch.token == nil {
+            ownTok = UnsafeMutablePointer<llama_token>.allocate(capacity: maxPiece)
+            batch.token = ownTok
+        }
+        defer {
+            if let ot = ownTok { batch.token = nil; ot.deallocate() }
+            llama_batch_free(batch)
+        }
+        guard batch.token != nil, batch.embd != nil else { return false }
+
+        for piece in pieces {
             batch.n_tokens = Int32(piece.length)
             for k in 0..<piece.length {
                 batch.token[k] = tokens[piece.offset + k]
@@ -813,11 +821,11 @@ final class LlamaInference: @unchecked Sendable {
                 batch.seq_id[k]![0] = 0
                 batch.logits[k] = 0
             }
-            guard let embd = batch.embd else { return false }
             // Row k pairs token x_{start+offset+k} with h_{start+offset+k-1}.
             // For the first piece row 0 uses the previous target chunk's last
             // h (carryH); later pieces use the preceding row in the same target
             // chunk. Rows 1... come from the target's h buffer.
+            let embd = batch.embd!
             if piece.offset == 0 {
                 previousH.withUnsafeBufferPointer { embd.update(from: $0.baseAddress!, count: nEmbd) }
             } else {
@@ -827,11 +835,7 @@ final class LlamaInference: @unchecked Sendable {
                 embd.advanced(by: nEmbd).update(from: hTgt.advanced(by: piece.offset * nEmbd),
                                                 count: (piece.length - 1) * nEmbd)
             }
-            return llama_decode(dft, batch) == 0
-        }
-
-        for piece in pieces {
-            guard decodePiece(piece) else { return false }
+            guard llama_decode(dft, batch) == 0 else { return false }
         }
         let lastH = Array(UnsafeBufferPointer(start: hTgt.advanced(by: (count - 1) * nEmbd), count: nEmbd))
         carryH = lastH
@@ -1038,24 +1042,33 @@ final class LlamaInference: @unchecked Sendable {
     /// Applies the model's built-in chat template (when present) to a list of
     /// messages, falling back to a generic ChatML-style layout.
     func formatPrompt(messages: [ChatMessage], format: ToolWireFormat = .jsonHermes) -> String {
+        // Render every message exactly once. `promptText` serializes replayed
+        // tool-call envelopes, and the old sizing pass rendered each message a
+        // second time just to count UTF-8 bytes.
+        var rendered: [(role: String, content: String)] = []
+        rendered.reserveCapacity(messages.count)
+        for message in messages {
+            rendered.append((message.role, message.promptText(format: format)))
+        }
+
         // Build C array of llama_chat_message with strdup'd strings.
         var cMessages: [llama_chat_message] = []
         var allocated: [UnsafeMutablePointer<CChar>] = []
-        cMessages.reserveCapacity(messages.count)
+        cMessages.reserveCapacity(rendered.count)
         // Free everything on every exit path (including early returns below).
         defer { allocated.forEach { free($0) } }
 
-        for message in messages {
+        for message in rendered {
             // strdup returns nil only on allocation failure — fall back safely
             // instead of force-unwrapping (which would crash).
             guard let rolePtr = strdup(message.role) else {
                 return fallbackPrompt(messages: messages, format: format)
             }
             allocated.append(rolePtr)
-            // content may be nil (e.g. an assistant turn that only has
-            // tool_calls). strdup(nil) returns nil → never pass nil to the
-            // template engine; reconstruct text from tool_calls instead.
-            guard let contentPtr = strdup(message.promptText(format: format)) else {
+            // The rendered content is never nil: an assistant turn that only
+            // carries tool_calls reconstructs the envelope text here, so the
+            // template engine never receives a nil content pointer.
+            guard let contentPtr = strdup(message.content) else {
                 return fallbackPrompt(messages: messages, format: format)
             }
             allocated.append(contentPtr)
@@ -1076,9 +1089,8 @@ final class LlamaInference: @unchecked Sendable {
 
         // First call to size the buffer.
         var bufferSize = 0
-        for message in messages {
-            let contentText = message.promptText(format: format)
-            bufferSize += message.role.utf8.count + contentText.utf8.count + 16
+        for message in rendered {
+            bufferSize += message.role.utf8.count + message.content.utf8.count + 16
         }
         bufferSize = max(bufferSize * 2, 1024)
 
@@ -1197,38 +1209,6 @@ final class LlamaInference: @unchecked Sendable {
             return s
         }
         return ""
-    }
-
-    /// Returns the range of the earliest stop string found in `text`, if any.
-    private func firstStop(in text: String, stops: [String]) -> Range<String.Index>? {
-        var earliest: Range<String.Index>?
-        for s in stops {
-            if let r = text.range(of: s) {
-                if earliest == nil || r.lowerBound < earliest!.lowerBound {
-                    earliest = r
-                }
-            }
-        }
-        return earliest
-    }
-
-    /// Length (in characters) of the longest suffix of `text` that is a proper
-    /// prefix of some stop string. While streaming, this many trailing chars
-    /// must be withheld in case the next token completes a stop sequence.
-    private func partialStopSuffixLength(of text: String, stops: [String]) -> Int {
-        var maxLen = 0
-        for s in stops {
-            let upper = min(s.count - 1, text.count)
-            var k = upper
-            while k > 0 {
-                if s.hasPrefix(String(text.suffix(k))) {
-                    maxLen = max(maxLen, k)
-                    break
-                }
-                k -= 1
-            }
-        }
-        return maxLen
     }
 
     // MARK: - Generation
@@ -1485,10 +1465,21 @@ final class LlamaInference: @unchecked Sendable {
         if let memory = llama_get_memory(context) {
             if !supportsPartialCacheReuse {
                 // Hybrid/recurrent model: a KV suffix can't be trimmed, so prefix
-                // reuse via seq_rm is impossible. Reuse the previous prompt's
-                // sequence state from a saved snapshot when the new prompt extends
-                // it; otherwise fall back to a full clear + re-decode.
-                reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
+                // reuse via seq_rm is impossible. But when the live cache already
+                // *is* a strict prefix of the new prompt there is nothing to
+                // trim — keep it and skip the snapshot's disk round-trip. Only
+                // when that isn't the case fall back to the previous prompt's
+                // sequence state (or a full clear + re-decode).
+                if let liveLen = ReuseSurvival.liveHybridReuseLen(
+                    cachedTokens: cachedTokenIds,
+                    promptTokens: promptTokens,
+                    seqPosMin: Int(llama_memory_seq_pos_min(memory, 0)),
+                    seqPosMax: Int(llama_memory_seq_pos_max(memory, 0))) {
+                    reuseLen = liveLen
+                    FileLogger.shared.debug("KV live cache reused fully (hybrid, \(reuseLen) tokens, prompt \(promptTokens.count))")
+                } else {
+                    reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
+                }
             } else if !liveCacheHasTokens, hasSnapshot {
                 // Dense model on a fresh context (just recreated): the KV cache is
                 // empty but the on-disk prompt snapshot survived, so restore it
@@ -1781,52 +1772,67 @@ final class LlamaInference: @unchecked Sendable {
         var genTokens = 0  // separate counter for generation timing
         var output = ""
         var pending: [UInt8] = []        // incomplete trailing UTF-8 bytes
-        var emittedCount = 0             // chars already handed to onToken
+        // Text not yet handed to `onToken`, either because it may be the start
+        // of a stop string or because it was appended this token. Keeping this
+        // separate avoids recomputing `output.count` and slicing from the start
+        // of the whole response on every token (both O(output) per token).
+        var pendingEmit = ""
         var generated = 0
         var decodedGenerated = 0         // generated tokens actually fed to the KV cache
         var generatedTokenIds: [llama_token] = []
         var finishReason = "length"
         let limit = max(1, maxTokens)
-        let stops = params.stop.filter { !$0.isEmpty }
         var earlyStop = false            // a stop string or client cancel ended it
+        // Incremental stop matching: only the last `maxStopLength - 1` characters
+        // can complete a new match, so neither detection nor the withheld tail
+        // scans the whole response (which would be quadratic over a generation).
+        var stopScanner = StopScanner(stops: params.stop)
 
         // Emits any text that is safe to stream now — i.e. everything past the
         // longest tail that could still be the start of a stop string.
         func emitSafe() -> Bool {
-            guard let onToken = onToken else { emittedCount = output.count; return true }
-            let hold = stops.isEmpty ? 0 : partialStopSuffixLength(of: output, stops: stops)
-            let safeEnd = output.count - hold
-            guard safeEnd > emittedCount else { return true }
-            let lo = output.index(output.startIndex, offsetBy: emittedCount)
-            let hi = output.index(output.startIndex, offsetBy: safeEnd)
-            let slice = String(output[lo..<hi])
-            emittedCount = safeEnd
+            guard let onToken = onToken else { return true }
+            let safeCount = pendingEmit.count - stopScanner.heldSuffixLength()
+            guard safeCount > 0 else { return true }
+            let cut = pendingEmit.index(pendingEmit.startIndex, offsetBy: safeCount)
+            let slice = String(pendingEmit[..<cut])
+            pendingEmit.removeFirst(safeCount)
             return onToken(slice)
         }
 
         let mtpCount = mtpOutputCount
 
-        // Shared per-token consumer used by the MTP speculative path. Streams the
+        // Shared per-token consumer for both generation paths. Streams the
         // token's text, applies stop strings, and returns false when generation
-        // must stop (stop string matched or the client cancelled). Mirrors the
-        // inline emit/stop logic of the plain path below.
+        // must stop (stop string matched or the client cancelled).
         func consumeToken(_ token: llama_token) -> Bool {
             generatedTokenIds.append(token)
             pending.append(contentsOf: pieceBytes(for: token))
             let decoded = flushDecodableUTF8(&pending)
-            if !decoded.isEmpty { output += decoded }
+            if !decoded.isEmpty {
+                output += decoded
+                if onToken != nil { pendingEmit += decoded }
+            }
             generated += 1
 
-            if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
-                let cut = output.distance(from: output.startIndex, to: r.lowerBound)
-                output = String(output[..<r.lowerBound])
+            if !decoded.isEmpty, let cut = stopScanner.append(decoded) {
+                // `pendingEmit` is a suffix of the untruncated `output`, so the
+                // text before the stop that has not been delivered yet is its
+                // prefix of length `cut - delivered`. Both counts are computed
+                // once, on the stop, not per token.
+                if let onToken = onToken {
+                    let delivered = output.count - pendingEmit.count
+                    let toEmit = max(0, cut - delivered)
+                    if toEmit > 0 {
+                        let end = pendingEmit.index(pendingEmit.startIndex, offsetBy: toEmit)
+                        _ = onToken(String(pendingEmit[..<end]))
+                    }
+                    pendingEmit = ""
+                }
+                let cutIndex = output.index(output.startIndex, offsetBy: cut)
+                output = String(output[..<cutIndex])
                 finishReason = "stop"
                 earlyStop = true
-                if let onToken = onToken, emittedCount < cut {
-                    let lo = output.index(output.startIndex, offsetBy: emittedCount)
-                    _ = onToken(String(output[lo...]))
-                    emittedCount = cut
-                }
                 return false
             }
             if emitSafe() == false {
@@ -2318,31 +2324,7 @@ final class LlamaInference: @unchecked Sendable {
             if batchTokens.isEmpty { break }
 
             for token in batchTokens {
-                generatedTokenIds.append(token)
-
-                pending.append(contentsOf: pieceBytes(for: token))
-                let decoded = flushDecodableUTF8(&pending)
-                if !decoded.isEmpty { output += decoded }
-                generated += 1
-
-                if !stops.isEmpty, let r = firstStop(in: output, stops: stops) {
-                    let cut = output.distance(from: output.startIndex, to: r.lowerBound)
-                    output = String(output[..<r.lowerBound])
-                    finishReason = "stop"
-                    earlyStop = true
-                    if let onToken = onToken, emittedCount < cut {
-                        let lo = output.index(output.startIndex, offsetBy: emittedCount)
-                        _ = onToken(String(output[lo...]))
-                        emittedCount = cut
-                    }
-                    break
-                }
-
-                if emitSafe() == false {
-                    finishReason = "stopped"
-                    earlyStop = true
-                    break
-                }
+                if !consumeToken(token) { break }
             }
             if earlyStop { break }
             // At the token limit nothing reads the next decode's logits, so
@@ -2384,13 +2366,15 @@ final class LlamaInference: @unchecked Sendable {
         // string / client cancel already finalized the output.
         if !earlyStop {
             if !pending.isEmpty {
-                output += String(decoding: pending, as: UTF8.self)
+                let tail = String(decoding: pending, as: UTF8.self)
                 pending.removeAll()
+                output += tail
+                if onToken != nil { pendingEmit += tail }
             }
-            if let onToken = onToken, emittedCount < output.count {
-                let lo = output.index(output.startIndex, offsetBy: emittedCount)
-                _ = onToken(String(output[lo...]))
-                emittedCount = output.count
+            if let onToken = onToken, !pendingEmit.isEmpty {
+                let tail = pendingEmit
+                pendingEmit = ""
+                _ = onToken(tail)
             }
         }
 

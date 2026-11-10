@@ -570,6 +570,12 @@ final class ToolStreamFilter {
     private static let openTag = "<tool_call>"
     private static let closeTag = "</tool_call>"
 
+    /// Characters currently retained. While an envelope is open this is capped
+    /// at `closeTag.count - 1`, so a long tool call does not accumulate on the
+    /// heap (and does not rescan its own body on every chunk). Exposed for the
+    /// regression test.
+    var bufferedCharacterCount: Int { buffer.count }
+
     /// Consumes a streamed piece, returning the text safe to emit now. Text
     /// inside an envelope (from `<tool_call>` up to and including `</tool_call>`)
     /// is dropped; the caller recovers the calls from the finished response.
@@ -594,7 +600,12 @@ final class ToolStreamFilter {
                     buffer = String(buffer[r.upperBound...])
                     state = .afterToolCall
                 } else {
-                    // Envelope still open — keep buffering, emit nothing.
+                    // The body is never emitted, so only a tail that can still
+                    // contain a split close tag needs to be kept. Trimming here
+                    // keeps both memory and the per-chunk scan bounded.
+                    if buffer.count > Self.closeTag.count - 1 {
+                        buffer = String(buffer.suffix(Self.closeTag.count - 1))
+                    }
                     break scan
                 }
             }

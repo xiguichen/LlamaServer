@@ -39,4 +39,63 @@ final class ReuseSurvivalTests: XCTestCase {
                                                                 hasCachedTokens: true),
                        "hybrid already saves its snapshot during generation")
     }
+
+    // MARK: - Live hybrid prefix reuse
+
+    func testHybridLiveCacheReusedWhenItIsAStrictPromptPrefix() {
+        let cached: [Int32] = [1, 2, 3]
+        let prompt: [Int32] = [1, 2, 3, 4, 5]
+        XCTAssertEqual(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                        promptTokens: prompt,
+                                                        seqPosMin: 0,
+                                                        seqPosMax: 2),
+                       3,
+                       "the whole live cache is a prefix and nothing needs trimming")
+    }
+
+    func testHybridLiveCacheRejectedWhenItDiverges() {
+        let cached: [Int32] = [1, 2, 9]
+        let prompt: [Int32] = [1, 2, 3, 4]
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: prompt,
+                                                      seqPosMin: 0,
+                                                      seqPosMax: 2),
+                     "a hybrid cache cannot trim the divergent suffix, so it is unusable whole")
+    }
+
+    func testHybridLiveCacheRejectedWhenItEqualsThePrompt() {
+        let cached: [Int32] = [1, 2, 3]
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: cached,
+                                                      seqPosMin: 0,
+                                                      seqPosMax: 2),
+                     "at least one prompt token must be decoded to produce fresh logits")
+    }
+
+    func testHybridLiveCacheRejectedWhenPrefixWasEvicted() {
+        let cached: [Int32] = [1, 2, 3]
+        let prompt: [Int32] = [1, 2, 3, 4]
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: prompt,
+                                                      seqPosMin: 1,
+                                                      seqPosMax: 2),
+                     "seq_pos_min > 0 means the reusable prefix is no longer resident")
+    }
+
+    func testHybridLiveCacheRejectedWhenBoundsDisagreeWithTracking() {
+        let cached: [Int32] = [1, 2, 3]
+        let prompt: [Int32] = [1, 2, 3, 4]
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: prompt,
+                                                      seqPosMin: 0,
+                                                      seqPosMax: 1),
+                     "a shorter live sequence than cachedTokenIds describes an inconsistent cache")
+    }
+
+    func testHybridLiveCacheRejectedWhenEmpty() {
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: [],
+                                                      promptTokens: [1],
+                                                      seqPosMin: 0,
+                                                      seqPosMax: 0))
+    }
 }

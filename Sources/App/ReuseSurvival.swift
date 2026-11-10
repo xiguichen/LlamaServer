@@ -47,4 +47,33 @@ enum ReuseSurvival {
                                            hasCachedTokens: Bool) -> Bool {
         supportsPartialReuse && hasCachedTokens
     }
+
+    /// For hybrid/recurrent models (`supportsPartialReuse == false`), the live
+    /// KV cache is still reusable without any trim when it is already a strict
+    /// prefix of the new prompt. The snapshot path is the general fallback, but
+    /// it serializes and reloads a multi-megabyte blob even when the live cache
+    /// already holds exactly the right tokens (for example a client that resends
+    /// a growing prompt, or an assistant-continuation request).
+    ///
+    /// The live cache is trusted only when its sequence bounds prove the whole
+    /// tracked prefix is resident: `seq_pos_min == 0` (nothing evicted from the
+    /// front) and `seq_pos_max + 1 == cachedTokens.count` (the cache ends where
+    /// `cachedTokenIds` says it does). At least one prompt token must remain to
+    /// decode so the forward pass yields fresh logits.
+    ///
+    /// Token ids are `Int32` (llama_token's underlying type) so this file stays
+    /// free of the llama module, like the other pure specs compiled into tests.
+    ///
+    /// - Returns: the reusable prefix length, or nil when the live cache cannot
+    ///   be used whole and the caller must fall back to the snapshot / full
+    ///   decode.
+    static func liveHybridReuseLen(cachedTokens: [Int32],
+                                   promptTokens: [Int32],
+                                   seqPosMin: Int,
+                                   seqPosMax: Int) -> Int? {
+        guard !cachedTokens.isEmpty, cachedTokens.count < promptTokens.count else { return nil }
+        guard seqPosMin == 0, seqPosMax + 1 == cachedTokens.count else { return nil }
+        guard zip(cachedTokens, promptTokens).allSatisfy({ $0.0 == $0.1 }) else { return nil }
+        return cachedTokens.count
+    }
 }
