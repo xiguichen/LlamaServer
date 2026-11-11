@@ -220,6 +220,27 @@ better setting.
 Prefill is unaffected by depth (296–400 t/s at 6.9k–21k) — the prompt is
 mirrored into the draft context once either way.
 
+### CPU-path changes: no measurable generation gain (2026-11-11)
+
+`1c05e35` (before) vs `42f47ef` (after the per-token/stream/tool-filter work),
+same model/config: MTP on (depth 2), **262,144 ctx, KV q4_0**, batch 1024,
+`temperature: 0`, same 19,019-token prompt. Each build was freshly loaded, ran the
+prompt once with `max_tokens=1` for the snapshot, then idled 90 s before five
+223-token runs. First three runs, engine `gen=`:
+
+| build | t/s | wall/rd | verify-gpu | CPU draft+verify+sample |
+|---|---|---|---|---|
+| `1c05e35` | 25.57 / 25.36 / 23.75 | 105.4 / 106.2 / 113.4 ms | 75.6 / 75.2 / 80.5 ms | 7.10 / 7.31 / 7.95 ms |
+| `42f47ef` | 25.95 / 25.12 / 24.45 | 103.8 / 107.3 / 110.3 ms | 72.9 / 76.7 / 79.4 ms | 7.49 / 6.95 / 7.00 ms |
+
+Medians are **25.36 vs 25.12 t/s** (within run-to-run noise; `42f47ef` is
+slightly lower). The CPU component is ~0.3 ms/round lower on `42f47ef`; the
+round is still 73–80% GPU verify. The apparent 17.9 → 25 t/s change seen earlier
+was thermal/clock state, not the build: the same `1c05e35` produced 15.5–25.7 t/s
+in one session as `verify-gpu` moved 137 → 75 ms. Do not expect generation t/s
+from Swift-side per-token work; the reasons to keep these changes are bounded
+tool-envelope memory and cheaper stop matching.
+
 ### KV cache and prefix reuse
 
 Reuse works, including across the periodic context recreate:
