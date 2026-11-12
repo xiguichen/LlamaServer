@@ -30,11 +30,15 @@ detail in `AGENTS.md`.
 - The snapshot is not free (size and per-turn write cost are measured in
   `docs/PERFORMANCE.md`). The next turn re-decodes the previous turn's
   generation (the snapshot is the *stable* prefix, taken before generation).
-- The per-turn save is only needed because the MTP path ends by wiping
-  `cachedTokenIds` and both caches (the `usedMtp` branch at the end of
-  `generate`) instead of leaving the live KV reusable. Removing that wipe is an
-  open optimisation: the invariant, trim rule, draft-context consequences, and
-  required paired A/B are in [`docs/MTP-KV-REUSE.md`](MTP-KV-REUSE.md).
+- The MTP path **publishes its resident target prefix** after a normal
+  generation (`MtpKVPlan` + the live `seq_pos_min`/`seq_pos_max` guard), so the
+  next turn reuses the live KV instead of restoring the snapshot. The per-turn
+  snapshot is still written and remains the fallback: clients that
+  replay transformed assistant text (reasoning stripped, tool envelopes
+  re-rendered) may not match the raw generated tokens, and any abnormal exit or
+  guard mismatch clears both caches as before. Invariant, trim rule,
+  draft-context consequences, and the required paired A/B are in
+  [`docs/MTP-KV-REUSE.md`](MTP-KV-REUSE.md).
 
 ## MTP (Multi-Token Prediction)
 
@@ -90,6 +94,27 @@ draft context (`mirrorPromptChunkIntoDraft`).
    accepts stay contiguous after the two-context `seq_rm` rollback.
 7. `llama_sampler_sample` accepts the token it returns, so the driver never calls
    `llama_sampler_accept` itself.
+
+### Target KV after a generation
+
+The speculative loop used to wipe the target and draft caches at the end of
+every MTP generation, so the next turn could only recover a prefix from the
+snapshot. It now reconstructs what is resident and keeps the target when the
+bookkeeping agrees with the live sequence:
+
+- A normal verify round leaves `nextPos + actualEmitted` rows resident. The last
+  emitted token is a prediction, not a decoded row, so it is excluded; a
+  fallback round that stops on eog keeps the decoded `idLast` row
+  (`MtpKVPlan.committedResident` / `fallbackStopResident`).
+- A stop string, token limit, or client cancel trims both contexts to
+  `nextPos + actualEmitted` even when `rollbackPos` is nil, because
+  `rollbackPos` only drops whole unaccepted rows.
+- Before publishing, `MtpKVPlan.boundsMatch` requires `seq_pos_min == 0` and
+  `seq_pos_max + 1 == resident`. A sampler error is never publishable (the
+  decision was not committed). Any failure falls back to
+  `llama_memory_clear(mem, false)` and `cachedTokenIds = []`.
+- The draft is cleared only when the target is cleared (shared-memory case);
+  with its own memory it is retained and trimmed at the next prompt start.
 
 ### The draft context must see the prompt
 
@@ -177,7 +202,8 @@ Use `llama_memory_clear(mem, false)` everywhere. `true` also memsets the buffers
 (~39 ms per call for a 2 GiB q8_0 KV on device) and buys nothing: cleared KV
 cells are masked and fresh recurrent cells are zeroed in-graph (`rs_z`), so stale
 bytes are never read. Decode-failure recovery recreates the context and does not
-rely on a clear.
+rely on a clear. The one intentional exception is the MTP preservation path
+above: a normal generation keeps the live target KV instead of clearing it.
 
 ## Failure recovery
 

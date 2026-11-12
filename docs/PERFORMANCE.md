@@ -268,11 +268,16 @@ across the recreate by `ReuseSurvival`.
 Every turn saves a prompt-state snapshot and the next turn loads it back:
 **664 MB at 31.8k tokens → 897 MB at 48.4k tokens** (~1.2 s/turn fixed cost,
 visible on small turns where 66 new tokens still took 1.45 s). It is written to
-`NSTemporaryDirectory()` and only needed (a) across a recreate and (b) because
-the MTP path wipes `cachedTokenIds`/both caches at the end of `generate` (the
-`usedMtp` branch) instead of leaving the live KV reusable. The design and the
-paired A/B required to remove that wipe are in `docs/MTP-KV-REUSE.md`; this file
-remains the source of numbers.
+`NSTemporaryDirectory()` and is needed (a) across a recreate and (b) when the MTP
+path cannot publish its live target KV (abnormal exit or bounds-guard mismatch).
+The MTP path now keeps the live target when the bookkeeping agrees with
+`seq_pos_min`/`seq_pos_max` (`docs/MTP-KV-REUSE.md`), so the **next turn's
+snapshot restore** is skipped when that live cache is a prefix. The per-turn
+**save still runs** (it is the fallback for clients that replay transformed
+assistant text); removing the save is the separate "save only when a recreate is
+due" follow-up. **The per-turn snapshot cost above was measured before the
+preservation change** — the paired on-device A/B to quantify the removed restore
+is still open (question 3). This file remains the source of numbers.
 
 ### 262,144 context: what it costs
 
@@ -337,10 +342,15 @@ record.
 2. **KV q4_0** — this model qualifies (`head_dim 256 % 32 == 0`, flash-attn
    forced). Halves the KV (843 MB → ~466 MB at 48k) and the snapshot; measure
    the t/s gain and the quality cost.
-3. **Snapshot round-trip removal** — keep the live KV when the cached state is
-   still a strict prefix (needs the MTP path to stop wiping `cachedTokenIds`),
-   or save only when `RecreateTracker` says a recreate is due. Expected ~1.2 s
-   and ~700 MB of writes per turn; measure before/after.
+3. **Snapshot round-trip removal** — the MTP path now keeps the live target KV
+   when the resident-prefix bookkeeping passes the bounds guard
+   (`docs/MTP-KV-REUSE.md`), so the next turn restores no snapshot when that
+   live cache is a prefix. The per-turn **save still runs** as the fallback.
+   **Implemented but not yet measured**: the only existing snapshot number is the
+   pre-change ~1.2 s / 664–897 MB per turn, so do not claim a gain until a
+   paired A/B records `prefill=` reuse, `MTP stats` `no-draft` rate, and
+   `KV snapshot` lines with and without preservation. Skipping the save except
+   when `RecreateTracker` says a recreate is due is a separate follow-up.
 4. **Is the verify pass bandwidth-bound or compute-bound?** ~3.3 GB of traffic
    per 164 ms round ≈ 20 GB/s — far below the SoC's peak, so attention compute
    or kernel overhead is likely involved. Needs a profiler.

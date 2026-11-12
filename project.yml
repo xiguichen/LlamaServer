@@ -156,6 +156,10 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/ReuseSurvival.swift
         createIntermediateGroups: true
+      - path: Sources/App/MtpKVPlan.swift
+        createIntermediateGroups: true
+      - path: Sources/App/PromptBoundary.swift
+        createIntermediateGroups: true
       - path: Sources/App/StopScanner.swift
         createIntermediateGroups: true
       - path: Sources/App/StartupTimer.swift

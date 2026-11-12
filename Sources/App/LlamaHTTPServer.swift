@@ -675,6 +675,10 @@ final class LlamaHTTPServer {
         // undici and yield chunks through the SSE decoder, resetting *both*
         // the HTTP-level body timeout AND the SDK-level stream timeout.
         let keepAliveActive = OSAllocatedUnfairLock(initialState: true)
+        // One encoder for every keep-alive chunk of this stream. The timer
+        // source invokes its handler serially, so this is safe; allocating a
+        // fresh JSONEncoder every 2 s per connection was pure churn.
+        let keepAliveEncoder = JSONEncoder()
         let keepAliveSource = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         keepAliveSource.schedule(deadline: .now() + 2, repeating: .seconds(2), leeway: .seconds(1))
         keepAliveSource.setEventHandler { [weak connection] in
@@ -683,7 +687,7 @@ final class LlamaHTTPServer {
                 return
             }
             guard keepAliveActive.withLock({ $0 }) else { return }
-            if let data = try? JSONEncoder().encode(
+            if let data = try? keepAliveEncoder.encode(
                 StreamingChunk(id: chatId, created: created, model: modelName,
                                choices: [StreamingChoice(index: 0,
                                                           delta: Delta(role: nil, content: ""),
@@ -708,6 +712,9 @@ final class LlamaHTTPServer {
 
             var didStreamContentDuringToolGen = false
             var lastChunkTime = CFAbsoluteTimeGetCurrent()
+            // One encoder per stream instead of one per token; this block is the
+            // only user (the keep-alive timer owns its own).
+            let chunkEncoder = JSONEncoder()
 
             func sendChunk(delta: Delta, finishReason: String?) {
                 guard !disconnectWatcher.didDisconnect else {
@@ -716,7 +723,7 @@ final class LlamaHTTPServer {
                     }
                     return
                 }
-                guard let data = try? JSONEncoder().encode(
+                guard let data = try? chunkEncoder.encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
                                    choices: [StreamingChoice(index: 0, delta: delta,
                                                               finish_reason: finishReason)])
@@ -949,7 +956,7 @@ final class LlamaHTTPServer {
                     let usage = Usage(prompt_tokens: genResult.promptTokens,
                                       completion_tokens: genResult.completionTokens,
                                       total_tokens: genResult.promptTokens + genResult.completionTokens)
-                    if let data = try? JSONEncoder().encode(
+                    if let data = try? chunkEncoder.encode(
                         StreamingChunk(id: chatId, created: created, model: modelName,
                                        choices: [], usage: usage)
                     ), let str = String(data: data, encoding: .utf8) {

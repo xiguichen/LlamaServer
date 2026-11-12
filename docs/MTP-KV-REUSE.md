@@ -1,14 +1,17 @@
 # MTP target-KV reuse (design + test plan)
 
-Status: **not implemented**. The safe CPU-side optimisations shipped earlier are
-independent of this. This change alters what the next request may skip decoding,
-so it needs its own review and paired on-device measurements before it is
-enabled. Numbers live in `docs/PERFORMANCE.md`; this file only defines the
-invariant and the tests.
+Status: **target preservation implemented 2026-11-12; paired on-device A/B still
+required before quoting a gain.** The pure bookkeeping is `Sources/App/MtpKVPlan.swift`
+(tests in `Tests/LlamaServerTests/MtpKVPlanTests.swift`). The per-turn
+stable-prefix snapshot is **kept** as the fallback: a client that replays
+transformed assistant text (reasoning stripped, tool envelopes re-rendered) may
+not match the raw generated tokens, and the snapshot is what preserves reuse
+across that divergence. Numbers live in `docs/PERFORMANCE.md`; this file only
+defines the invariant and the tests.
 
 ## Problem
 
-The MTP path ends `generateOnce` by clearing the target KV and resetting
+The MTP path used to end `generateOnce` by clearing the target KV and resetting
 `cachedTokenIds`:
 
 ```swift
@@ -19,13 +22,14 @@ if draftSharesTargetMemory, let dmem = llama_get_memory(dft) {
 decodedGenerated = 0
 ```
 
-The clear exists because the speculative loop manages positions explicitly and
-the cross-call reuse bookkeeping was not reconstructed after it. The cost is
-large: on a dense model with MTP on, the next turn cannot use the shared
-system/history prefix at all and re-prefills the whole prompt. Hybrid models
-still recover the *stable* prefix from the per-turn snapshot, but pay a
+The clear existed because the speculative loop manages positions explicitly and
+the cross-call reuse bookkeeping was not reconstructed after it. The cost was
+large: on a dense model with MTP on, the next turn could not use the shared
+system/history prefix at all and re-prefilled the whole prompt. Hybrid models
+still recovered the *stable* prefix from the per-turn snapshot, but paid a
 multi-hundred-MB write + load every turn (`docs/PERFORMANCE.md`, “Snapshot
-cost”).
+cost”). The loop now reconstructs the resident prefix (`MtpKVPlan`) and keeps the
+target cache when the live bounds guard agrees; the clear remains the fallback.
 
 ## What is actually resident after a round
 
@@ -82,7 +86,7 @@ even when `rollbackPos == nil` (a full accept leaves every decoded row
 resident, but some of those rows were never emitted). The current comment at
 the emit loop already records this requirement.
 
-## Proposed bookkeeping
+## Proposed bookkeeping (implemented as `MtpKVPlan`)
 
 Track `residentTokenCount` explicitly rather than deriving it from `nextPos`,
 because `nextPos` is not advanced on the eog path:
@@ -121,11 +125,12 @@ fails and the old clear path runs — correctness is preserved, only the
 optimisation is lost. Log the mismatch at `.warn` so a device run shows which
 cache types cannot use it.
 
-The same guard should protect **dense reuse in general**: when computing `lcp`
-from `cachedTokenIds`, clamp it to `posMax + 1` (and clear if `posMin > 0`), and
-always `seq_rm(lcp)` even when `lcp == cachedTokenIds.count`, to drop any rows
-beyond the tracked prefix. Today dense reuse assumes the tracking is exact;
-with MTP preservation that assumption becomes load-bearing.
+The same guard also protects **dense reuse in general**: when computing `lcp`
+from `cachedTokenIds`, the code clamps it to `MtpKVPlan.liveResidentCount`
+(`posMax + 1`, or 0 when `posMin > 0`) and always runs `seq_rm(lcp)` — even when
+`lcp == cachedTokenIds.count` — to drop any rows beyond the tracked prefix.
+Dense reuse used to assume the tracking was exact; MTP preservation makes that
+assumption load-bearing, so the clamp is part of this change.
 
 ### Abnormal exits
 
@@ -161,6 +166,9 @@ re-mirror the draft from 0 when it was cleared; do not make that change in the
 same step.
 
 ## Test plan
+
+Status: the pure tests below are implemented in
+`Tests/LlamaServerTests/MtpKVPlanTests.swift`; the on-device A/B is still open.
 
 ### Pure tests (CI, no model)
 
@@ -209,5 +217,6 @@ Use the paired protocol in `docs/PERFORMANCE.md`:
 4. If the draft regression dominates, land the target-KV preservation and the
    draft boundary `h` follow-up together, or keep MTP-off for long turns.
 
-Only after those numbers exist should `docs/PERFORMANCE.md` get a row and this
-document's status change to implemented.
+The code is in place; only after those numbers exist should
+`docs/PERFORMANCE.md` get a measured row. This document's status already records
+the implementation and explicitly leaves the A/B open.

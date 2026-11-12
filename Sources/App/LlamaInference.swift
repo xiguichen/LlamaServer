@@ -1154,17 +1154,22 @@ final class LlamaInference: @unchecked Sendable {
         let utf8 = Array(text.utf8CString)
         let utf8Count = Int32(text.utf8.count)
 
-        // Negative return = required token count.
-        let needed = -llama_tokenize(vocab, utf8, utf8Count, nil, 0, addBOS, true)
-        guard needed > 0 else {
-            // Empty input still tokenizes to BOS in some models; allow 0.
-            if needed == 0 { return [] }
-            throw InferenceError.tokenize
+        // One pass in the common case. A token consumes at least one UTF-8 byte,
+        // so `utf8Count + 1` (BOS) is an upper bound. The old code tokenized the
+        // whole prompt once with a nil buffer just to count tokens and then
+        // tokenized it again to fill them, doubling prompt-tokenization work on
+        // every request.
+        var capacity = max(16, Int(utf8Count) + 8)
+        var tokens = [llama_token](repeating: 0, count: capacity)
+        var count = llama_tokenize(vocab, utf8, utf8Count, &tokens, Int32(capacity), addBOS, true)
+        if count < 0 {
+            // Defensive: a tokenizer that produces more tokens than input bytes.
+            capacity = Int(-count)
+            tokens = [llama_token](repeating: 0, count: capacity)
+            count = llama_tokenize(vocab, utf8, utf8Count, &tokens, Int32(capacity), addBOS, true)
         }
-
-        var tokens = [llama_token](repeating: 0, count: Int(needed))
-        let count = llama_tokenize(vocab, utf8, utf8Count, &tokens, needed, addBOS, true)
         guard count >= 0 else { throw InferenceError.tokenize }
+        if count == 0 { return [] }
         return Array(tokens.prefix(Int(count)))
     }
 
@@ -1364,6 +1369,18 @@ final class LlamaInference: @unchecked Sendable {
         guard let r = prompt.range(of: "<|im_start|>assistant", options: .backwards) else {
             return promptTokens.count
         }
+        // Fast path: tokenize only the short tail that starts at the final
+        // primer and verify it is the exact token suffix of the whole prompt.
+        // A special token starts the tail, so BPE cannot merge across the
+        // boundary; a mismatch (a tokenizer that splits the tail differently)
+        // falls back to the full-prefix tokenization below. This avoids
+        // re-tokenizing the entire multi-thousand-token prompt every turn.
+        let tail = String(prompt[r.lowerBound...])
+        if let tailTokens = try? tokenize(tail, addBOS: false),
+           let n = PromptBoundary.stablePrefixLength(promptTokens: promptTokens,
+                                                     tailTokens: tailTokens) {
+            return n
+        }
         let prefixStr = String(prompt[prompt.startIndex..<r.lowerBound])
         guard let prefixTokens = try? tokenize(prefixStr, addBOS: true), !prefixTokens.isEmpty else {
             return promptTokens.count
@@ -1495,8 +1512,15 @@ final class LlamaInference: @unchecked Sendable {
                     FileLogger.shared.debug("KV cache cold after recreate (no usable snapshot); full decode")
                 }
             } else {
-                // Longest common prefix of the cached tokens and the new prompt.
-                let maxLCP = min(cachedTokenIds.count, promptTokens.count)
+                // Longest common prefix of the cached tokens and the new prompt,
+                // clamped to what the live cache actually holds. MTP preservation
+                // now extends `cachedTokenIds` into generated text, so the tracked
+                // count is load-bearing: never trust more than `seq_pos_max + 1`,
+                // and treat an evicted front (`seq_pos_min > 0`) as unusable.
+                let posMin = Int(llama_memory_seq_pos_min(memory, 0))
+                let posMax = Int(llama_memory_seq_pos_max(memory, 0))
+                let liveCount = MtpKVPlan.liveResidentCount(posMin: posMin, posMax: posMax)
+                let maxLCP = min(min(cachedTokenIds.count, promptTokens.count), liveCount)
                 var lcp = 0
                 while lcp < maxLCP && cachedTokenIds[lcp] == promptTokens[lcp] { lcp += 1 }
                 // Always leave at least one prompt token to decode so the forward
@@ -1505,28 +1529,22 @@ final class LlamaInference: @unchecked Sendable {
 
                 if lcp <= 0 {
                     llama_memory_clear(memory, false)
-                    FileLogger.shared.debug("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count))")
-                } else if lcp == cachedTokenIds.count {
-                    // The whole cache is a prefix of the new prompt — keep it all.
-                    reuseLen = lcp
-                    FileLogger.shared.debug("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
-                } else if !supportsPartialCacheReuse {
-                    // Hybrid/recurrent model: partial suffix removal is impossible,
-                    // so don't attempt seq_rm (it would fail every time). Clear the
-                    // whole cache and re-decode the prompt from scratch.
-                    llama_memory_clear(memory, false)
-                    FileLogger.shared.debug("KV cache cleared (model has no partial-reuse; last cached \(cachedTokenIds.count))")
+                    FileLogger.shared.debug("KV cache cleared (no shared prefix; last cached \(cachedTokenIds.count), live \(liveCount))")
                 } else if llama_memory_seq_rm(memory, 0, llama_pos(lcp), -1) {
-                    // Drop the diverging suffix [lcp, end); keep prefix [0, lcp).
+                    // Drop the diverging suffix [lcp, end) and any rows beyond the
+                    // tracked prefix, even on a full reuse (no-op then). Dense
+                    // caches always support this trim.
                     reuseLen = lcp
-                    FileLogger.shared.debug("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tokens, prompt \(promptTokens.count))")
+                    if lcp == cachedTokenIds.count && lcp == liveCount {
+                        FileLogger.shared.debug("KV cache reused fully (\(reuseLen) tokens, prompt \(promptTokens.count))")
+                    } else {
+                        FileLogger.shared.debug("KV cache reused (\(reuseLen)/\(cachedTokenIds.count) tracked, live \(liveCount), prompt \(promptTokens.count))")
+                    }
                 } else {
                     // Partial removal unsupported by this cache type — start fresh.
-                    // Log the sequence bounds first: seq_pos_min > 0 means the cache
-                    // already evicted the prefix we tried to keep (SWA/recurrent),
-                    // which is the only documented reason seq_rm returns false here.
-                    let posMin = Int(llama_memory_seq_pos_min(memory, 0))
-                    let posMax = Int(llama_memory_seq_pos_max(memory, 0))
+                    // seq_pos_min > 0 means the cache already evicted the prefix we
+                    // tried to keep (SWA/recurrent), the documented reason seq_rm
+                    // returns false here.
                     llama_memory_clear(memory, false)
                     FileLogger.shared.warn("KV cache partial-rm failed at lcp \(lcp) [seq_pos_min \(posMin), seq_pos_max \(posMax)]; cleared (last cached \(cachedTokenIds.count))")
                 }
@@ -1865,6 +1883,18 @@ final class LlamaInference: @unchecked Sendable {
             usedMtp = false
         }
 
+        // Target-KV reuse bookkeeping for the speculative path. `resident` is
+        // the number of prompt+generated tokens actually in the target cache;
+        // it starts at the prompt and is updated by every normal exit from the
+        // round loop. It is published only when the loop finished with a
+        // well-defined state AND the live sequence bounds agree
+        // (`MtpKVPlan.boundsMatch`) — otherwise the old clear-and-restart path
+        // runs, which is always correct.
+        var mtpResidentCount = promptTokens.count
+        var mtpResidentPublishable = true
+        var mtpKVPublished = false
+        var mtpPublishedIds: [llama_token]?
+
         if usedMtp, let dft = mtpContext {
             // ============================ MTP speculative path ====================
             // Two-context depth-N speculative decoding (mirrors llama.cpp's
@@ -2095,12 +2125,26 @@ final class LlamaInference: @unchecked Sendable {
                             let phaseVerifyGpu = CFAbsoluteTimeGetCurrent() - phaseFallbackGpuStart
                             let phaseFallbackSampleStart = CFAbsoluteTimeGetCurrent()
                             let s = sampleTarget(0)
-                            if s == -1 { finishReason = "sampler_error"; break }
-                            if llama_vocab_is_eog(vocab, s) { finishReason = "eog"; break }
+                            if s == -1 {
+                                finishReason = "sampler_error"
+                                mtpResidentPublishable = false
+                                break
+                            }
+                            if llama_vocab_is_eog(vocab, s) {
+                                finishReason = "eog"
+                                // The fallback decoded `idLast` at `nextPos`
+                                // and stopped: that last emitted row stays
+                                // resident (unlike a verify round, where the
+                                // sampled eog row is rolled back).
+                                mtpResidentCount = MtpKVPlan.fallbackStopResident(
+                                    roundStartPos: Int(nextPos))
+                                break
+                            }
                             phaseSample += CFAbsoluteTimeGetCurrent() - phaseFallbackSampleStart
                             pendingH = copyH(context, 0) ?? pendingH
                             idLast = s
                             nextPos += 1
+                            mtpResidentCount = Int(nextPos)
                             let phaseEmitStart = CFAbsoluteTimeGetCurrent()
                             let keepGoing = consumeToken(s)
                             let roundEnd = CFAbsoluteTimeGetCurrent()
@@ -2149,7 +2193,11 @@ final class LlamaInference: @unchecked Sendable {
                             if k < drafts.count, r != drafts[k] { break }
                         }
                         phaseSample += CFAbsoluteTimeGetCurrent() - phaseSampleStart
-                        if sampleFailed { finishReason = "sampler_error"; break }
+                        if sampleFailed {
+                            finishReason = "sampler_error"
+                            mtpResidentPublishable = false
+                            break
+                        }
 
                         // Pure verify decision (acceptance count, position
                         // advance, rollback position, which hidden state to
@@ -2162,15 +2210,15 @@ final class LlamaInference: @unchecked Sendable {
                         mtpAccepted += step.accepted
 
                         // 4) Emit the committed reals in order. A stop-string
-                        //    match or the token limit ends generation here; the
-                        //    generation-end clear (below) discards the
-                        //    decoded-but-unemitted rows, so no trim is needed —
-                        //    any future KV-preservation work must trim from
-                        //    nextPos + emitted-count first.
+                        //    match or the token limit can end generation before
+                        //    `step.emitCount`; the KV-preservation path below
+                        //    trims both contexts to what was actually emitted.
                         var stopped = false
+                        var actualEmitted = 0
                         let phaseEmitStart = CFAbsoluteTimeGetCurrent()
                         for k in 0..<step.emitCount {
                             if generated >= limit { stopped = true; break }
+                            actualEmitted += 1
                             if !consumeToken(reals[k]) { stopped = true; break }
                         }
                         let phaseEmit = CFAbsoluteTimeGetCurrent() - phaseEmitStart
@@ -2187,6 +2235,22 @@ final class LlamaInference: @unchecked Sendable {
                             }
                         }
 
+                        // A stop string, the token limit, or a client cancel can
+                        // stop the emit loop early. `step.rollbackPos` only drops
+                        // whole *unaccepted* rows, so trim both contexts to the
+                        // rows that were actually emitted before keeping them.
+                        if stopped {
+                            let trimPos = llama_pos(Int(nextPos) + actualEmitted)
+                            if let mem = llama_get_memory(context) {
+                                _ = llama_memory_seq_rm(mem, 0, trimPos, -1)
+                            }
+                            if let dmem = llama_get_memory(dft) {
+                                _ = llama_memory_seq_rm(dmem, 0, trimPos, -1)
+                            }
+                        }
+                        mtpResidentCount = MtpKVPlan.committedResident(
+                            roundStartPos: Int(nextPos), emitted: actualEmitted)
+
                         // Hidden state pairing with the last emitted token
                         // (carryHFromRow = emitCount - 1) — the input h for the
                         // next round's draft decode.
@@ -2199,7 +2263,7 @@ final class LlamaInference: @unchecked Sendable {
                         // draft decode (which prefixes these rows) rather than
                         // decoded here, so both rows share one weight pass.
                         // Skipped when the round stops: the draft KV is not used
-                        // again, and the generation-end clear discards it.
+                        // again, and the next generation trims or clears it.
                         if !stopped, firstStopRow == nil {
                             for i in MtpSpeculator.draftSeedIndices(emitCount: step.emitCount,
                                                                     draftEntries: draftEntries) {
@@ -2238,18 +2302,44 @@ final class LlamaInference: @unchecked Sendable {
             let avgDepth = Double(mtpAccepted) / Double(max(1, mtpRounds))
             FileLogger.shared.info("MTP stats: rounds=\(mtpRounds) hits=\(mtpHits) (\(hitPct)%) accepted=\(mtpAccepted) depth=\(String(format: "%.2f", avgDepth)) no-draft=\(mtpNoDraft) attempts=\(mtpAttempts) emitted=\(generated); \(phaseStats.summary())")
 
-            // The two-context speculative path manages KV positions in a way that
-            // the cross-call prefix-reuse tracking can't reconstruct, so clear the
-            // target and reset tracking. Next call re-decodes the prompt (hybrid
-            // models reuse via the on-disk snapshot path instead). The draft KV
-            // is kept: the next prompt trims it to the reused prefix, which the
-            // draft mirrored this turn (see the prompt-start trim). Metadata
-            // only (data: false, see restorePromptSnapshot): this runs inside
-            // the timed generation window.
-            if let mem = llama_get_memory(context) { llama_memory_clear(mem, false) }
-            // A draft sharing the target's memory is never mirrored or trimmed
-            // at prompt start, so its generation rows must be cleared here.
-            if draftSharesTargetMemory, let dmem = llama_get_memory(dft) { llama_memory_clear(dmem, false) }
+            // The two-context speculative path manages KV positions explicitly,
+            // but the round bookkeeping above reconstructs exactly what ended up
+            // resident (see docs/MTP-KV-REUSE.md). Keep the live cache so the
+            // next turn can reuse the shared prefix instead of restoring the
+            // per-turn snapshot (hybrid) or re-prefilling the whole prompt
+            // (dense). The per-turn snapshot save still runs as the fallback.
+            // The live sequence bounds are the final authority:
+            // a cache type that reports different bounds, or an abnormal exit
+            // (sampler error), falls back to the old clear.
+            var preserved = false
+            if let mem = llama_get_memory(context) {
+                let posMin = Int(llama_memory_seq_pos_min(mem, 0))
+                let posMax = Int(llama_memory_seq_pos_max(mem, 0))
+                let ids = MtpKVPlan.residentIds(prompt: promptTokens,
+                                                emitted: generatedTokenIds,
+                                                resident: mtpResidentCount)
+                preserved = mtpResidentPublishable
+                    && MtpKVPlan.boundsMatch(posMin: posMin, posMax: posMax,
+                                             resident: mtpResidentCount)
+                    && ids != nil
+                if preserved {
+                    mtpPublishedIds = ids
+                    FileLogger.shared.debug("KV preserved across MTP generation (\(mtpResidentCount) tokens, prompt \(promptTokens.count), generated \(generated), seq_pos_max \(posMax))")
+                } else {
+                    llama_memory_clear(mem, false)
+                    FileLogger.shared.warn("MTP KV preservation skipped (publishable \(mtpResidentPublishable), seq_pos_min \(posMin), seq_pos_max \(posMax), tracked \(mtpResidentCount)); cleared")
+                }
+            }
+            if !preserved {
+                // A draft sharing the target's memory is never mirrored or
+                // trimmed at prompt start, so its generation rows must be
+                // cleared when the target is. A draft with its own memory is
+                // kept: the next prompt trims it to the reused prefix.
+                if draftSharesTargetMemory, let dmem = llama_get_memory(dft) {
+                    llama_memory_clear(dmem, false)
+                }
+            }
+            mtpKVPublished = preserved
             decodedGenerated = 0
         } else {
         var plainStats = PlainStepStats()
@@ -2385,10 +2475,17 @@ final class LlamaInference: @unchecked Sendable {
         // `decodedGenerated` excludes any final token from a stop-string or
         // client-cancel break that was sampled but never fed back to the cache.
         if usedMtp {
-            // The MTP path already cleared both KV caches; force a clean slate so
-            // the next call never trusts a prefix that is no longer resident.
-            cachedTokenCount = 0
-            cachedTokenIds = []
+            // Publish the resident prefix only when the speculative loop exited
+            // normally and the live bounds guard agreed (see MtpKVPlan). On the
+            // fallback path the caches were cleared above, so a clean slate is
+            // the only safe tracking state.
+            if mtpKVPublished, let ids = mtpPublishedIds {
+                cachedTokenCount = mtpResidentCount
+                cachedTokenIds = ids
+            } else {
+                cachedTokenCount = 0
+                cachedTokenIds = []
+            }
         } else {
             cachedTokenCount = promptTokens.count + decodedGenerated
             cachedTokenIds = promptTokens + generatedTokenIds.prefix(decodedGenerated)
