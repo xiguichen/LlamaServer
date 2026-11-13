@@ -245,6 +245,14 @@ final class ServerViewModel: ObservableObject {
         status = .loadingModel
         ipAddress = NetworkInfo.wifiIPv4Address()
 
+        // Engine that must be freed before the new model is constructed. It is
+        // unloaded inside the detached load task, never inline: `unload()` frees
+        // the multi-GB model + Metal/KV allocations, and doing that on the main
+        // thread froze the UI on a model switch. Ordering is unchanged — the
+        // task still frees it BEFORE building the new engine, or both models
+        // would be resident at once and the load can return NULL.
+        var previousEngine: LlamaInference?
+
         // Fast path: the same model+context is already loaded and healthy
         // (e.g. the user stopped and is starting again). Reuse the live engine
         // and just bring a fresh HTTP server up — no model reload, so the
@@ -256,7 +264,7 @@ final class ServerViewModel: ObservableObject {
                 // instead of reusing it (which would serve 500s for every request).
                 httpServer?.stop()
                 httpServer = nil
-                engine.unload()
+                previousEngine = engine
                 inference = nil
                 loadedModelKey = nil
                 // Do NOT return — fall through to the slow path.
@@ -292,15 +300,24 @@ final class ServerViewModel: ObservableObject {
         if let old = inference {
             httpServer?.stop()
             httpServer = nil
-            old.unload()
+            previousEngine = old
             inference = nil
             loadedModelKey = nil
         }
+        // Immutable capture: the detached task must not share a mutable local.
+        let engineToUnload = previousEngine
 
         log("Starting… loading \(model.name) into memory")
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
+            // Teardown stays here, off the main thread (see `previousEngine`).
+            if let stale = engineToUnload {
+                let unloadStart = Date()
+                stale.unload()
+                let unloadMs = Int(Date().timeIntervalSince(unloadStart) * 1000)
+                FileLogger.shared.info("previous engine unloaded off the main thread in \(unloadMs) ms")
+            }
             do {
                 let engineStart = Date()
                 let engine = try LlamaInference(modelPath: modelPath, contextSize: ctxSize, useMtp: useMtp, kvCacheType: kvCache, yarnLongContext: yarnLongContext)
