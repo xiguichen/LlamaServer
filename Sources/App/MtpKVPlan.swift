@@ -60,4 +60,26 @@ enum MtpKVPlan {
     static func liveResidentCount(posMin: Int, posMax: Int) -> Int {
         posMin == 0 ? max(0, posMax + 1) : 0
     }
+
+    /// How much of the reused prefix the draft's resident rows can cover.
+    ///
+    /// The draft mirrors the target's rows and is rolled back at the same
+    /// positions, so after a generation it holds the same tokens as
+    /// `cachedTokenIds` — including the generated rows that target-KV
+    /// preservation keeps. Reusing it requires the whole `reuseLen` prefix:
+    /// trimming the draft to fewer rows than the target reuses would leave a
+    /// position gap, because the missing rows cannot be re-mirrored without the
+    /// target's hidden states for those (already decoded) positions.
+    ///
+    /// - Returns: `reuseLen` when the draft holds at least that many rows and
+    ///   they match the prompt; nil when the caller must clear it instead.
+    static func draftReuseLen(reuseLen: Int,
+                              draftTokens: [Int32],
+                              promptTokens: [Int32]) -> Int? {
+        guard reuseLen > 0,
+              reuseLen <= draftTokens.count,
+              reuseLen <= promptTokens.count else { return nil }
+        for i in 0..<reuseLen where draftTokens[i] != promptTokens[i] { return nil }
+        return reuseLen
+    }
 }

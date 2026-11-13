@@ -125,8 +125,11 @@ draft-mtp `process()`. It is skipped when the draft shares the target's memory
 (`is_mem_shared`).
 
 - The draft KV is kept across generations and trimmed to the target's reused
-  prefix when `draftPromptTokens` shows it holds the same tokens; otherwise it
-  starts empty.
+  prefix when `draftResidentTokens` (which includes the generated rows target-KV
+  preservation keeps) shows it holds the same tokens; otherwise it starts empty.
+  Publishing those ids is gated on a gap-free sequence: a failed draft decode or
+  rollback is not visible in `seq_pos_min`/`seq_pos_max`, so a private flag
+  disqualifies it.
 - A failed mirror leaves the draft **empty**, never with a position gap, because
   a gap makes every later draft decode fail.
 - The draft context is built with a much smaller `n_batch`/`n_ubatch`

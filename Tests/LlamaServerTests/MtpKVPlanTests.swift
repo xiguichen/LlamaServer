@@ -88,4 +88,38 @@ final class MtpKVPlanTests: XCTestCase {
         XCTAssertEqual(MtpKVPlan.liveResidentCount(posMin: 1, posMax: 101), 0,
                        "an evicted front makes the tracked prefix unusable")
     }
+
+    func testDraftReuseCoversGeneratedRows() {
+        // The target preserved prompt (3) + 2 generated rows; the draft holds
+        // the same sequence. The next prompt reuses all 5 tokens.
+        let prompt: [Int32] = [1, 2, 3, 40, 41, 6]
+        let draft: [Int32] = [1, 2, 3, 40, 41]
+        XCTAssertEqual(MtpKVPlan.draftReuseLen(reuseLen: 5,
+                                               draftTokens: draft,
+                                               promptTokens: prompt),
+                       5, "reuse past the old prompt must still trim the draft")
+    }
+
+    func testDraftReuseRejectsPrefixBeyondItsRows() {
+        // Target reused 6 rows but the draft only holds the 3-token prompt:
+        // trimming it to 6 is impossible, and mirroring only [6, …) would
+        // leave a position gap.
+        XCTAssertNil(MtpKVPlan.draftReuseLen(reuseLen: 6,
+                                             draftTokens: [1, 2, 3],
+                                             promptTokens: [1, 2, 3, 40, 41, 6]))
+    }
+
+    func testDraftReuseRejectsDivergedTokens() {
+        XCTAssertNil(MtpKVPlan.draftReuseLen(reuseLen: 4,
+                                             draftTokens: [1, 2, 3, 40],
+                                             promptTokens: [1, 2, 3, 41]),
+                     "a different generated token invalidates the draft prefix")
+    }
+
+    func testDraftReuseRequiresPositiveLength() {
+        XCTAssertNil(MtpKVPlan.draftReuseLen(reuseLen: 0,
+                                             draftTokens: [1, 2],
+                                             promptTokens: [1, 2]),
+                     "an empty reuse clears the draft instead of trimming")
+    }
 }

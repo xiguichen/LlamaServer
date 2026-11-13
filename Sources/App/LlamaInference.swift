@@ -67,12 +67,12 @@ final class LlamaInference: @unchecked Sendable {
     /// initialize (e.g. draft context creation fails) and gracefully fall back.
     private var mtpEnabled = false
 
-    /// The prompt tokens the draft context holds at positions [0, count) —
-    /// mirrored from the target on the last generation. Lets the next prompt
-    /// keep the draft's KV for a prefix it shares, instead of leaving the
-    /// draft without the reused part of the prompt. Empty when the draft
-    /// holds no complete prompt.
-    private var draftPromptTokens: [llama_token] = []
+    /// The exact token IDs resident in the draft sequence (the prompt plus the
+    /// generated rows it kept, which mirror the target's published prefix).
+    /// Lets the next prompt trim the draft to the shared prefix instead of
+    /// leaving it without the reused rows. Empty when the draft holds no
+    /// contiguous state that can be trusted.
+    private var draftResidentTokens: [llama_token] = []
 
     /// Target hidden state h_{end-1} at each prompt-decode boundary `end` of
     /// that same prompt. When the next prompt keeps the draft prefix
@@ -760,7 +760,7 @@ final class LlamaInference: @unchecked Sendable {
         ctxParams.ctx_other = target
         Self.applyCacheAndRopeParams(&ctxParams, kvCacheType: kvCacheType, yarnLongContext: yarnLongContext, context: contextSize)
 
-        draftPromptTokens = []
+        draftResidentTokens = []
         draftPromptBoundaryH = [:]
         guard let dft = llama_init_from_model(model, ctxParams) else {
             FileLogger.shared.warn("MTP: draft context creation returned NULL — falling back to plain decoding")
@@ -1040,7 +1040,7 @@ final class LlamaInference: @unchecked Sendable {
         // instance itself is still referenced by the caller.
         cachedTokenCount = 0
         cachedTokenIds = []
-        draftPromptTokens = []
+        draftResidentTokens = []
         draftPromptBoundaryH = [:]
         FileLogger.shared.info("inference unloaded (model + context freed)")
     }
@@ -1680,7 +1680,7 @@ final class LlamaInference: @unchecked Sendable {
         // rule as upstream draft-mtp.
         // The draft KV is kept across generations. When the target reuses a
         // prefix [0, reuseLen) that the draft also holds (same tokens, per
-        // draftPromptTokens), trim the draft to that prefix and mirror only
+        // draftResidentTokens), trim the draft to that prefix and mirror only
         // the rest. Otherwise start the draft empty: a draft row is only
         // useful if it was computed from the same tokens.
         let draftSharesTargetMemory = mtpContext.map {
@@ -1692,10 +1692,16 @@ final class LlamaInference: @unchecked Sendable {
         // Whether the draft ends up holding the whole prompt from position 0.
         var draftHoldsPrompt = false
         if let dmem = draftMemory {
-            var shared = 0
-            let maxShared = min(reuseLen, draftPromptTokens.count)
-            while shared < maxShared && draftPromptTokens[shared] == promptTokens[shared] { shared += 1 }
-            if reuseLen > 0, shared == reuseLen, llama_memory_seq_rm(dmem, 0, llama_pos(reuseLen), -1) {
+            // `reuseLen` can extend into the generated rows that target-KV
+            // preservation keeps, so compare against the draft's *resident*
+            // tokens, not just the last prompt. A mismatch (or a draft that
+            // holds fewer rows) means it cannot be trimmed to the reused
+            // prefix, and mirroring only [reuseLen, total) would leave a
+            // position gap, so start it empty instead.
+            if let start = MtpKVPlan.draftReuseLen(reuseLen: reuseLen,
+                                                   draftTokens: draftResidentTokens,
+                                                   promptTokens: promptTokens),
+               llama_memory_seq_rm(dmem, 0, llama_pos(start), -1) {
                 draftHoldsPrompt = true
                 if let h = draftPromptBoundaryH[reuseLen], h.count == draftPrefillH.count { draftPrefillH = h }
             } else {
@@ -1703,7 +1709,7 @@ final class LlamaInference: @unchecked Sendable {
                 draftHoldsPrompt = reuseLen == 0
             }
         }
-        draftPromptTokens = []
+        draftResidentTokens = []
         draftPromptBoundaryH = [:]
         var boundaryH: [Int: [Float]] = [:]
         // Carry the kept prefix's boundary h forward, so it survives a turn
@@ -1802,7 +1808,7 @@ final class LlamaInference: @unchecked Sendable {
             try decodeRange(reuseLen, total)
         }
         if mirrorPrompt && draftHoldsPrompt {
-            draftPromptTokens = promptTokens
+            draftResidentTokens = promptTokens
             draftPromptBoundaryH = boundaryH
         }
 
@@ -1933,6 +1939,11 @@ final class LlamaInference: @unchecked Sendable {
         var mtpResidentPublishable = true
         var mtpKVPublished = false
         var mtpPublishedIds: [llama_token]?
+        // Whether the draft's resident rows form a gap-free sequence from
+        // position 0. A failed draft decode or rollback leaves a hole that the
+        // live seq_pos_min/max bounds cannot see, so this flag gates publishing
+        // the draft's ids for the next prompt's reuse.
+        var draftContiguous = true
 
         if usedMtp, let dft = mtpContext {
             // ============================ MTP speculative path ====================
@@ -2146,9 +2157,17 @@ final class LlamaInference: @unchecked Sendable {
                                         if cand1 != -1, !llama_vocab_is_eog(vocab, cand1), (!MtpSpec.gateEnabled || draftConfidence(cand1) >= MtpSpec.pMin) {
                                             drafts.append(cand1)
                                         }
+                                    } else {
+                                        // The chained row was not written; the
+                                        // draft now has a hole at nextPos+1.
+                                        draftContiguous = false
                                     }
                                 }
                             }
+                        } else {
+                            // `nextPos` was never written into the draft, so it
+                            // cannot be trimmed/reused as a prefix next turn.
+                            draftContiguous = false
                         }
 
                         // No usable draft -> plain single-token target decode.
@@ -2271,7 +2290,12 @@ final class LlamaInference: @unchecked Sendable {
                                 _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
                             }
                             if let dmem = llama_get_memory(dft) {
-                                _ = llama_memory_seq_rm(dmem, 0, llama_pos(rb), -1)
+                                // If the draft cannot drop the rejected rows it
+                                // no longer matches the target's sequence, so it
+                                // must not be published for next-turn reuse.
+                                if !llama_memory_seq_rm(dmem, 0, llama_pos(rb), -1) {
+                                    draftContiguous = false
+                                }
                             }
                         }
 
@@ -2285,7 +2309,9 @@ final class LlamaInference: @unchecked Sendable {
                                 _ = llama_memory_seq_rm(mem, 0, trimPos, -1)
                             }
                             if let dmem = llama_get_memory(dft) {
-                                _ = llama_memory_seq_rm(dmem, 0, trimPos, -1)
+                                if !llama_memory_seq_rm(dmem, 0, trimPos, -1) {
+                                    draftContiguous = false
+                                }
                             }
                         }
                         mtpResidentCount = MtpKVPlan.committedResident(
@@ -2378,6 +2404,31 @@ final class LlamaInference: @unchecked Sendable {
                 if draftSharesTargetMemory, let dmem = llama_get_memory(dft) {
                     llama_memory_clear(dmem, false)
                 }
+            }
+
+            // The draft mirrors the target's rows and is rolled back at the
+            // same positions, so a successful speculative generation leaves it
+            // holding exactly the published target prefix — including the
+            // generated rows. Record those ids (not just the prompt) so the
+            // next turn can trim the draft to `reuseLen` even when reuse
+            // extends into generated text. Without this the draft cannot
+            // cover the reused prefix, and mirroring only the suffix leaves a
+            // position gap that disables drafting.
+            if preserved, !draftSharesTargetMemory, mirrorPrompt, draftHoldsPrompt,
+               draftContiguous, let ids = mtpPublishedIds,
+               let dmem = llama_get_memory(dft) {
+                let dposMin = Int(llama_memory_seq_pos_min(dmem, 0))
+                let dposMax = Int(llama_memory_seq_pos_max(dmem, 0))
+                if MtpKVPlan.boundsMatch(posMin: dposMin, posMax: dposMax,
+                                         resident: ids.count) {
+                    draftResidentTokens = ids
+                } else {
+                    // The prefill value (the prompt prefix) remains a safe,
+                    // shorter claim; anything longer would be unproven.
+                    FileLogger.shared.debug("MTP: draft KV not published (seq_pos_min \(dposMin), seq_pos_max \(dposMax), resident \(ids.count))")
+                }
+            } else if !preserved {
+                draftResidentTokens = []
             }
             mtpKVPublished = preserved
             decodedGenerated = 0

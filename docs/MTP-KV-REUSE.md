@@ -145,25 +145,29 @@ Do not publish reuse after:
 ## Draft-context consequences (why this is not free)
 
 The draft is kept across generations and trimmed at the next prompt start when
-`draftPromptTokens` proves it holds the reused prefix. Preserving the target KV
-makes `reuseLen` extend into the generated assistant text. Two cases:
+`draftResidentTokens` proves it holds the reused prefix. Preserving the target KV
+makes `reuseLen` extend into the generated assistant text, so the tracked ids are
+the draft's **resident** rows (prompt + the generated rows it kept), not just the
+last prompt. When the draft's rows match, it is trimmed to `reuseLen` and only
+the rest is mirrored — including a `reuseLen` inside generated text. Two residual
+cases remain:
 
-1. The draft holds the same rows (it was rolled back with the target). It can be
-   trimmed and reused, but `draftPromptBoundaryH` only has hidden states at
-   target prompt-chunk boundaries. A `reuseLen` inside the generated text has no
-   boundary `h`, so the first new mirrored row would pair with a zero/stale
-   hidden state. That degrades draft acceptance, never output.
-2. The draft does not hold the prefix (`draftPromptTokens` is only the previous
-   prompt). Current code clears it but still mirrors only `[reuseLen, total)`,
-   which leaves a position gap. MTP then degrades to no-draft rounds for that
-   generation.
+1. The draft holds the same rows, but `draftPromptBoundaryH` only has hidden
+   states at target prompt-chunk boundaries. A `reuseLen` inside the generated
+   text has no boundary `h`, so the first newly mirrored row pairs with a zero
+   hidden state. That degrades draft acceptance for one row, never output.
+2. The draft does not cover the prefix (it holds fewer rows, or its live bounds
+   disagree — e.g. a failed draft decode left a hole, or the previous generation
+   took the plain path). `MtpKVPlan.draftReuseLen` returns nil, the draft is
+   cleared, and mirroring only `[reuseLen, total)` leaves a position gap. MTP
+   then degrades to no-draft rounds until a generation with `reuseLen == 0`
+   rebuilds the draft from position 0.
 
 Neither case corrupts output (every emitted token is sampled from the target),
-but both can erase the generation-speed benefit of MTP on the turn after a
-reused turn. This is exactly what the paired A/B must measure. A follow-up can
-feed the target's `h` at the new reuse boundary into `draftPromptBoundaryH` or
-re-mirror the draft from 0 when it was cleared; do not make that change in the
-same step.
+and the common case — the previous generation used the speculative path and
+preserved its target KV — now keeps drafting on the next turn. The paired on-device
+A/B for the removed snapshot restore is still open (`docs/PERFORMANCE.md`,
+question 3).
 
 ## Test plan
 
