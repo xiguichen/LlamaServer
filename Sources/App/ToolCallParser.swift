@@ -92,28 +92,52 @@ enum ToolCallParser {
     static func parse(_ text: String, tools: [ToolDefinition]? = nil) -> ParseResult {
         let stripped = stripANSI(text)
 
+        // Fast path: a plain answer carries none of these markers. Skipping the
+        // envelope regexes and the tool-schema encode below keeps the cost of a
+        // normal response to a couple of substring scans.
+        let hasEnvelopeOpen = stripped.contains("<tool_call>")
+        let hasFunctionTag = stripped.contains("<function=")
+        if !hasEnvelopeOpen && !hasFunctionTag
+            && !stripped.contains("</tool_call>") && !stripped.contains("</arg") {
+            return ParseResult(
+                cleanedContent: stripReasoning(stripped)
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                toolCalls: [],
+                hasUnrecoveredEnvelope: false)
+        }
+
         let fullRange = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
-        let matches = toolCallRegex.matches(in: stripped, options: [], range: fullRange)
 
         var toolCalls: [ToolCall] = []
-        for match in matches {
-            guard match.numberOfRanges >= 2,
-                  let jsonRange = Range(match.range(at: 1), in: stripped) else { continue }
-            let jsonText = String(stripped[jsonRange])
-            if let call = makeToolCall(fromJSON: jsonText) {
-                toolCalls.append(call)
+        if hasEnvelopeOpen {
+            let matches = toolCallRegex.matches(in: stripped, options: [], range: fullRange)
+            for match in matches {
+                guard match.numberOfRanges >= 2,
+                      let jsonRange = Range(match.range(at: 1), in: stripped) else { continue }
+                let jsonText = String(stripped[jsonRange])
+                if let call = makeToolCall(fromJSON: jsonText) {
+                    toolCalls.append(call)
+                }
+            }
+            // `parameterKinds` encodes and re-parses every tool schema; only pay
+            // for it when the model actually emitted the XML form.
+            if hasFunctionTag {
+                toolCalls.append(contentsOf: xmlToolCalls(in: stripped,
+                                                          schema: parameterKinds(from: tools)))
             }
         }
-        toolCalls.append(contentsOf: xmlToolCalls(in: stripped, schema: parameterKinds(from: tools)))
 
         // Remove the envelopes (either syntax) and any <think> reasoning from
         // the client-visible content. Any `<tool_call>` left after removing the
         // closed envelopes is an unterminated one (the model stopped early), so
         // truncate at it — the call itself was already recovered above.
-        var cleaned = anyEnvelopeRegex.stringByReplacingMatches(
-            in: stripped, options: [], range: fullRange, withTemplate: "")
-        if let open = cleaned.range(of: "<tool_call>") {
-            cleaned = String(cleaned[cleaned.startIndex..<open.lowerBound])
+        var cleaned = stripped
+        if hasEnvelopeOpen {
+            cleaned = anyEnvelopeRegex.stringByReplacingMatches(
+                in: stripped, options: [], range: fullRange, withTemplate: "")
+            if let open = cleaned.range(of: "<tool_call>") {
+                cleaned = String(cleaned[cleaned.startIndex..<open.lowerBound])
+            }
         }
 
         if !toolCalls.isEmpty {
@@ -125,7 +149,7 @@ enum ToolCallParser {
         // The closed envelope's JSON couldn't be parsed — e.g. the model omitted
         // the outer `}` or put stray junk before the close tag (seen from small
         // models under context pressure). Try greedy recovery before giving up.
-        if let recovered = recoverUnclosedToolCall(in: stripped) {
+        if hasEnvelopeOpen, let recovered = recoverUnclosedToolCall(in: stripped) {
             return recovered
         }
 
@@ -152,6 +176,9 @@ enum ToolCallParser {
     /// Removes `<think> … </think>` reasoning blocks (and any unterminated
     /// trailing `<think>`) from text destined for the client's `content` field.
     static func stripReasoning(_ text: String) -> String {
+        // Both regexes require an opening "<think>", so a plain answer can skip
+        // two whole-document passes.
+        guard text.contains("<think>") else { return text }
         var s = text
         var range = NSRange(s.startIndex..<s.endIndex, in: s)
         s = thinkBlockRegex.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
@@ -188,6 +215,9 @@ enum ToolCallParser {
 
     /// Removes ANSI escape sequences from arbitrary model output.
     static func stripANSI(_ text: String) -> String {
+        // Fast path: this runs once per streamed token and almost no token
+        // carries an escape sequence. `contains` is a scan; the regex is not.
+        guard text.contains("\u{1B}") else { return text }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return ansiRegex.stringByReplacingMatches(
             in: text, options: [], range: range, withTemplate: "")

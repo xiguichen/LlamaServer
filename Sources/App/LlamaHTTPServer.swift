@@ -179,6 +179,7 @@ final class LlamaHTTPServer {
         // stop(), so a stop→start cycle on the same instance serves requests
         // instead of aborting at the first token.
         _stopping.withLock { $0 = false }
+        inference.clearCancellation()
         listenPort = port
         let server = makeServer()
         try server.start(port: Int(port))
@@ -212,24 +213,50 @@ final class LlamaHTTPServer {
         }
     }
 
+    /// Non-blocking teardown for the UI. Signals cancellation, then drains the
+    /// inference queue off the main thread so a Stop tapped during a cold
+    /// prefill cannot freeze the app for the rest of the prompt (~78 s at 24k
+    /// tokens, docs/PERFORMANCE.md). `completion` runs on the main queue after
+    /// the listener is closed.
+    func stop(completion: @escaping () -> Void) {
+        prepareStop()
+        let server = self.server
+        self.server = nil
+        let queue = inferenceQueue
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Bounded by LlamaInference's cancellation checks: one prompt chunk
+            // or one generation round, never the whole request.
+            queue.sync { }
+            DispatchQueue.main.async {
+                // Telegraph's listener is main-thread affine (see restartListener).
+                server?.stop(immediately: true)
+                completion()
+            }
+        }
+    }
+
+    /// Blocking teardown for callers that must not free the engine until the
+    /// inference queue is idle (model unload). Bounded by the same cancellation
+    /// checks, so it waits for at most one chunk/round.
     func stop() {
+        prepareStop()
+        inferenceQueue.sync { }
+        server?.stop(immediately: true)
+        server = nil
+    }
+
+    /// Shared front half of both teardown paths. Idempotent.
+    private func prepareStop() {
         bonjourService?.stop()
         bonjourService = nil
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         keepAlive.stop()
         FileLogger.shared.debug("stop: active connections=\(activeConnections)")
-        // Signal in-flight generations to finish at the next token boundary
-        // so the drain below completes quickly instead of blocking the caller
-        // (main thread / UI) for potentially minutes.
+        // Abort in-flight work at its next safe boundary. Without this the drain
+        // below waits for the rest of the prompt.
         _stopping.withLock { $0 = true }
-        // Drain the inference queue so in-flight streaming requests can send
-        // finish_reason + [DONE] before connections are closed.
-        inferenceQueue.sync { }
-        server?.stop(immediately: true)
-        server = nil
-        // Mark this instance as stopped: the foreground observer and the
-        // heartbeat must not resurrect a listener the user turned off.
+        inference.requestCancellation()
         listenPort = 0
     }
 
@@ -284,6 +311,14 @@ final class LlamaHTTPServer {
         }
     }
 
+    /// Minimal decode for the intercept: the full `ChatCompletionRequest` is
+    /// only needed on the streaming path (the route handler decodes the
+    /// non-streaming body itself), so probing `stream` avoids a duplicate
+    /// full decode of every message and tool schema.
+    private struct StreamFlagProbe: Decodable {
+        let stream: Bool?
+    }
+
     private func makeServer() -> StreamableServer {
         let server = StreamableServer()
         // Telegraph starts a socket read after dispatching every request to wait
@@ -314,14 +349,24 @@ final class LlamaHTTPServer {
                 return false
             }
             let bodyPreview = String(data: request.body.prefix(500), encoding: .utf8) ?? "<non-utf8>"
-            guard let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else {
+            // Probe only the flag first. The non-streaming body is decoded by the
+            // route handler, so decoding the full request (all messages + tool
+            // schemas) here as well paid for it twice on the common path.
+            guard let probe = try? JSONDecoder().decode(StreamFlagProbe.self, from: request.body) else {
                 FileLogger.shared.error("intercept: JSON decode FAILED for POST \(path). body preview=\(bodyPreview)")
                 FileLogger.shared.verbose("intercept: FAILED RAW BODY >>>\(String(data: request.body, encoding: .utf8) ?? "<non-utf8>")<<<")
                 return false
             }
+            guard probe.stream == true else {
+                FileLogger.shared.info("chat/completions body.stream=false")
+                return false
+            }
+            guard let body = try? JSONDecoder().decode(ChatCompletionRequest.self, from: request.body) else {
+                FileLogger.shared.error("intercept: streaming body decode FAILED for POST \(path). body preview=\(bodyPreview)")
+                return false
+            }
             let toolsDesc = body.tools.map { " tools=\($0.count)" } ?? ""
-            FileLogger.shared.info("chat/completions body.stream=\(body.stream ?? false)\(toolsDesc)")
-            guard body.stream == true else { return false }
+            FileLogger.shared.info("chat/completions body.stream=true\(toolsDesc)")
             FileLogger.shared.debug("intercept: claiming streaming request")
             self.handleStreamingCompletion(request: request, connection: connection, body: body)
             return true
@@ -965,26 +1010,35 @@ final class LlamaHTTPServer {
                     }
                 }
             } catch {
-                FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
-                // A headroom failure carries an actionable message the client
-                // should see: deliver it as an OpenAI-style stream error event
-                // (with an empty choices array so naive clients that iterate
-                // choices don't choke) before the error finish chunk.
                 if let inferenceError = error as? LlamaInference.InferenceError,
-                   case .contextTooFull = inferenceError {
-                    let event: [String: Any] = [
-                        "error": ["message": error.localizedDescription,
-                                  "type": "invalid_request_error"],
-                        "choices": []
-                    ]
-                    if let data = try? JSONSerialization.data(withJSONObject: event),
-                       let str = String(data: data, encoding: .utf8) {
-                        connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
-                        FileLogger.shared.debug("streaming #\(currentRequest): context-too-full error event sent")
+                   case .cancelled = inferenceError {
+                    // Deliberate shutdown, not a failure: end the stream cleanly
+                    // (the queue drain in stop() is waiting for this to return).
+                    FileLogger.shared.debug("streaming #\(currentRequest): generation cancelled by server stop")
+                    sendChunk(delta: Delta(role: nil, content: nil), finishReason: "stop")
+                    finishReasonSent = true
+                } else {
+                    FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
+                    // A headroom failure carries an actionable message the client
+                    // should see: deliver it as an OpenAI-style stream error event
+                    // (with an empty choices array so naive clients that iterate
+                    // choices don't choke) before the error finish chunk.
+                    if let inferenceError = error as? LlamaInference.InferenceError,
+                       case .contextTooFull = inferenceError {
+                        let event: [String: Any] = [
+                            "error": ["message": error.localizedDescription,
+                                      "type": "invalid_request_error"],
+                            "choices": []
+                        ]
+                        if let data = try? JSONSerialization.data(withJSONObject: event),
+                           let str = String(data: data, encoding: .utf8) {
+                            connection.send(data: "data: \(str)\n\n".data(using: .utf8)!, timeout: 10)
+                            FileLogger.shared.debug("streaming #\(currentRequest): context-too-full error event sent")
+                        }
                     }
+                    sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
+                    finishReasonSent = true
                 }
-                sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
-                finishReasonSent = true
             }
             stopKeepAlive()
             let didDisconnect = disconnectWatcher.didDisconnect

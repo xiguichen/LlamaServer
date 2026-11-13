@@ -25,6 +25,12 @@ final class ServerViewModel: ObservableObject {
 
     // Server state
     @Published private(set) var status: Status = .stopped
+    /// True while a non-blocking `stop()` drain is still in flight. Blocks
+    /// Start/model-switch until the old listener is closed, so a new server
+    /// cannot race it for the port or free the engine under a live request.
+    @Published private var stopping = false
+    /// Invalidates a late stop completion after `unloadEngine()` takes over.
+    private var stopGeneration = 0
     @Published var port: String = "8443"
     @Published var contextSize: String = "262144"
     @Published private(set) var logs: [String] = []
@@ -89,8 +95,9 @@ final class ServerViewModel: ObservableObject {
         // panel, so the in-app log is a readable console. Debug/verbose payload
         // lines stay on disk only — rendering them was what made the panel the
         // app's heaviest CPU consumer (see `LogPanelSpec`).
-        FileLogger.shared.onLine = { [weak self] line in
-            Task { @MainActor in self?.appendLine(line) }
+        FileLogger.shared.onLine = { [weak self] lines in
+            // One Task per flushed batch (see FileLogger.scheduleMirrorFlush).
+            Task { @MainActor in self?.appendLines(lines) }
         }
         refreshModels()
     }
@@ -114,7 +121,7 @@ final class ServerViewModel: ObservableObject {
 
     var isBusy: Bool {
         if case .loadingModel = status { return true }
-        return false
+        return stopping
     }
 
     var serverURL: String? {
@@ -355,19 +362,39 @@ final class ServerViewModel: ObservableObject {
     }
 
     func stop() {
-        httpServer?.stop()
-        httpServer = nil
+        status = .stopped
+        UIApplication.shared.isIdleTimerDisabled = false
         // Keep the model resident so a restart is instant and reliable (reloading
         // in-process can fail with "model load returned NULL"). The engine is
         // freed when a different model is selected/deleted via `unloadEngine()`.
-        status = .stopped
-        UIApplication.shared.isIdleTimerDisabled = false
-        log("Server stopped (model kept in memory for fast restart).")
+        guard let server = httpServer else {
+            log("Server stopped (model kept in memory for fast restart).")
+            return
+        }
+        guard !stopping else { return }
+        stopping = true
+        stopGeneration += 1
+        let generation = stopGeneration
+        log("Stopping server…")
+        // The drain runs off the main thread (LlamaHTTPServer.stop(completion:)),
+        // so a Stop during a cold prefill no longer freezes the UI.
+        server.stop { [weak self] in
+            guard let self, self.stopGeneration == generation else { return }
+            self.httpServer = nil
+            self.stopping = false
+            self.log("Server stopped (model kept in memory for fast restart).")
+        }
     }
 
     /// Frees the resident engine and its model memory. Call when switching away
     /// from the loaded model so it doesn't keep occupying the memory budget.
     private func unloadEngine() {
+        // This call owns the teardown now; a late async-stop completion must not
+        // touch the state it replaces.
+        stopGeneration += 1
+        stopping = false
+        // Blocking drain: the engine must be idle before its multi-GB Metal
+        // allocations are freed (and before the next model load).
         httpServer?.stop()
         httpServer = nil
         inference?.unload()
@@ -388,9 +415,9 @@ final class ServerViewModel: ObservableObject {
         FileLogger.shared.info(message)
     }
 
-    /// Called on the main thread by `FileLogger.onLine` for every emitted line.
+    /// Called on the main thread by `FileLogger.onLine` for each flushed batch.
     /// Bounded by `LogPanelSpec` so the panel's per-update layout cost stays flat.
-    private func appendLine(_ line: String) {
-        LogPanelSpec.append(line, to: &logs)
+    private func appendLines(_ lines: [String]) {
+        LogPanelSpec.append(contentsOf: lines, to: &logs)
     }
 }

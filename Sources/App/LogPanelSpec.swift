@@ -56,4 +56,12 @@ enum LogPanelSpec {
         lines.append(truncate(line))
         if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
     }
+
+    /// Append a display-ready batch to a bounded panel buffer. One trim for the
+    /// whole batch, which is how `FileLogger` mirrors a flush.
+    static func append(contentsOf newLines: [String], to lines: inout [String]) {
+        guard !newLines.isEmpty else { return }
+        lines.append(contentsOf: newLines.map(truncate))
+        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+    }
 }

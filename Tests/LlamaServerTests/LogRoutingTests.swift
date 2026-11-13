@@ -121,4 +121,16 @@ final class LogRoutingTests: XCTestCase {
         XCTAssertEqual(lines.count, 1)
         XCTAssertTrue(lines[0].contains("[+10 chars"))
     }
+
+    /// The mirror delivers a batch per flush; the batch must be capped and
+    /// truncated exactly like individual appends.
+    func testAppendContentsCapsAndTruncatesTheBatch() {
+        var lines: [String] = ["existing"]
+        let batch = (0..<(LogPanelSpec.maxLines + 3)).map { "line \($0)" }
+            + [String(repeating: "z", count: LogPanelSpec.maxLineLength + 7)]
+        LogPanelSpec.append(contentsOf: batch, to: &lines)
+        XCTAssertEqual(lines.count, LogPanelSpec.maxLines)
+        XCTAssertEqual(lines.last?.contains("[+7 chars"), true)
+        XCTAssertFalse(lines.contains("existing"), "oldest entries are dropped")
+    }
 }

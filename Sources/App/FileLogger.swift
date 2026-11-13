@@ -91,12 +91,11 @@ final class FileLogger {
     /// Every log file, for the Share sheet.
     var allFileURLs: [URL] { LogCategory.allCases.map(url(for:)) }
 
-    /// Called on the main thread for every BASIC line (error/warn/info) that
-    /// passes the level filter, with the fully formatted line. The UI sets this
-    /// to mirror the on-disk log live in the in-app panel. Debug/verbose lines
-    /// are never mirrored: they are payload-sized, and laying them out was what
-    /// made the panel the app's heaviest CPU consumer.
-    var onLine: ((String) -> Void)?
+    /// Called on the main thread with a batch of BASIC (error/warn/info) lines
+    /// that passed the level filter, fully formatted. The UI sets this to mirror
+    /// the on-disk log live in the in-app panel. Batching matters: one Task and
+    /// one SwiftUI invalidation per flushed batch instead of per line.
+    var onLine: (([String]) -> Void)?
 
     private let queue = DispatchQueue(label: "llamaserver.filelogger")
     private let maxBytes = 1_000_000          // rotate each file at ~1 MB
@@ -298,7 +297,7 @@ final class FileLogger {
             let batch = self.mirrorLines
             self.mirrorLines.removeAll(keepingCapacity: true)
             guard let onLine = self.onLine else { return }
-            DispatchQueue.main.async { batch.forEach(onLine) }
+            DispatchQueue.main.async { onLine(batch) }
         }
     }
 
@@ -306,22 +305,44 @@ final class FileLogger {
     /// non-payload files, oldest first — what the in-app panel shows. Debug and
     /// verbose lines are skipped (they are payload-sized and the panel does not
     /// render them), so this never feeds a huge line to text layout.
+    ///
+    /// Only each file's tail is read: the panel keeps `LogPanelSpec.maxLines`
+    /// (500), so reading a whole (up to 1 MB) log, splitting every line and
+    /// sorting all of them at launch was pure waste.
     func tailBasic(maxLines: Int = LogPanelSpec.maxLines) -> [String] {
-        queue.sync {
+        // Basic lines are ~100–200 bytes, so this covers well over `maxLines`.
+        let tailBytes = 256 * 1024
+        return queue.sync {
             syncToDisk()   // make buffered lines visible to the read
             var lines: [String] = []
             for category in [LogCategory.server, .inference] {
-                guard let text = try? String(contentsOf: url(for: category), encoding: .utf8) else { continue }
-                let basic = text.split(separator: "\n", omittingEmptySubsequences: true)
+                guard let tail = readTail(url(for: category), maxBytes: tailBytes) else { continue }
+                var parts = tail.text.split(separator: "\n", omittingEmptySubsequences: true)
+                // A tail read can start in the middle of a line; that fragment is
+                // not a real log line, so drop it before filtering.
+                if tail.startedMidLine, !parts.isEmpty { parts.removeFirst() }
+                lines.append(contentsOf: parts
                     .map(String.init)
                     .filter(LogPanelSpec.isBasic(line:))
-                lines.append(contentsOf: basic.suffix(maxLines))
+                    .suffix(maxLines))
             }
             // Every line starts with "[yyyy-MM-dd HH:mm:ss.SSS]", so a string
             // sort is a chronological merge of the two files.
             lines.sort()
             return Array(lines.suffix(maxLines))
         }
+    }
+
+    /// Last `maxBytes` of a file, plus whether the read began mid-line (so the
+    /// caller can drop the partial first line). nil when the file can't be read.
+    private func readTail(_ url: URL, maxBytes: Int) -> (text: String, startedMidLine: Bool)? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: start)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        return (String(decoding: data, as: UTF8.self), start > 0)
     }
 
     // MARK: - Fetching the files (GET /logs)
@@ -337,16 +358,18 @@ final class FileLogger {
     /// file. Buffered lines are flushed first so the caller sees everything that
     /// has been written, not just what the 1 s / 64 KB policy has synced.
     func snapshot(_ plan: LogFetchSpec.Plan) -> [LogFetchSpec.Chunk] {
-        queue.sync {
-            syncToDisk()
-            return plan.categories.map { category in
-                let backup = plan.includeBackups
-                    ? (try? String(contentsOf: backupURL(for: category), encoding: .utf8)) ?? ""
-                    : ""
-                let live = (try? String(contentsOf: url(for: category), encoding: .utf8)) ?? ""
-                return LogFetchSpec.chunk(name: category.fileName, backupText: backup,
-                                          liveText: live, plan: plan)
-            }
+        // Flush under the queue, then do the (potentially multi-MB) reads
+        // outside it. Holding the logger queue for the whole read stalled every
+        // write in the app; a line written concurrently is simply absent from
+        // this snapshot, which is the usual guarantee for a live file.
+        queue.sync { syncToDisk() }
+        return plan.categories.map { category in
+            let backup = plan.includeBackups
+                ? (try? String(contentsOf: backupURL(for: category), encoding: .utf8)) ?? ""
+                : ""
+            let live = (try? String(contentsOf: url(for: category), encoding: .utf8)) ?? ""
+            return LogFetchSpec.chunk(name: category.fileName, backupText: backup,
+                                      liveText: live, plan: plan)
         }
     }
 

@@ -177,6 +177,34 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertFalse(result.hasUnrecoveredEnvelope)
     }
 
+    // MARK: - parse (fast paths)
+
+    /// A plain answer with tools configured must take the early return: no
+    /// envelope regexes, and no encode/re-parse of every tool schema.
+    func testParsePlainTextWithToolsHasNoCalls() {
+        let tools = [tool("notes", ["path": ["type": "string"]])]
+        let result = ToolCallParser.parse("All done — nothing to call.", tools: tools)
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertFalse(result.hasUnrecoveredEnvelope)
+        XCTAssertEqual(result.cleanedContent, "All done — nothing to call.")
+    }
+
+    /// `<function=…>` without a `<tool_call>` opener is not a call, but it is a
+    /// fragment: the parser still strips it and reports it as unrecovered.
+    func testParseFunctionTagWithoutEnvelopeIsReported() {
+        let result = ToolCallParser.parse("oops <function=notes>")
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertFalse(result.cleanedContent.contains("<function="))
+        XCTAssertTrue(result.hasUnrecoveredEnvelope)
+    }
+
+    /// An unterminated `<think` is not a reasoning block; the fast-path guard
+    /// must not drop text merely because it starts with the tag name.
+    func testStripReasoningIncompleteTagPassesThrough() {
+        let text = "a <think b"
+        XCTAssertEqual(ToolCallParser.stripReasoning(text), text)
+    }
+
     // MARK: - parse (Qwen3.5 native XML)
 
     private let xmlCall = """

@@ -30,6 +30,9 @@ final class LlamaInference: @unchecked Sendable {
         /// The prompt leaves no room for a usable response (see
         /// `ContextHeadroom`); carries an actionable message for the client.
         case contextTooFull(String)
+        /// Generation was aborted because the server is shutting down. Not a
+        /// failure: callers should finish the response without an error.
+        case cancelled
 
         var errorDescription: String? {
             switch self {
@@ -40,6 +43,7 @@ final class LlamaInference: @unchecked Sendable {
             case .decode:                return "llama_decode failed: the Metal backend hit a GPU error and the engine context was reset. Retry the request."
             case .insufficientMemory(let m): return m
             case .contextTooFull(let m):    return m
+            case .cancelled:                return "Generation was cancelled because the server is stopping."
             }
         }
     }
@@ -980,6 +984,18 @@ final class LlamaInference: @unchecked Sendable {
     /// Tracks whether the native model/context have already been freed so we
     /// never double-free (which would crash). Set by `unload()`.
     private var isUnloaded = false
+
+    /// Set by `LlamaHTTPServer` when it is shutting down. Checked between prompt
+    /// chunks and MTP rounds so a Stop is bounded by one chunk instead of the
+    /// rest of a cold prefill (a 24k-token prompt is ~78 s, docs/PERFORMANCE.md).
+    private let cancellationRequested = OSAllocatedUnfairLock(initialState: false)
+
+    /// Ask an in-flight `generate` to abort at its next safe boundary.
+    func requestCancellation() { cancellationRequested.withLock { $0 = true } }
+    /// Clear a previous shutdown request before serving again.
+    func clearCancellation() { cancellationRequested.withLock { $0 = false } }
+    private var isCancellationRequested: Bool { cancellationRequested.withLock { $0 } }
+
     /// Whether `context` currently points at a live llama_context. Set false the
     /// instant `recreateContext()` frees the old context, and back to true only
     /// after a new one is successfully created. If re-creation fails, this stays
@@ -1448,6 +1464,13 @@ final class LlamaInference: @unchecked Sendable {
             throw InferenceError.contextInit
         }
 
+        // The server is stopping: don't spend seconds tokenizing a prompt whose
+        // decode is about to be cancelled anyway.
+        if isCancellationRequested {
+            FileLogger.shared.debug("generate: cancelled before tokenize (server stopping)")
+            throw InferenceError.cancelled
+        }
+
         let promptTokens = try tokenize(prompt, addBOS: true)
         guard !promptTokens.isEmpty else { throw InferenceError.tokenize }
 
@@ -1607,10 +1630,17 @@ final class LlamaInference: @unchecked Sendable {
         // (partial prompt decode and/or partial generation).  Invalidate the
         // tracking so the next call always clears the cache and starts fresh.
         var generationSucceeded = false
+        // Distinguishes a shutdown abort (expected, logged at debug) from a real
+        // failure (logged as an error) in the defer below.
+        var cancelledForShutdown = false
         defer {
             if !generationSucceeded {
                 if cachedTokenCount > 0 || !cachedTokenIds.isEmpty {
-                    FileLogger.shared.error("generation failed — cache tracking invalidated")
+                    if cancelledForShutdown {
+                        FileLogger.shared.debug("generation cancelled by shutdown — cache tracking invalidated")
+                    } else {
+                        FileLogger.shared.error("generation failed — cache tracking invalidated")
+                    }
                 }
                 cachedTokenCount = 0
                 cachedTokenIds = []
@@ -1687,6 +1717,15 @@ final class LlamaInference: @unchecked Sendable {
         func decodeRange(_ lo: Int, _ hi: Int) throws {
             var off = lo
             while off < hi {
+                // Shutdown check BETWEEN chunks: a single llama_decode cannot be
+                // interrupted, but the caller's queue drain must not wait for the
+                // whole prompt. Cache tracking is invalidated by the defer above,
+                // and the next turn trims any partially-decoded suffix.
+                if isCancellationRequested {
+                    cancelledForShutdown = true
+                    FileLogger.shared.debug("prompt decode cancelled at \(off)/\(hi) (server stopping)")
+                    throw InferenceError.cancelled
+                }
                 let count = min(batchSize, hi - off)
                 let status = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
                     let chunk = buf.baseAddress!.advanced(by: off)
@@ -2044,6 +2083,7 @@ final class LlamaInference: @unchecked Sendable {
                 genTokens += 1
                 if consumeToken(idLast) {
                     while generated < limit {
+                        if isCancellationRequested { finishReason = "stopped"; break }
                         if Int(nextPos) + mtpMaxDraft + 1 >= contextSize { finishReason = "context_full"; break }
                         genTokens += 1
                         let roundStart = CFAbsoluteTimeGetCurrent()
@@ -2344,6 +2384,7 @@ final class LlamaInference: @unchecked Sendable {
         } else {
         var plainStats = PlainStepStats()
         while generated < limit {
+            if isCancellationRequested { finishReason = "stopped"; break }
             let nCtxUsed = promptTokens.count + generated
             if nCtxUsed >= contextSize { finishReason = "context_full"; break }
 
