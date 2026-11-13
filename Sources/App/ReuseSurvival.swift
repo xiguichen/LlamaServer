@@ -34,6 +34,22 @@ enum ReuseSurvival {
         return true
     }
 
+    /// Whether the per-turn hybrid/recurrent snapshot save is needed.
+    ///
+    /// Hybrid models cannot trim a KV suffix, so their snapshot is the fallback
+    /// when the live cache is not a prefix of the new prompt (a client that
+    /// replayed transformed assistant text, or a bounds-guard failure). It is
+    /// also the only state that survives a periodic `recreateContext()`.
+    ///
+    /// When the live cache *was* reused, the snapshot would only be needed for
+    /// the next recreate, and `recreateDue` already says whether that is now.
+    /// Skipping it otherwise removes the measured ~1.2 s / 664–897 MB write per
+    /// turn (`docs/PERFORMANCE.md`, "Snapshot cost") from the common agent loop.
+    static func hybridSnapshotSaveNeeded(recreateDue: Bool,
+                                         liveCacheReused: Bool) -> Bool {
+        recreateDue || !liveCacheReused
+    }
+
     /// Whether `recreateContext()` must serialize the live KV cache to disk
     /// before freeing it.
     ///

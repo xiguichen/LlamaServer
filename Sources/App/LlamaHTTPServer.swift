@@ -826,7 +826,8 @@ final class LlamaHTTPServer {
                 }
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
-                                                params: samplingParams) { text in
+                                                params: samplingParams,
+                                                recreateDueAfterGeneration: self.recreateTracker.recreateDueAfterNextGeneration) { text in
                     generatedTokens += 1
                     let now = CFAbsoluteTimeGetCurrent()
                     if now - lastTokenTime >= 10 {
@@ -1137,7 +1138,8 @@ final class LlamaHTTPServer {
                 }
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
-                                                params: samplingParams)
+                                                params: samplingParams,
+                                                recreateDueAfterGeneration: recreateTracker.recreateDueAfterNextGeneration)
             } catch {
                 failure = error
             }
@@ -1323,7 +1325,8 @@ final class LlamaHTTPServer {
             do {
                 result = try inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
-                                                params: samplingParams)
+                                                params: samplingParams,
+                                                recreateDueAfterGeneration: recreateTracker.recreateDueAfterNextGeneration)
             } catch {
                 failure = error
             }

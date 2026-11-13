@@ -40,6 +40,26 @@ final class ReuseSurvivalTests: XCTestCase {
                        "hybrid already saves its snapshot during generation")
     }
 
+    // MARK: - Per-turn hybrid snapshot save
+
+    func testHybridSnapshotSkippedWhenLiveCacheReusedAndNoRecreate() {
+        XCTAssertFalse(ReuseSurvival.hybridSnapshotSaveNeeded(recreateDue: false,
+                                                              liveCacheReused: true),
+                       "the live cache already carries the prefix; the snapshot is only a fallback")
+    }
+
+    func testHybridSnapshotSavedWhenRecreateIsDue() {
+        XCTAssertTrue(ReuseSurvival.hybridSnapshotSaveNeeded(recreateDue: true,
+                                                             liveCacheReused: true),
+                      "the recreate destroys the live cache; the snapshot is the only survivor")
+    }
+
+    func testHybridSnapshotSavedWhenLiveCacheWasNotReused() {
+        XCTAssertTrue(ReuseSurvival.hybridSnapshotSaveNeeded(recreateDue: false,
+                                                             liveCacheReused: false),
+                      "the snapshot is the active reuse path (diverged prompt, cleared cache, or cold start), so refresh it")
+    }
+
     // MARK: - Live hybrid prefix reuse
 
     func testHybridLiveCacheReusedWhenItIsAStrictPromptPrefix() {

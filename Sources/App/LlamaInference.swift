@@ -1423,6 +1423,7 @@ final class LlamaInference: @unchecked Sendable {
     func generate(prompt: String,
                   maxTokens: Int,
                   params: SamplingParams,
+                  recreateDueAfterGeneration: Bool = false,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
         var retriesSoFar = 0
         // Count what the caller has already been handed, so a retry can never
@@ -1437,7 +1438,9 @@ final class LlamaInference: @unchecked Sendable {
         while true {
             do {
                 return try generateOnce(prompt: prompt, maxTokens: maxTokens,
-                                        params: params, onToken: countedOnToken)
+                                        params: params,
+                                        recreateDueAfterGeneration: recreateDueAfterGeneration,
+                                        onToken: countedOnToken)
             } catch {
                 guard DecodeRetry.shouldRetry(isDecodeFailure: Self.isRecoverableDecodeFailure(error),
                                               retriesSoFar: retriesSoFar,
@@ -1455,6 +1458,7 @@ final class LlamaInference: @unchecked Sendable {
     private func generateOnce(prompt: String,
                   maxTokens: Int,
                   params: SamplingParams,
+                  recreateDueAfterGeneration: Bool,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
 
         // A prior recreateContext() may have failed and left no live context.
@@ -1495,6 +1499,11 @@ final class LlamaInference: @unchecked Sendable {
         // turning a multi-second prompt decode into a near-instant one. Upstream
         // llama-server uses the same common-prefix + seq_rm strategy.
         var reuseLen = 0
+        // True when the hybrid cache itself (not the on-disk snapshot) already
+        // holds the prompt prefix. When it does and no recreate is due, the
+        // per-turn snapshot save is unnecessary — see
+        // `ReuseSurvival.hybridSnapshotSaveNeeded`.
+        var didReuseLiveCache = false
         // A recreated context has a genuinely empty KV cache even though
         // `cachedTokenIds` may still be populated (it survived the recreate).
         // Track whether the live cache actually holds anything so we don't
@@ -1516,6 +1525,7 @@ final class LlamaInference: @unchecked Sendable {
                     seqPosMin: Int(llama_memory_seq_pos_min(memory, 0)),
                     seqPosMax: Int(llama_memory_seq_pos_max(memory, 0))) {
                     reuseLen = liveLen
+                    didReuseLiveCache = true
                     FileLogger.shared.debug("KV live cache reused fully (hybrid, \(reuseLen) tokens, prompt \(promptTokens.count))")
                 } else {
                     reuseLen = restorePromptSnapshot(for: promptTokens, memory: memory)
@@ -1793,16 +1803,30 @@ final class LlamaInference: @unchecked Sendable {
             // so a snapshot that includes it is never a prefix of the next prompt
             // (its last few tokens always diverge) and is thus useless. Snapshot
             // the stable prefix instead, BEFORE generation advances the state.
+            //
+            // The write is large (~664–897 MB / ~1.2 s per turn on device), so it
+            // only runs when the snapshot is actually needed: a recreate is due
+            // after this generation, or the live cache was not a prefix (so the
+            // snapshot is the active reuse path). A normal live-cache turn skips
+            // it; the previous blob stays on disk as the fallback.
+            let saveSnapshot = ReuseSurvival.hybridSnapshotSaveNeeded(
+                recreateDue: recreateDueAfterGeneration,
+                liveCacheReused: didReuseLiveCache)
             let stableLen = max(reuseLen, min(total, stablePrefixLength(prompt: prompt, promptTokens: promptTokens)))
             try decodeRange(reuseLen, stableLen)
             if stableLen > 0 && stableLen < total {
-                savePromptSnapshot(Array(promptTokens[0..<stableLen]))
+                if saveSnapshot {
+                    savePromptSnapshot(Array(promptTokens[0..<stableLen]))
+                }
             }
             try decodeRange(stableLen, total)
             if stableLen >= total {
                 // No primer boundary found — fall back to snapshotting the whole
                 // prompt (behaviour as before; may simply be unusable next turn).
-                savePromptSnapshot(promptTokens)
+                if saveSnapshot { savePromptSnapshot(promptTokens) }
+            }
+            if !saveSnapshot {
+                FileLogger.shared.debug("KV snapshot save skipped (live cache reused, no recreate due)")
             }
         } else {
             try decodeRange(reuseLen, total)

@@ -2,12 +2,14 @@
 
 Status: **target preservation implemented 2026-11-12; paired on-device A/B still
 required before quoting a gain.** The pure bookkeeping is `Sources/App/MtpKVPlan.swift`
-(tests in `Tests/LlamaServerTests/MtpKVPlanTests.swift`). The per-turn
-stable-prefix snapshot is **kept** as the fallback: a client that replays
-transformed assistant text (reasoning stripped, tool envelopes re-rendered) may
-not match the raw generated tokens, and the snapshot is what preserves reuse
-across that divergence. Numbers live in `docs/PERFORMANCE.md`; this file only
-defines the invariant and the tests.
+(tests in `Tests/LlamaServerTests/MtpKVPlanTests.swift`). The stable-prefix
+snapshot is **kept** as the fallback: a client that replays transformed assistant
+text (reasoning stripped, tool envelopes re-rendered) may not match the raw
+generated tokens, and the snapshot is what preserves reuse across that
+divergence. It is now written only when a recreate is due or the live cache was
+not reusable (`ReuseSurvival.hybridSnapshotSaveNeeded`), rather than every turn;
+the previous blob remains a valid (shorter) fallback prefix. Numbers live in
+`docs/PERFORMANCE.md`; this file only defines the invariant and the tests.
 
 ## Problem
 

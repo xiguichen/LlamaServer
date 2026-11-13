@@ -13,7 +13,8 @@ detail in `AGENTS.md`.
   (`ReuseSurvival`). Before freeing a dense model's context, `recreateContext()`
   serializes its live KV state to the same on-disk blob the hybrid path uses,
   then clears `cachedTokenIds`; the next turn restores from disk instead of
-  re-decoding the whole prompt. Hybrid snapshots were already saved per turn.
+  re-decoding the whole prompt. Hybrid snapshots are written on a recreate turn
+  or when the live cache was not reusable (see below).
   A recreate triggered by a mid-generation decode failure skips this capture:
   `cachedTokenIds` is only updated after a successful generation, so the live
   KV would no longer match it.
@@ -28,17 +29,21 @@ detail in `AGENTS.md`.
   and decodes only the suffix. This is real reuse:
   `KV snapshot restored (48337 tokens, prompt 48450); decoding 113 new`.
 - The snapshot is not free (size and per-turn write cost are measured in
-  `docs/PERFORMANCE.md`). The next turn re-decodes the previous turn's
-  generation (the snapshot is the *stable* prefix, taken before generation).
+  `docs/PERFORMANCE.md`). It is taken at the *stable* prefix, before generation,
+  so the next turn re-decodes the previous turn's generation.
+- The write is skipped when the live cache already held the whole prompt prefix
+  and no recreate is due (`ReuseSurvival.hybridSnapshotSaveNeeded`). It is
+  refreshed on a recreate turn and whenever the live cache could not be reused
+  (a transformed replay, a cleared cache, or a cold start), so the fallback stays
+  current for the clients that need it.
 - The MTP path **publishes its resident target prefix** after a normal
   generation (`MtpKVPlan` + the live `seq_pos_min`/`seq_pos_max` guard), so the
-  next turn reuses the live KV instead of restoring the snapshot. The per-turn
-  snapshot is still written and remains the fallback: clients that
-  replay transformed assistant text (reasoning stripped, tool envelopes
-  re-rendered) may not match the raw generated tokens, and any abnormal exit or
-  guard mismatch clears both caches as before. Invariant, trim rule,
-  draft-context consequences, and the required paired A/B are in
-  [`docs/MTP-KV-REUSE.md`](MTP-KV-REUSE.md).
+  next turn reuses the live KV instead of restoring the snapshot. The snapshot
+  remains the fallback: clients that replay transformed assistant text
+  (reasoning stripped, tool envelopes re-rendered) may not match the raw
+  generated tokens, and any abnormal exit or guard mismatch clears both caches
+  as before. Invariant, trim rule, draft-context consequences, and the required
+  paired A/B are in [`docs/MTP-KV-REUSE.md`](MTP-KV-REUSE.md).
 
 ## MTP (Multi-Token Prediction)
 

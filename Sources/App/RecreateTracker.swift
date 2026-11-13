@@ -19,6 +19,13 @@ struct RecreateTracker {
     let threshold: Int
     private(set) var count = 0
 
+    /// Whether the next successful generation would make a recreate due,
+    /// without consuming the counter. Callers pass this to the engine so the
+    /// hybrid prompt-state snapshot is refreshed on the turn whose KV cache
+    /// must survive that recreate — instead of writing a multi-hundred-MB
+    /// blob every turn (docs/PERFORMANCE.md, "Snapshot cost").
+    var recreateDueAfterNextGeneration: Bool { count + 1 >= threshold }
+
     /// Call once per completed (successful) generation.
     /// Returns true when a periodic recreate is now due; the counter is held
     /// until `recreateFinished` confirms the attempt.

@@ -265,19 +265,24 @@ across the recreate by `ReuseSurvival`.
 
 ### Snapshot cost (per turn)
 
-Every turn saves a prompt-state snapshot and the next turn loads it back:
-**664 MB at 31.8k tokens → 897 MB at 48.4k tokens** (~1.2 s/turn fixed cost,
-visible on small turns where 66 new tokens still took 1.45 s). It is written to
-`NSTemporaryDirectory()` and is needed (a) across a recreate and (b) when the MTP
-path cannot publish its live target KV (abnormal exit or bounds-guard mismatch).
-The MTP path now keeps the live target when the bookkeeping agrees with
-`seq_pos_min`/`seq_pos_max` (`docs/MTP-KV-REUSE.md`), so the **next turn's
-snapshot restore** is skipped when that live cache is a prefix. The per-turn
-**save still runs** (it is the fallback for clients that replay transformed
-assistant text); removing the save is the separate "save only when a recreate is
-due" follow-up. **The per-turn snapshot cost above was measured before the
+Before the save-skip change, every hybrid turn saved a prompt-state snapshot and
+the next turn loaded it back: **664 MB at 31.8k tokens → 897 MB at 48.4k tokens**
+(~1.2 s/turn fixed cost, visible on small turns where 66 new tokens still took
+1.45 s). It is written to `NSTemporaryDirectory()` and is needed (a) across a
+recreate and (b) when the live cache cannot be reused (a transformed replay, an
+abnormal exit, or a bounds-guard mismatch). The MTP path now keeps the live
+target when the bookkeeping agrees with `seq_pos_min`/`seq_pos_max`
+(`docs/MTP-KV-REUSE.md`), so the **next turn's snapshot restore** is skipped when
+that live cache is a prefix.
+
+**Save policy (implemented, not yet measured):** the hybrid save is skipped when
+the live cache held the prompt prefix and no recreate is due; it still runs on
+the recreate turn and whenever the live cache could not be reused
+(`ReuseSurvival.hybridSnapshotSaveNeeded`). The previous blob stays on disk as
+the fallback. **The per-turn snapshot cost above was measured before the
 preservation change** — the paired on-device A/B to quantify the removed restore
-is still open (question 3). This file remains the source of numbers.
+and the skipped writes is still open (question 3). This file remains the source
+of numbers.
 
 ### 262,144 context: what it costs
 
@@ -293,9 +298,9 @@ Measured on device:
 
 KV at the full window: **4,352 MiB** for q8_0 (17,408 B/token) and **2,304 MiB**
 for q4_0 (9,216 B/token charged). Coherence at 256K is unmeasured (open
-question 5), and the per-turn snapshot extrapolates to ~4 GB of writes at the
-full window (open question 3) — measure both before using the long end in
-anger.
+question 5), and a snapshot write (when the save policy runs) extrapolates to
+~4 GB at the full window (open question 3) — measure both before using the long
+end in anger.
 
 ## Stability: a GPU reset invalidates a run
 
@@ -345,12 +350,12 @@ record.
 3. **Snapshot round-trip removal** — the MTP path now keeps the live target KV
    when the resident-prefix bookkeeping passes the bounds guard
    (`docs/MTP-KV-REUSE.md`), so the next turn restores no snapshot when that
-   live cache is a prefix. The per-turn **save still runs** as the fallback.
+   live cache is a prefix. The hybrid save now runs only when a recreate is due
+   or the live cache was not reusable (`ReuseSurvival.hybridSnapshotSaveNeeded`).
    **Implemented but not yet measured**: the only existing snapshot number is the
    pre-change ~1.2 s / 664–897 MB per turn, so do not claim a gain until a
    paired A/B records `prefill=` reuse, `MTP stats` `no-draft` rate, and
-   `KV snapshot` lines with and without preservation. Skipping the save except
-   when `RecreateTracker` says a recreate is due is a separate follow-up.
+   `KV snapshot` lines with and without preservation/save-skip.
 4. **Is the verify pass bandwidth-bound or compute-bound?** ~3.3 GB of traffic
    per 164 ms round ≈ 20 GB/s — far below the SoC's peak, so attention compute
    or kernel overhead is likely involved. Needs a profiler.

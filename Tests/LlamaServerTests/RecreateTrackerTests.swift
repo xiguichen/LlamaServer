@@ -42,4 +42,30 @@ final class RecreateTrackerTests: XCTestCase {
         tracker.recreateFinished(success: true)
         XCTAssertTrue(tracker.record())
     }
+
+    func testNextGenerationDuePredicateMatchesRecord() {
+        var tracker = RecreateTracker(threshold: 3)
+        XCTAssertFalse(tracker.recreateDueAfterNextGeneration)
+        for gen in 1...2 {
+            XCTAssertFalse(tracker.recreateDueAfterNextGeneration,
+                           "generation \(gen) is not due")
+            XCTAssertFalse(tracker.record())
+        }
+        XCTAssertTrue(tracker.recreateDueAfterNextGeneration,
+                      "the third generation is the recreate turn")
+        XCTAssertTrue(tracker.record())
+        tracker.recreateFinished(success: true)
+        XCTAssertFalse(tracker.recreateDueAfterNextGeneration,
+                       "a successful recreate restarts the cadence")
+    }
+
+    func testNextGenerationDuePredicateAfterFailedRecreate() {
+        var tracker = RecreateTracker(threshold: 3)
+        for _ in 1...2 { _ = tracker.record() }
+        XCTAssertTrue(tracker.recreateDueAfterNextGeneration)
+        XCTAssertTrue(tracker.record())
+        tracker.recreateFinished(success: false)
+        XCTAssertTrue(tracker.recreateDueAfterNextGeneration,
+                      "a failed recreate retries on the next generation")
+    }
 }
