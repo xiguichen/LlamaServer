@@ -1,14 +1,15 @@
 # MTP target-KV reuse (design + test plan)
 
-Status: **target preservation implemented 2026-11-12; paired on-device A/B still
-required before quoting a gain.** The pure bookkeeping is `Sources/App/MtpKVPlan.swift`
-(tests in `Tests/LlamaServerTests/MtpKVPlanTests.swift`). The stable-prefix
-snapshot is **kept** as the fallback: a client that replays transformed assistant
-text (reasoning stripped, tool envelopes re-rendered) may not match the raw
-generated tokens, and the snapshot is what preserves reuse across that
-divergence. It is now written only when a recreate is due or the live cache was
-not reusable (`ReuseSurvival.hybridSnapshotSaveNeeded`), rather than every turn;
-the previous blob remains a valid (shorter) fallback prefix. Numbers live in
+Status: **target preservation implemented 2026-11-12; hybrid full-attention
+bounds fix implemented 2026-11-14; paired on-device A/B still required before
+quoting a gain.** The pure bookkeeping is `Sources/App/MtpKVPlan.swift` (tests in
+`Tests/LlamaServerTests/MtpKVPlanTests.swift`). The stable-prefix snapshot is
+**kept** as the fallback: a client that replays transformed assistant text
+(reasoning stripped, tool envelopes re-rendered) may not match the raw generated
+tokens, and the snapshot is what preserves reuse across that divergence. It is
+now written only when a recreate is due or the live cache was not reusable
+(`ReuseSurvival.hybridSnapshotSaveNeeded`), rather than every turn; the previous
+blob remains a valid (shorter) fallback prefix. Numbers live in
 `docs/PERFORMANCE.md`; this file only defines the invariant and the tests.
 
 ## Problem
@@ -119,13 +120,24 @@ live sequence bounds:
 ```swift
 let posMin = Int(llama_memory_seq_pos_min(memory, 0))
 let posMax = Int(llama_memory_seq_pos_max(memory, 0))
-guard posMin == 0, posMax + 1 == residentTokenCount else { clear; return }
+guard MtpKVPlan.boundsMatch(posMin: posMin, posMax: posMax,
+                            resident: residentTokenCount,
+                            hybridFullAttention: isHybrid && nSwa == 0) else {
+    clear; return
+}
 ```
 
-If a model/cache type reports bounds differently (recurrent/hybrid), the guard
-fails and the old clear path runs — correctness is preserved, only the
-optimisation is lost. Log the mismatch at `.warn` so a device run shows which
-cache types cannot use it.
+For a dense cache `boundsMatch` still requires `posMin == 0` and
+`posMax + 1 == resident`. A hybrid cache reports
+`posMin = max(attention_min, recurrent_min)` and
+`posMax = min(attention_max, recurrent_max)`; its recurrent component only
+keeps the tail, so `posMin > 0` is normal even when every attention row from 0
+is resident. When the model's attention layers are full (`n_swa == 0`, logged
+as `swa_window 0`), the attention component cannot evict the front within the
+context, so the guard checks only `posMax + 1 == resident`. A hybrid model with
+a sliding window keeps the strict check and falls back to the old clear path —
+correctness is preserved, only the optimisation is lost. Log any mismatch at
+`.warn` so a device run shows which cache types cannot use it.
 
 The same guard also protects **dense reuse in general**: when computing `lcp`
 from `cachedTokenIds`, the code clamps it to `MtpKVPlan.liveResidentCount`

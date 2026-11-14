@@ -49,8 +49,18 @@ enum MtpKVPlan {
     /// ends where the bookkeeping says it does. A cache type that reports
     /// different bounds fails the guard and the caller falls back to the old
     /// clear path — correctness is preserved, only the optimisation is lost.
-    static func boundsMatch(posMin: Int, posMax: Int, resident: Int) -> Bool {
-        posMin == 0 && posMax + 1 == resident
+    ///
+    /// `hybridFullAttention` is for a hybrid cache whose attention layers are
+    /// full (model `n_swa == 0`). Its `seq_pos_min` is the *maximum* of the
+    /// attention and recurrent minima; the recurrent component only holds its
+    /// tail, so `posMin > 0` even when every attention row from 0 is resident.
+    /// With no sliding window the attention component cannot evict the front
+    /// within the context, so the end bound is the meaningful check. Hybrid
+    /// models with a sliding window keep the strict check.
+    static func boundsMatch(posMin: Int, posMax: Int, resident: Int,
+                            hybridFullAttention: Bool = false) -> Bool {
+        guard posMax + 1 == resident else { return false }
+        return hybridFullAttention || posMin == 0
     }
 
     /// The tracked prefix the live cache can actually serve: the sequence length

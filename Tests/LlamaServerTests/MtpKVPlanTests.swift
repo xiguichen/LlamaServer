@@ -81,6 +81,23 @@ final class MtpKVPlanTests: XCTestCase {
                        "cache longer than the tracked prefix")
     }
 
+    func testHybridFullAttentionIgnoresRecurrentPosMin() {
+        // A hybrid cache reports max(attention_min, recurrent_min). With full
+        // attention the attention min is 0, but the recurrent tail makes the
+        // combined min > 0. That is normal, not an evicted prefix.
+        XCTAssertTrue(MtpKVPlan.boundsMatch(posMin: 41, posMax: 41, resident: 42,
+                                            hybridFullAttention: true))
+        XCTAssertFalse(MtpKVPlan.boundsMatch(posMin: 41, posMax: 40, resident: 42,
+                                             hybridFullAttention: true),
+                       "the end bound must still match the tracked prefix")
+    }
+
+    func testHybridWithSlidingWindowKeepsStrictFrontGuard() {
+        XCTAssertFalse(MtpKVPlan.boundsMatch(posMin: 41, posMax: 41, resident: 42,
+                                             hybridFullAttention: false),
+                       "a hybrid model with SWA can evict the front; posMin must be 0")
+    }
+
     func testLiveResidentCountClampsToBoundsAndRejectsEvictedFront() {
         XCTAssertEqual(MtpKVPlan.liveResidentCount(posMin: 0, posMax: 101), 102)
         XCTAssertEqual(MtpKVPlan.liveResidentCount(posMin: 0, posMax: -1), 0,

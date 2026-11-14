@@ -77,6 +77,14 @@ enum ReuseSurvival {
     /// `cachedTokenIds` says it does). At least one prompt token must remain to
     /// decode so the forward pass yields fresh logits.
     ///
+    /// `hybridFullAttention` handles the hybrid-cache quirk: `seq_pos_min` is
+    /// the maximum of the attention and recurrent minima, and the recurrent
+    /// component reports its tail — so it is > 0 even when the attention rows
+    /// from 0 are all resident. When the model has no sliding window
+    /// (`n_swa == 0`) the attention component cannot evict the front within the
+    /// context, so only the end bound is meaningful. See
+    /// `MtpKVPlan.boundsMatch` for the same rule on the publish side.
+    ///
     /// Token ids are `Int32` (llama_token's underlying type) so this file stays
     /// free of the llama module, like the other pure specs compiled into tests.
     ///
@@ -86,9 +94,12 @@ enum ReuseSurvival {
     static func liveHybridReuseLen(cachedTokens: [Int32],
                                    promptTokens: [Int32],
                                    seqPosMin: Int,
-                                   seqPosMax: Int) -> Int? {
+                                   seqPosMax: Int,
+                                   hybridFullAttention: Bool = false) -> Int? {
         guard !cachedTokens.isEmpty, cachedTokens.count < promptTokens.count else { return nil }
-        guard seqPosMin == 0, seqPosMax + 1 == cachedTokens.count else { return nil }
+        let boundsMatch = seqPosMax + 1 == cachedTokens.count
+            && (hybridFullAttention || seqPosMin == 0)
+        guard boundsMatch else { return nil }
         guard zip(cachedTokens, promptTokens).allSatisfy({ $0.0 == $0.1 }) else { return nil }
         return cachedTokens.count
     }

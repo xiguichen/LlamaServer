@@ -122,6 +122,15 @@ final class LlamaInference: @unchecked Sendable {
     /// logging a warning for) a removal that can never succeed.
     private var supportsPartialCacheReuse = true
 
+    /// True when the model is hybrid (recurrent + attention layers) and its
+    /// attention layers are full (model `n_swa == 0`). In that case the hybrid
+    /// memory's `seq_pos_min` is the recurrent tail — `posMin > 0` is normal,
+    /// not proof of an evicted prefix — and the attention rows from 0 cannot be
+    /// evicted within the context. The publish and live-reuse guards then check
+    /// only the end bound. Hybrid models with a sliding window keep the strict
+    /// guard (`MtpKVPlan.boundsMatch`, `ReuseSurvival.liveHybridReuseLen`).
+    private var hybridFullAttention = false
+
     /// The model's GGUF chat template (raw Jinja), set once after load. The
     /// server reads it to pick the tool wire-format (`ToolWireFormat.detect`)
     /// so it can emulate the template's `tools` branch.
@@ -626,7 +635,8 @@ final class LlamaInference: @unchecked Sendable {
         let isRecurrent = llama_model_is_recurrent(loadedModel)
         let isHybrid = llama_model_is_hybrid(loadedModel)
         let canShift = (llama_get_memory(ctx).map { llama_memory_can_shift($0) }) ?? false
-        FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), can_shift \(canShift)]")
+        self.hybridFullAttention = isHybrid && nSwa == 0
+        FileLogger.shared.info("context ready (\(effective) tokens) [recurrent \(isRecurrent), hybrid \(isHybrid), hybrid_full_attn \(self.hybridFullAttention), can_shift \(canShift)]")
         // Use the authoritative can_shift flag instead of inferring from model
         // type: hybrid/recurrent caches can't partially drop a suffix, and even
         // some pure-attention architectures may have immovable cache state.
@@ -1523,7 +1533,8 @@ final class LlamaInference: @unchecked Sendable {
                     cachedTokens: cachedTokenIds,
                     promptTokens: promptTokens,
                     seqPosMin: Int(llama_memory_seq_pos_min(memory, 0)),
-                    seqPosMax: Int(llama_memory_seq_pos_max(memory, 0))) {
+                    seqPosMax: Int(llama_memory_seq_pos_max(memory, 0)),
+                    hybridFullAttention: hybridFullAttention) {
                     reuseLen = liveLen
                     didReuseLiveCache = true
                     FileLogger.shared.debug("KV live cache reused fully (hybrid, \(reuseLen) tokens, prompt \(promptTokens.count))")
@@ -2309,7 +2320,12 @@ final class LlamaInference: @unchecked Sendable {
                         // Roll back rejected drafts from BOTH contexts (rows
                         // beyond what was emitted; rollback distance <=
                         // mtpMaxDraft -> cheap RS seq_rm on the hybrid target).
-                        if let rb = step.rollbackPos {
+                        // When the emit loop stopped early, the trim below uses a
+                        // *smaller* position and subsumes this one. Do only one
+                        // trim: the recurrent rollback is single-use (`rs_idx`),
+                        // so a second seq_rm in the same round fails and leaves
+                        // the rejected rows resident.
+                        if let rb = step.rollbackPos, !stopped {
                             if let mem = llama_get_memory(context) {
                                 _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
                             }
@@ -2410,7 +2426,8 @@ final class LlamaInference: @unchecked Sendable {
                                                 resident: mtpResidentCount)
                 preserved = mtpResidentPublishable
                     && MtpKVPlan.boundsMatch(posMin: posMin, posMax: posMax,
-                                             resident: mtpResidentCount)
+                                             resident: mtpResidentCount,
+                                             hybridFullAttention: hybridFullAttention)
                     && ids != nil
                 if preserved {
                     mtpPublishedIds = ids

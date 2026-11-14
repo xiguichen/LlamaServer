@@ -37,9 +37,11 @@ detail in `AGENTS.md`.
   (a transformed replay, a cleared cache, or a cold start), so the fallback stays
   current for the clients that need it.
 - The MTP path **publishes its resident target prefix** after a normal
-  generation (`MtpKVPlan` + the live `seq_pos_min`/`seq_pos_max` guard), so the
-  next turn reuses the live KV instead of restoring the snapshot. The snapshot
-  remains the fallback: clients that replay transformed assistant text
+  generation (`MtpKVPlan` + the live sequence-bounds guard), so the next turn
+  reuses the live KV instead of restoring the snapshot. For a hybrid model with
+  full attention (`n_swa == 0`) the guard checks only the end bound: the hybrid
+  `seq_pos_min` is the recurrent tail, not an evicted attention front. The
+  snapshot remains the fallback: clients that replay transformed assistant text
   (reasoning stripped, tool envelopes re-rendered) may not match the raw
   generated tokens, and any abnormal exit or guard mismatch clears both caches
   as before. Invariant, trim rule, draft-context consequences, and the required
@@ -113,10 +115,18 @@ bookkeeping agrees with the live sequence:
   (`MtpKVPlan.committedResident` / `fallbackStopResident`).
 - A stop string, token limit, or client cancel trims both contexts to
   `nextPos + actualEmitted` even when `rollbackPos` is nil, because
-  `rollbackPos` only drops whole unaccepted rows.
-- Before publishing, `MtpKVPlan.boundsMatch` requires `seq_pos_min == 0` and
-  `seq_pos_max + 1 == resident`. A sampler error is never publishable (the
-  decision was not committed). Any failure falls back to
+  `rollbackPos` only drops whole unaccepted rows. When the emit loop stopped
+  early, only that trim runs: the smaller trim subsumes `rollbackPos`, and the
+  recurrent rollback is single-use, so a second `seq_rm` in the same round
+  would fail and leave rejected rows resident.
+- Before publishing, `MtpKVPlan.boundsMatch` requires
+  `seq_pos_max + 1 == resident`, and `seq_pos_min == 0` unless the model is a
+  full-attention hybrid (`n_swa == 0`). For that model the hybrid
+  `seq_pos_min` is the maximum of the attention and recurrent minima, and the
+  recurrent component reports its tail, so `posMin > 0` is normal. With full
+  attention the attention rows from 0 cannot be evicted within the context, so
+  the end bound is the meaningful check. A sampler error is never publishable
+  (the decision was not committed). Any failure falls back to
   `llama_memory_clear(mem, false)` and `cachedTokenIds = []`.
 - The draft is cleared only when the target is cleared (shared-memory case);
   with its own memory it is retained and trimmed at the next prompt start.

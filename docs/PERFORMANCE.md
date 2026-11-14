@@ -284,6 +284,19 @@ preservation change** — the paired on-device A/B to quantify the removed resto
 and the skipped writes is still open (question 3). This file remains the source
 of numbers.
 
+**Hybrid bounds fix (implemented 2026-11-14, not yet measured):** on the deployed
+4B hybrid model every generation was clearing the target cache because
+`seq_pos_min` is the *recurrent* tail (`posMin ≈ posMax`), not 0. The policy
+therefore saved and restored the snapshot on every turn; the save-skip never
+fired. The publish/live-reuse guards now ignore `posMin` for a hybrid model whose
+attention layers are full (`n_swa == 0`), where only the end bound
+(`posMax + 1 == resident`) is meaningful; a hybrid model with a sliding window
+keeps the strict guard. Truncated generations also do one trim instead of two
+(the recurrent rollback is single-use). The device policy test is expected to
+show `KV live cache reused fully` + `KV snapshot save skipped` on normal turns
+and a save only on the recreate turn; the A/B above must still supply the
+numbers.
+
 ### 262,144 context: what it costs
 
 The model's GGUF window is 262,144, and the YaRN factor is derived from the

@@ -112,6 +112,37 @@ final class ReuseSurvivalTests: XCTestCase {
                      "a shorter live sequence than cachedTokenIds describes an inconsistent cache")
     }
 
+    func testHybridFullAttentionAcceptsRecurrentTailAsPosMin() {
+        // seq_pos_min is max(attention_min, recurrent_min): the recurrent part
+        // only keeps its tail, so posMin = posMax is normal for a full-attention
+        // hybrid model. The end bound still has to match.
+        let cached: [Int32] = [1, 2, 3]
+        let prompt: [Int32] = [1, 2, 3, 4]
+        XCTAssertEqual(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                        promptTokens: prompt,
+                                                        seqPosMin: 2,
+                                                        seqPosMax: 2,
+                                                        hybridFullAttention: true),
+                       3)
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: prompt,
+                                                      seqPosMin: 2,
+                                                      seqPosMax: 1,
+                                                      hybridFullAttention: true),
+                     "the end bound must still match trackedTokenIds")
+    }
+
+    func testHybridSlidingWindowStillRequiresAnUnEvictedFront() {
+        let cached: [Int32] = [1, 2, 3]
+        let prompt: [Int32] = [1, 2, 3, 4]
+        XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: cached,
+                                                      promptTokens: prompt,
+                                                      seqPosMin: 2,
+                                                      seqPosMax: 2,
+                                                      hybridFullAttention: false),
+                     "a hybrid model with SWA can evict the front; posMin must be 0")
+    }
+
     func testHybridLiveCacheRejectedWhenEmpty() {
         XCTAssertNil(ReuseSurvival.liveHybridReuseLen(cachedTokens: [],
                                                       promptTokens: [1],
