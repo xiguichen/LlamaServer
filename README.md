@@ -149,6 +149,19 @@ scripts/
 3. When it finishes, download the **`LlamaServer-unsigned-ipa`** artifact. It
    contains `LlamaServer-unsigned.ipa`.
 
+Download the latest build directly:
+
+```bash
+# Using GitHub CLI (requires gh installed)
+RUN_ID=$(gh run list --workflow build.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$RUN_ID" -n "LlamaServer-unsigned-ipa" -D ~/Downloads
+
+# Or using curl (requires GitHub personal access token)
+curl -L "https://github.com/xiguichen/LlamaServer/actions/artifacts/$RUN_ID/download" \
+  -H "Authorization: Bearer <GH_TOKEN>" \
+  -o ~/Downloads/LlamaServer-unsigned.ipa
+```
+
 The pipeline:
 `fetch prebuilt llama.xcframework` → `xcodegen generate` →
 `xcodebuild (CODE_SIGNING_ALLOWED=NO)` → `package Payload/ → .ipa` → upload artifact.
