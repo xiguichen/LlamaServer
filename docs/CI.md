@@ -48,4 +48,20 @@ The test job must pass before the build job runs.
 
 ## Local development
 
-Local machine is CLT-only (no XCTest). Use `xcodegen generate` for local syntax / project validation; CI runs the tests.
+Local machine is CLT-only (no XCTest). `bash scripts/check-swift.sh` runs
+`swiftc -parse` over `Sources/App/*.swift` (syntax only, ~10 s; pass files for a
+~2 s check). `bash scripts/install-hooks.sh` makes the pre-commit hook enforce
+it. `xcodegen generate` still validates `project.yml`. CI runs the build and the
+unit tests.
+
+## Inspecting a run
+
+Use the authenticated `gh` CLI — never `curl` the GitHub API (it returns 404
+without auth):
+
+```bash
+bash scripts/ci-wait.sh <run-id>   # wait; prints the failed log on failure
+bash scripts/ci-logs.sh <run-id>   # failed log only
+```
+
+Both default to the latest `build.yml` run on `main` when the id is omitted.

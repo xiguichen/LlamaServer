@@ -9,8 +9,8 @@ turn, and a long prompt measurably degrades the model's tool calling
 
 ## Local development
 
-No local Xcode build or test runs. **Use CI** (`docs/CI.md`) for building and unit tests.
-We should use swiftc -parse command to find out syntax problems after each .swift file update.
+No local Xcode build or test runs — use CI (`docs/CI.md`). Run
+`bash scripts/check-swift.sh <file>` after each `.swift` edit.
 
 ## Read when you need it
 
@@ -20,6 +20,7 @@ We should use swiftc -parse command to find out syntax problems after each .swif
 | [`docs/ENGINE.md`](docs/ENGINE.md) | touching `LlamaInference.swift`: MTP rounds, sampling, generation loop/timings, context recreate, decode-failure recovery |
 | [`docs/MEMORY.md`](docs/MEMORY.md) | touching KV cache, context sizing/clamping, YaRN, or the memory budget |
 | [`docs/TOOL-CALLS.md`](docs/TOOL-CALLS.md) | touching tool prompts, parsing, streaming filters, thinking switches — or debugging a turn that fails to call a tool |
+| [`docs/SMALL-MODEL.md`](docs/SMALL-MODEL.md) | running `qwen3.5:4b`, or an agent announces a tool and stops |
 | [`docs/API.md`](docs/API.md) | touching request/response types, token limits, `stop`, `enable_thinking`, OpenAI field presence |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | adding log lines, changing the in-app panel, or fetching logs |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | debugging a deployed build, uploading an IPA, or running on-device compliance tests |
@@ -28,20 +29,15 @@ We should use swiftc -parse command to find out syntax problems after each .swif
 | [`.github/workflows/build.yml`](.github/workflows/build.yml) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild)
 
 
-## You must use swiftc to parse the .swift file before commit
+## Build & test
 
-You must use swiftc to parse the swift file to make sure there is no syntax error
+Local Xcode build/test is not possible. Push and let CI run; use the wrappers —
+`bash scripts/ci-wait.sh <run-id>` and `bash scripts/ci-logs.sh <run-id>`. Never
+`curl` GitHub. The test job must pass; the build job produces the IPA.
 
-
-## Build & test (Use CI to do it, you must follow below rule)
-
-Local environment does not have the required build environment, push to github for build and test. Use gh run view command to view the build and test result. For example:
-```
-gh run view 42481626865 --log-failed 2>&1
-```
-Never try to use curl command to do it as it requires authentication.
-
-The test job must pass; the build job produces the IPA.
+`swiftc -parse` is the local syntax gate: `bash scripts/check-swift.sh <file>`
+after every `.swift` edit, and `bash scripts/install-hooks.sh` once per clone to
+make the pre-commit hook enforce it.
 
 ## CI notes
 
@@ -101,10 +97,30 @@ A19 Pro, 4B Q4_K_M: prefill 170–350 t/s for new tokens; generation 10–17 t/s
 
 - Pure-logic specs in `Tests/LlamaServerTests/` — no model file, no inference, all run in CI: OpenAI models, tool parser/prompt, thinking switch, chat-spec compliance, log routing/fetch, prefill stats, update spec/store, and the engine specs (`Mtp*`, `KVCacheSpec`, `MemoryBudget`, `DecodeRetry`). Add new sources to `project.yml`; do not `import` the app module (tests compile app sources directly).
 - Run focused: `xcodebuild test -project LlamaServer.xcodeproj -scheme LlamaServerTests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:LlamaServerTests/ToolCallParserTests CODE_SIGNING_ALLOWED=NO`
-- Local machine is CLT-only (no XCTest): `xcodegen generate` is the local syntax/project validator; CI runs the tests.
+- Local machine is CLT-only (no XCTest): `bash scripts/check-swift.sh` checks Swift syntax and `xcodegen generate` validates the project; CI runs the tests.
 
 ## Style
 
 - `OSAllocatedUnfairLock` for thread-safe flags/counters (not the `os_unfair_lock` C API).
 - No `#warning` — use `FileLogger.shared.warn(...)` for recoverable issues.
 - Logging rules (levels, routing, fsync policy, panel budget) are in `docs/LOGGING.md`.
+
+## Agent execution rules (all models; small models must follow exactly)
+
+1. **Act in the first turn.** Keep making tool calls until the task is done.
+   Never end a turn with "Let me…", "I'll…", "Using…", or a plan.
+2. **One task, one file.** Read the target before editing; keep each edit to a
+   short, unique anchor (≤3 lines).
+3. **Verify every edit.** Run `bash scripts/check-swift.sh <file>` after each
+   `.swift` edit and fix the error before the next edit.
+4. **No claims without output.** "Done/fixed/passing" requires the check or CI
+   output in the same turn.
+5. **CI only.** Never run `xcodebuild` locally and never `curl` GitHub; use the
+   wrappers in `docs/CI.md`.
+6. **No invented tools.** There is no `brainstorming`, `gh`, `notes`, or skill
+   tool. To use a skill, `read` its `SKILL.md`.
+7. **Stop after two failures.** `git checkout -- <file>`, report the failing
+   output, and stop. Do not try a third blind fix.
+8. **Evidence for numbers.** Performance/device claims come only from
+   `docs/PERFORMANCE.md` or a log you just read; otherwise say "unknown".
+9. **Small model.** For `qwen3.5:4b`, start with `bash scripts/pi4b.sh`.

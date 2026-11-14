@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# Commit gate: parse every staged .swift file before it is recorded.
+#
+# Install once with `bash scripts/install-hooks.sh` (sets core.hooksPath).
+# A syntax error here is the same class of error CI would find minutes later,
+# except it costs seconds and keeps a broken commit off main.
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+# Added/copied/modified only; a deleted file cannot be parsed.
+STAGED="$(git diff --cached --name-only --diff-filter=ACM -- '*.swift')"
+[ -z "$STAGED" ] && exit 0
+
+# The repo has no paths with spaces, so word splitting is safe here.
+# shellcheck disable=SC2086
+bash scripts/check-swift.sh $STAGED
