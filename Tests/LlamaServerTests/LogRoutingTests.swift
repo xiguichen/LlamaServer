@@ -106,31 +106,52 @@ final class LogRoutingTests: XCTestCase {
     }
 
     func testAppendCapsTheBufferAndDropsOldestFirst() {
-        var lines: [String] = []
+        var lines: [LogPanelLine] = []
+        var nextID = 0
         for i in 0..<(LogPanelSpec.maxLines + 5) {
-            LogPanelSpec.append("line \(i)", to: &lines)
+            LogPanelSpec.append("line \(i)", to: &lines, nextID: &nextID)
         }
         XCTAssertEqual(lines.count, LogPanelSpec.maxLines)
-        XCTAssertEqual(lines.first, "line 5", "oldest lines are dropped")
-        XCTAssertEqual(lines.last, "line \(LogPanelSpec.maxLines + 4)")
+        XCTAssertEqual(lines.first?.text, "line 5", "oldest lines are dropped")
+        XCTAssertEqual(lines.last?.text, "line \(LogPanelSpec.maxLines + 4)")
+    }
+
+    /// Trimming the front must not re-identify the rows that remain: the panel's
+    /// `ForEach` keys on `LogPanelLine.id`, and reusing ids for a new index would
+    /// rewrite every visible row on each batch (the "panel keeps refreshing"
+    /// symptom). Ids stay unique and only ever grow.
+    func testTrimmedRowsKeepTheirSequenceIDs() {
+        var lines: [LogPanelLine] = []
+        var nextID = 0
+        for i in 0..<(LogPanelSpec.maxLines + 3) {
+            LogPanelSpec.append("line \(i)", to: &lines, nextID: &nextID)
+        }
+        XCTAssertEqual(lines.first?.id, 3, "the three oldest ids are gone")
+        XCTAssertEqual(lines.last?.id, LogPanelSpec.maxLines + 2)
+        XCTAssertEqual(Set(lines.map(\.id)).count, lines.count, "ids stay unique")
+        XCTAssertEqual(nextID, LogPanelSpec.maxLines + 3, "the sequence keeps growing")
     }
 
     func testAppendTruncatesEachLine() {
-        var lines: [String] = []
-        LogPanelSpec.append(String(repeating: "y", count: LogPanelSpec.maxLineLength + 10), to: &lines)
+        var lines: [LogPanelLine] = []
+        var nextID = 0
+        LogPanelSpec.append(String(repeating: "y", count: LogPanelSpec.maxLineLength + 10),
+                            to: &lines, nextID: &nextID)
         XCTAssertEqual(lines.count, 1)
-        XCTAssertTrue(lines[0].contains("[+10 chars"))
+        XCTAssertTrue(lines[0].text.contains("[+10 chars"))
     }
 
     /// The mirror delivers a batch per flush; the batch must be capped and
     /// truncated exactly like individual appends.
     func testAppendContentsCapsAndTruncatesTheBatch() {
-        var lines: [String] = ["existing"]
+        var lines: [LogPanelLine] = []
+        var nextID = 0
+        LogPanelSpec.append("existing", to: &lines, nextID: &nextID)
         let batch = (0..<(LogPanelSpec.maxLines + 3)).map { "line \($0)" }
             + [String(repeating: "z", count: LogPanelSpec.maxLineLength + 7)]
-        LogPanelSpec.append(contentsOf: batch, to: &lines)
+        LogPanelSpec.append(contentsOf: batch, to: &lines, nextID: &nextID)
         XCTAssertEqual(lines.count, LogPanelSpec.maxLines)
-        XCTAssertEqual(lines.last?.contains("[+7 chars"), true)
-        XCTAssertFalse(lines.contains("existing"), "oldest entries are dropped")
+        XCTAssertEqual(lines.last?.text.contains("[+7 chars"), true)
+        XCTAssertFalse(lines.contains { $0.text == "existing" }, "oldest entries are dropped")
     }
 }

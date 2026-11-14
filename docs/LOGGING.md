@@ -34,6 +34,14 @@ every log method supplies the source, so call sites need no category argument.
 The panel renders **basic (error/warn/info) lines only** (`LogPanelSpec`),
 truncated to 500 chars, in a `LazyVStack`.
 
+The buffer lives in `LogPanelModel`, a separate `ObservableObject`, and only
+`LogLinesView` observes it. Do not move it back onto `ServerViewModel` as
+`@Published`: every request emits basic lines, and publishing them from the
+view model invalidated the whole `Form` on each batch, which read as the UI
+"refreshing" while the server was busy. Rows carry a monotonic
+`LogPanelLine.id` (not the array index), so trimming the capped buffer is a
+front removal plus a tail insertion instead of rewriting every visible row.
+
 Do not route payload/debug lines back to the panel or raise the cap without
 checking the cost: a `cpu_resource` report (bug_type 202, 57% CPU) traced the
 app's heaviest stack to the panel laying out 72k-char prompt lines with

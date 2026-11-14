@@ -1,5 +1,19 @@
 import Foundation
 
+/// One row in the in-app panel.
+///
+/// `id` is a monotonically increasing sequence number, not the row's index in
+/// the capped buffer. SwiftUI keys `ForEach` by it, so when the buffer drops its
+/// oldest line the remaining rows keep their identity: the batch becomes one
+/// removal plus insertions at the tail. With index identity (the old
+/// `ForEach(lines.indices, id: \.self)`) a full buffer rewrote the content of
+/// every row on every batch, re-laying-out the panel while requests streamed
+/// log lines.
+struct LogPanelLine: Identifiable, Equatable {
+    let id: Int
+    let text: String
+}
+
 /// Rendering budget for the in-app log panel.
 ///
 /// Why this exists: the panel was the app's heaviest CPU consumer. A
@@ -51,17 +65,22 @@ enum LogPanelSpec {
         return "\(line.prefix(maxLineLength))… [+\(hidden) chars — open the log file]"
     }
 
-    /// Append a display-ready line to a bounded panel buffer.
-    static func append(_ line: String, to lines: inout [String]) {
-        lines.append(truncate(line))
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+    /// Append a display-ready line to a bounded panel buffer, assigning it the
+    /// next sequence id.
+    static func append(_ line: String, to lines: inout [LogPanelLine], nextID: inout Int) {
+        append(contentsOf: [line], to: &lines, nextID: &nextID)
     }
 
     /// Append a display-ready batch to a bounded panel buffer. One trim for the
-    /// whole batch, which is how `FileLogger` mirrors a flush.
-    static func append(contentsOf newLines: [String], to lines: inout [String]) {
+    /// whole batch, which is how `FileLogger` mirrors a flush. Each row gets a
+    /// fresh sequence id, so trimming the front never re-identifies the rest.
+    static func append(contentsOf newLines: [String], to lines: inout [LogPanelLine],
+                       nextID: inout Int) {
         guard !newLines.isEmpty else { return }
-        lines.append(contentsOf: newLines.map(truncate))
+        for line in newLines {
+            lines.append(LogPanelLine(id: nextID, text: truncate(line)))
+            nextID += 1
+        }
         if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
     }
 }

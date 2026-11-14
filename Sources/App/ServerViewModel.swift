@@ -2,6 +2,37 @@ import Foundation
 import Combine
 import UIKit
 
+/// The in-app log panel's buffer.
+///
+/// A standalone `ObservableObject` so log traffic only invalidates the panel's
+/// row view, never the enclosing `Form`. The sequence ids are what let SwiftUI
+/// apply a batch as a tail insertion plus a front removal instead of rewriting
+/// every visible row (`LogPanelSpec.maxLines` caps the buffer).
+@MainActor
+final class LogPanelModel: ObservableObject {
+
+    @Published private(set) var lines: [LogPanelLine] = []
+    private var nextID = 0
+
+    /// Append a flushed batch, honouring the panel budget.
+    func append(_ newLines: [String]) {
+        LogPanelSpec.append(contentsOf: newLines, to: &lines, nextID: &nextID)
+    }
+
+    /// Replace the whole buffer (initial load, Reload, Clear).
+    ///
+    /// Builds the replacement off to the side so a reload publishes once rather
+    /// than once for the reset and once for the contents. Ids restart at 0: the
+    /// panel is rebuilt wholesale, so SwiftUI has no old rows to reconcile.
+    func replace(with texts: [String]) {
+        nextID = 0
+        var fresh: [LogPanelLine] = []
+        fresh.reserveCapacity(min(texts.count, LogPanelSpec.maxLines))
+        LogPanelSpec.append(contentsOf: texts, to: &fresh, nextID: &nextID)
+        lines = fresh
+    }
+}
+
 /// Drives the UI: model library (list / import / download), selecting a model,
 /// and starting/stopping the inference engine + HTTPS server.
 @MainActor
@@ -33,7 +64,13 @@ final class ServerViewModel: ObservableObject {
     private var stopGeneration = 0
     @Published var port: String = "8443"
     @Published var contextSize: String = "262144"
-    @Published private(set) var logs: [String] = []
+    /// The in-app log panel's buffer.
+    ///
+    /// Deliberately a separate observable, not `@Published` on this object:
+    /// requests emit basic log lines continuously, and publishing them from here
+    /// invalidated the whole `Form` (model list, settings, status) on every
+    /// batch. Only the panel's row view observes this.
+    let logPanel = LogPanelModel()
     @Published private(set) var ipAddress: String? = NetworkInfo.wifiIPv4Address()
 
     /// Controls how much the server records. `.verbose` captures full request and
@@ -90,14 +127,14 @@ final class ServerViewModel: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         // Show persisted history (incl. breadcrumbs from before any prior crash).
-        logs = FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines)
+        logPanel.replace(with: FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines))
         // Mirror every BASIC line (error/warn/info) the server writes into the
         // panel, so the in-app log is a readable console. Debug/verbose payload
         // lines stay on disk only — rendering them was what made the panel the
         // app's heaviest CPU consumer (see `LogPanelSpec`).
         FileLogger.shared.onLine = { [weak self] lines in
             // One Task per flushed batch (see FileLogger.scheduleMirrorFlush).
-            Task { @MainActor in self?.appendLines(lines) }
+            Task { @MainActor in self?.logPanel.append(lines) }
         }
         refreshModels()
     }
@@ -107,11 +144,13 @@ final class ServerViewModel: ObservableObject {
     var logFileURLs: [URL] { FileLogger.shared.allFileURLs }
 
     /// Reload the persisted log into the panel (e.g. after a crash + relaunch).
-    func reloadLogs() { logs = FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines) }
+    func reloadLogs() {
+        logPanel.replace(with: FileLogger.shared.tailBasic(maxLines: LogPanelSpec.maxLines))
+    }
 
     func clearLogs() {
         FileLogger.shared.clear()
-        logs = []
+        logPanel.replace(with: [])
     }
 
     var isRunning: Bool {
@@ -430,11 +469,5 @@ final class ServerViewModel: ObservableObject {
     /// duplicates and keeps the panel identical to the on-disk log).
     func log(_ message: String) {
         FileLogger.shared.info(message)
-    }
-
-    /// Called on the main thread by `FileLogger.onLine` for each flushed batch.
-    /// Bounded by `LogPanelSpec` so the panel's per-update layout cost stays flat.
-    private func appendLines(_ lines: [String]) {
-        LogPanelSpec.append(contentsOf: lines, to: &logs)
     }
 }

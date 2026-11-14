@@ -201,25 +201,7 @@ struct ContentView: View {
                 .font(.caption)
                 .disabled(viewModel.logLevel != .verbose)
 
-            if viewModel.logs.isEmpty {
-                Text("No activity yet.").foregroundColor(.secondary)
-            } else {
-                // LazyVStack (not a plain VStack): only the visible lines are laid
-                // out. The panel renders basic (error/warn/info) lines only, capped
-                // by `LogPanelSpec` — laying out payload-sized lines here was the
-                // app's heaviest CPU consumer.
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(viewModel.logs.indices, id: \.self) { index in
-                            Text(viewModel.logs[index])
-                                .font(.system(.caption2, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                    }
-                }
-                .frame(height: 180)
-            }
+            LogLinesView(panel: viewModel.logPanel)
         } header: {
             HStack {
                 Text("Logs")
@@ -245,6 +227,39 @@ struct ContentView: View {
         case .loadingModel: return .orange
         case .error:        return .red
         case .stopped:      return .gray
+        }
+    }
+}
+
+/// The live log rows.
+///
+/// Only this view observes `LogPanelModel`, so a log batch re-renders these
+/// rows without invalidating the enclosing `Form` (model list, settings,
+/// status). Rows are identified by their sequence id, so trimming the capped
+/// buffer is a front removal plus a tail insertion rather than a rewrite of
+/// every visible row.
+private struct LogLinesView: View {
+    @ObservedObject var panel: LogPanelModel
+
+    var body: some View {
+        if panel.lines.isEmpty {
+            Text("No activity yet.").foregroundColor(.secondary)
+        } else {
+            // LazyVStack (not a plain VStack): only the visible lines are laid
+            // out. The panel renders basic (error/warn/info) lines only, capped
+            // by `LogPanelSpec` — laying out payload-sized lines here was the
+            // app's heaviest CPU consumer.
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(panel.lines) { line in
+                        Text(line.text)
+                            .font(.system(.caption2, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .frame(height: 180)
         }
     }
 }
