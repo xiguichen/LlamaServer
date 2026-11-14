@@ -2326,8 +2326,11 @@ final class LlamaInference: @unchecked Sendable {
                         // so a second seq_rm in the same round fails and leaves
                         // the rejected rows resident.
                         if let rb = step.rollbackPos, !stopped {
-                            if let mem = llama_get_memory(context) {
-                                _ = llama_memory_seq_rm(mem, 0, llama_pos(rb), -1)
+                            if let mem = llama_get_memory(context),
+                               !llama_memory_seq_rm(mem, 0, llama_pos(rb), -1) {
+                                // A failed target trim leaves rejected rows
+                                // resident; never publish this prefix.
+                                mtpResidentPublishable = false
                             }
                             if let dmem = llama_get_memory(dft) {
                                 // If the draft cannot drop the rejected rows it
@@ -2345,8 +2348,9 @@ final class LlamaInference: @unchecked Sendable {
                         // rows that were actually emitted before keeping them.
                         if stopped {
                             let trimPos = llama_pos(Int(nextPos) + actualEmitted)
-                            if let mem = llama_get_memory(context) {
-                                _ = llama_memory_seq_rm(mem, 0, trimPos, -1)
+                            if let mem = llama_get_memory(context),
+                               !llama_memory_seq_rm(mem, 0, trimPos, -1) {
+                                mtpResidentPublishable = false
                             }
                             if let dmem = llama_get_memory(dft) {
                                 if !llama_memory_seq_rm(dmem, 0, trimPos, -1) {
