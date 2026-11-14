@@ -265,37 +265,49 @@ across the recreate by `ReuseSurvival`.
 
 ### Snapshot cost (per turn)
 
-Before the save-skip change, every hybrid turn saved a prompt-state snapshot and
-the next turn loaded it back: **664 MB at 31.8k tokens → 897 MB at 48.4k tokens**
-(~1.2 s/turn fixed cost, visible on small turns where 66 new tokens still took
-1.45 s). It is written to `NSTemporaryDirectory()` and is needed (a) across a
-recreate and (b) when the live cache cannot be reused (a transformed replay, an
-abnormal exit, or a bounds-guard mismatch). The MTP path now keeps the live
-target when the bookkeeping agrees with `seq_pos_min`/`seq_pos_max`
-(`docs/MTP-KV-REUSE.md`), so the **next turn's snapshot restore** is skipped when
-that live cache is a prefix.
+Measured 2026-11-14 on build `ac4133e`, 4B hybrid Q4_K_M, with a paired
+on-device A/B: one turn extends the prompt by a fixed chunk (live cache reused,
+save skipped) and the next repeats the prompt verbatim (snapshot restored, chunk
+re-decoded, new snapshot written). Both decode the same number of tokens, and
+`prefill=` includes the save but not the restore, so the delta is the save.
 
-**Save policy (implemented, not yet measured):** the hybrid save is skipped when
-the live cache held the prompt prefix and no recreate is due; it still runs on
-the recreate turn and whenever the live cache could not be reused
-(`ReuseSurvival.hybridSnapshotSaveNeeded`). The previous blob stays on disk as
-the fallback. **The per-turn snapshot cost above was measured before the
-preservation change** — the paired on-device A/B to quantify the removed restore
-and the skipped writes is still open (question 3). This file remains the source
-of numbers.
+| context | snapshot blob | save (S − L median) |
+|---|---|---|
+| ~2k tokens | 71.5 MB | +0.01 s (n=6, noise) |
+| ~8k tokens | ~127 MB | +0.01 s (n=3) |
+| ~16k tokens | 196.9 MB | +0.11 s (n=4) |
+| ~24k tokens | 289.5 MB | +0.23 s (n=4) |
 
-**Hybrid bounds fix (implemented 2026-11-14, not yet measured):** on the deployed
-4B hybrid model every generation was clearing the target cache because
-`seq_pos_min` is the *recurrent* tail (`posMin ≈ posMax`), not 0. The policy
-therefore saved and restored the snapshot on every turn; the save-skip never
-fired. The publish/live-reuse guards now ignore `posMin` for a hybrid model whose
-attention layers are full (`n_swa == 0`), where only the end bound
+The blob is linear at **~9.24 KB/token + ~53 MB** on this model.
+
+**Live reuse only fires for append-only prompts.** On `/v1/completions` a
+strict extension logs `KV live cache reused fully` + `KV snapshot save skipped`
+and prefill drops to 0.08–0.11 s with no disk I/O. A chat turn can never take
+that path: the hybrid snapshot is the *stable prefix*, ending before the
+trailing assistant primer (`stablePrefixLength`). The next prompt replaces those
+~7 primer tokens with the replayed assistant message, so the live cache diverges
+at the primer boundary and is not a whole prefix (measured: snapshot 1610,
+prompt 1617, next prompt 1656, restore 1610). This is structural, not a bug.
+
+**Per-turn save is still the right policy for chat.** The alternative — save
+only on recreate — leaves the tail growing for up to 10 generations. Measured at
+24k, an extra 189 tail tokens costs **+0.49 s** (2.6 ms/token), so a 10-turn
+window would average 0.4 s/turn (27-token growth) to 0.7 s/turn (50-token
+growth) of re-decode, against 0.23 s to save every turn. The save-skip therefore
+helps append-only clients only; for chat the previous blob is the fallback and
+the per-turn write is the cheaper option. The earlier ~1.2 s / 664–897 MB figure
+was for the q8_0 KV config (≈17 KB/token); this q4_0 build moves ≈9.2 KB/token
+and saves in 0.01–0.23 s over 2k–24k.
+
+**Hybrid bounds fix (confirmed 2026-11-14):** on the deployed 4B hybrid model
+`seq_pos_min` is the *recurrent* tail (`posMin ≈ posMax`), not 0, so every
+generation used to clear the target cache. The publish/live-reuse guards now
+ignore `posMin` when `n_swa == 0` (full attention), where only the end bound
 (`posMax + 1 == resident`) is meaningful; a hybrid model with a sliding window
 keeps the strict guard. Truncated generations also do one trim instead of two
-(the recurrent rollback is single-use). The device policy test is expected to
-show `KV live cache reused fully` + `KV snapshot save skipped` on normal turns
-and a save only on the recreate turn; the A/B above must still supply the
-numbers.
+(the recurrent rollback is single-use). On device this restored target
+preservation (`KV preserved across MTP generation … seq_pos_max …`); as above,
+that is necessary for append-only live reuse but does not change the chat path.
 
 ### 262,144 context: what it costs
 
@@ -311,9 +323,9 @@ Measured on device:
 
 KV at the full window: **4,352 MiB** for q8_0 (17,408 B/token) and **2,304 MiB**
 for q4_0 (9,216 B/token charged). Coherence at 256K is unmeasured (open
-question 5), and a snapshot write (when the save policy runs) extrapolates to
-~4 GB at the full window (open question 3) — measure both before using the long
-end in anger.
+question 5), and a snapshot write (when the save policy runs) extrapolates from
+the measured 9.24 KB/token + 53 MB to **~2.5 GB at the full window** — measure
+both before using the long end in anger.
 
 ## Stability: a GPU reset invalidates a run
 
@@ -360,15 +372,15 @@ record.
 2. **KV q4_0** — this model qualifies (`head_dim 256 % 32 == 0`, flash-attn
    forced). Halves the KV (843 MB → ~466 MB at 48k) and the snapshot; measure
    the t/s gain and the quality cost.
-3. **Snapshot round-trip removal** — the MTP path now keeps the live target KV
-   when the resident-prefix bookkeeping passes the bounds guard
-   (`docs/MTP-KV-REUSE.md`), so the next turn restores no snapshot when that
-   live cache is a prefix. The hybrid save now runs only when a recreate is due
-   or the live cache was not reusable (`ReuseSurvival.hybridSnapshotSaveNeeded`).
-   **Implemented but not yet measured**: the only existing snapshot number is the
-   pre-change ~1.2 s / 664–897 MB per turn, so do not claim a gain until a
-   paired A/B records `prefill=` reuse, `MTP stats` `no-draft` rate, and
-   `KV snapshot` lines with and without preservation/save-skip.
+3. ~~**Snapshot round-trip removal**~~ — **answered** 2026-11-14 (build
+   `ac4133e`). Live-cache reuse fires only when the whole live cache is a prefix:
+   append-only `/v1/completions` (`KV live cache reused fully` + `KV snapshot
+   save skipped`, prefill 0.08–0.11 s, no I/O). A chat replay replaces the
+   assistant primer, so its live cache is never a whole prefix and the snapshot
+   is restored every turn. Per-turn save costs 0.01 s at 8k, 0.11 s at 16k,
+   0.23 s at 24k (blob 9.24 KB/token + 53 MB); save-on-recreate would instead
+   re-decode an average 0.4–0.7 s/turn of accumulated tail (measured 2.6 ms per
+   tail token at 24k), so the per-turn save stays. See "Snapshot cost".
 4. **Is the verify pass bandwidth-bound or compute-bound?** ~3.3 GB of traffic
    per 164 ms round ≈ 20 GB/s — far below the SoC's peak, so attention compute
    or kernel overhead is likely involved. Needs a profiler.

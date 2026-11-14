@@ -1,15 +1,19 @@
 # MTP target-KV reuse (design + test plan)
 
 Status: **target preservation implemented 2026-11-12; hybrid full-attention
-bounds fix implemented 2026-11-14; paired on-device A/B still required before
-quoting a gain.** The pure bookkeeping is `Sources/App/MtpKVPlan.swift` (tests in
+bounds fix implemented and confirmed on device 2026-11-14; paired A/B measured
+2026-11-14 (see `docs/PERFORMANCE.md`, "Snapshot cost").** The pure bookkeeping
+is `Sources/App/MtpKVPlan.swift` (tests in
 `Tests/LlamaServerTests/MtpKVPlanTests.swift`). The stable-prefix snapshot is
 **kept** as the fallback: a client that replays transformed assistant text
 (reasoning stripped, tool envelopes re-rendered) may not match the raw generated
 tokens, and the snapshot is what preserves reuse across that divergence. It is
-now written only when a recreate is due or the live cache was not reusable
-(`ReuseSurvival.hybridSnapshotSaveNeeded`), rather than every turn; the previous
-blob remains a valid (shorter) fallback prefix. Numbers live in
+written only when a recreate is due or the live cache was not reusable
+(`ReuseSurvival.hybridSnapshotSaveNeeded`). Note that a chat replay *always*
+takes the save path: the stable-prefix snapshot ends before the assistant primer,
+and the next prompt replaces that primer, so the live cache is never a whole
+prefix. The skip therefore helps append-only clients (`/v1/completions`) only;
+the per-turn chat save is still the cheaper policy (measured). Numbers live in
 `docs/PERFORMANCE.md`; this file only defines the invariant and the tests.
 
 ## Problem
@@ -179,14 +183,17 @@ cases remain:
 
 Neither case corrupts output (every emitted token is sampled from the target),
 and the common case — the previous generation used the speculative path and
-preserved its target KV — now keeps drafting on the next turn. The paired on-device
-A/B for the removed snapshot restore is still open (`docs/PERFORMANCE.md`,
-question 3).
+preserved its target KV — now keeps drafting on the next turn. The paired
+on-device A/B is complete: append-only prompts reuse the live cache without a
+snapshot round-trip; a chat replay still restores the stable-prefix snapshot
+every turn, and that per-turn save is cheaper than letting the tail grow
+(`docs/PERFORMANCE.md`, question 3).
 
 ## Test plan
 
 Status: the pure tests below are implemented in
-`Tests/LlamaServerTests/MtpKVPlanTests.swift`; the on-device A/B is still open.
+`Tests/LlamaServerTests/MtpKVPlanTests.swift`; the on-device A/B ran
+2026-11-14.
 
 ### Pure tests (CI, no model)
 
@@ -217,7 +224,7 @@ plan's resident count matches the hard-coded rules for random
 - The bounds guard must be exercised with a fake `posMin/posMax` (pure helper),
   not a live context.
 
-### On-device A/B (required before enabling)
+### On-device A/B (completed 2026-11-14)
 
 Use the paired protocol in `docs/PERFORMANCE.md`:
 
@@ -226,12 +233,14 @@ Use the paired protocol in `docs/PERFORMANCE.md`:
 2. Record per turn: `prefill=` `(X of Y, Z reused)`, `gen=`, total wall, and the
    `MTP stats` `no-draft`/`depth` fields.
 3. Acceptance:
-   - reused tokens on turn N+1 must be at least the shared prefix length
-     (system + history), not just the stable snapshot prefix;
+   - for an **append-only** prompt, reused tokens on turn N+1 equal the previous
+     whole prompt and no `KV snapshot` write/load runs;
+   - for a **chat replay**, reuse equals the stable-prefix snapshot length, not
+     system + history: the primer is replaced, so expecting more is wrong (the
+     live cache diverges there by design);
    - no output regressions on a fixed tool-call + long-context prompt set;
    - generation t/s must not drop by more than noise on turns where the draft
-     lost its boundary `h` (`no-draft` rate is the diagnostic);
-   - no `KV snapshot` write/load on turns where the live cache was reused.
+     lost its boundary `h` (`no-draft` rate is the diagnostic).
 4. If the draft regression dominates, land the target-KV preservation and the
    draft boundary `h` follow-up together, or keep MTP-off for long turns.
 
