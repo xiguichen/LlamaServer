@@ -128,11 +128,22 @@ struct ContentView: View {
             HStack {
                 Text("Context size")
                 Spacer()
-                TextField("4096", text: $viewModel.contextSize)
+                // While running this shows the engine's effective (post-clamp)
+                // window, not the request — see `ContextDisplay`. The field is
+                // disabled then; the editable request returns when stopped.
+                TextField("4096", text: Binding(
+                    get: { viewModel.displayedContextSize },
+                    set: { viewModel.contextSize = $0 }
+                ))
                     .keyboardType(.numberPad)
                     .multilineTextAlignment(.trailing)
                     .frame(width: 100)
                     .disabled(viewModel.isRunning || viewModel.isBusy)
+            }
+            if let note = viewModel.contextLimitNote {
+                Text(note)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             Toggle("Multi-Token Prediction (MTP)", isOn: $viewModel.useMtp)
                 .disabled(viewModel.isRunning || viewModel.isBusy)
@@ -149,7 +160,7 @@ struct ContentView: View {
         } header: {
             Text("Server")
         } footer: {
-            Text("Context is capped to fit this device's memory and the model's trained window. q8_0/q4_0 shrink the KV cache (far more tokens per byte — q4_0 ≈ 3.6x — for a tiny quality cost). \"Long context\" lifts the trained-window cap with the model's validated YaRN scaling (e.g. Qwen3: 32K→131K); leave it off otherwise.")
+            Text("Context is capped to fit this device's memory and the model's trained window; while the server runs the field shows the size the loaded model actually uses, and your requested value returns when you stop. q8_0/q4_0 shrink the KV cache (far more tokens per byte — q4_0 ≈ 3.6x — for a tiny quality cost). \"Long context\" lifts the trained-window cap with the model's validated YaRN scaling (e.g. Qwen3: 32K→131K); leave it off otherwise.")
         }
     }
 

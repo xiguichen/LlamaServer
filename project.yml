@@ -172,6 +172,8 @@ targets:
         createIntermediateGroups: true
       - path: Sources/App/GenerationCancel.swift
         createIntermediateGroups: true
+      - path: Sources/App/ContextDisplay.swift
+        createIntermediateGroups: true
       - path: Sources/App/DecodeRetry.swift
         createIntermediateGroups: true
       - path: Sources/App/NativeLogRing.swift

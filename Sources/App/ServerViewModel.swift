@@ -64,6 +64,13 @@ final class ServerViewModel: ObservableObject {
     private var stopGeneration = 0
     @Published var port: String = "8443"
     @Published var contextSize: String = "262144"
+    /// The window the resident engine actually runs with after the memory/window
+    /// clamp, plus the reason. Drives the Context size field so the UI cannot
+    /// show 262144 while the server runs at 48,640. Nil until a model is loaded.
+    /// `contextSize` stays the *request*: it is the engine cache key
+    /// (`EngineConfigSpec`) and the next Start's input, so it is never replaced.
+    @Published private(set) var effectiveContextSize: Int?
+    @Published private(set) var effectiveContextClamp: KVCacheSpec.ContextClamp = .notReduced
     /// The in-app log panel's buffer.
     ///
     /// Deliberately a separate observable, not `@Published` on this object:
@@ -161,6 +168,22 @@ final class ServerViewModel: ObservableObject {
     var isBusy: Bool {
         if case .loadingModel = status { return true }
         return stopping
+    }
+
+    /// What the Context size field shows: the effective window while running,
+    /// the request otherwise. See `ContextDisplay`.
+    var displayedContextSize: String {
+        ContextDisplay.fieldText(requested: contextSize,
+                                 effective: effectiveContextSize,
+                                 isRunning: isRunning)
+    }
+
+    /// One-line explanation under the field when the engine had to clamp.
+    var contextLimitNote: String? {
+        ContextDisplay.limitNote(requested: Int(contextSize) ?? 4096,
+                                 effective: effectiveContextSize,
+                                 clamp: effectiveContextClamp,
+                                 isRunning: isRunning)
     }
 
     var serverURL: String? {
@@ -306,6 +329,8 @@ final class ServerViewModel: ObservableObject {
                 previousEngine = engine
                 inference = nil
                 loadedModelKey = nil
+                effectiveContextSize = nil
+                effectiveContextClamp = .notReduced
                 // Do NOT return — fall through to the slow path.
             } else {
                 log("Restarting server (model already loaded)…")
@@ -317,6 +342,9 @@ final class ServerViewModel: ObservableObject {
                         try server.start(port: portValue2)
                         await MainActor.run {
                             self.httpServer = server
+                            // Reused engine: its clamped window is already known.
+                            self.effectiveContextSize = engine.contextSize
+                            self.effectiveContextClamp = engine.contextClamp
                             self.status = .running
                             UIApplication.shared.isIdleTimerDisabled = true
                             self.log("HTTP server listening on port \(portValue2).")
@@ -342,6 +370,8 @@ final class ServerViewModel: ObservableObject {
             previousEngine = old
             inference = nil
             loadedModelKey = nil
+            effectiveContextSize = nil
+            effectiveContextClamp = .notReduced
         }
         // Immutable capture: the detached task must not share a mutable local.
         let engineToUnload = previousEngine
@@ -384,6 +414,8 @@ final class ServerViewModel: ObservableObject {
                     self.inference = engine
                     self.httpServer = server
                     self.loadedModelKey = modelKey
+                    self.effectiveContextSize = engine.contextSize
+                    self.effectiveContextClamp = engine.contextClamp
                     self.status = .running
                     UIApplication.shared.isIdleTimerDisabled = true
                     // Say which cap decided the context. The old message blamed
@@ -412,6 +444,8 @@ final class ServerViewModel: ObservableObject {
                     self.inference = nil
                     self.httpServer = nil
                     self.loadedModelKey = nil
+                    self.effectiveContextSize = nil
+                    self.effectiveContextClamp = .notReduced
                 }
             }
         }
@@ -456,6 +490,8 @@ final class ServerViewModel: ObservableObject {
         inference?.unload()
         inference = nil
         loadedModelKey = nil
+        effectiveContextSize = nil
+        effectiveContextClamp = .notReduced
     }
 
     func toggle() {
