@@ -83,6 +83,25 @@ The rate also falls with context: 344 t/s for 8,577 decoded tokens at an 8.9k
 context → 271 at 17.7k → 205 at 26.6k → 184 at 35.4k (the A/B runs below, which
 also show MTP-on paying roughly 9% more here than MTP-off).
 
+#### Snapshot restore after the whole-prompt boundary fix
+
+Measured 2026-11-15 on build `llamaserver-28222b3`: 9B `Qwopus3.5-9B-Coder-MTP`,
+q4_0 KV, MTP on, context 48,640, raw `/v1/completions` prompt (no assistant
+primer), `max_tokens=1`, greedy.
+
+| case | prompt | decoded | prefill | end-to-end wall |
+|---|---|---|---|---|
+| cold, no usable snapshot | 14,184 | 14,184 | 62.78 s (226 t/s) | 62.92 s |
+| identical prompt repeated | 14,184 | 1 | **0.21 s** | 0.42 s |
+| same prompt + 10 tokens | 14,194 | 11 | **0.50 s** | 0.72 s |
+
+Log: `KV snapshot restored (14183 tokens, prompt 14184); decoding 1 new` and
+`… prompt 14194); decoding 11 new`, with zero `KV snapshot unusable … full
+decode` lines. Before the fix both non-cold cases matched the whole-prompt blob
+one token short and fell into `full decode`: 65.25 s for 15,653 tokens in the
+2026-11-14 log (`lcp 15627/15628` and `lcp 15653/15653`). The saved blob was
+183,799,420 bytes either way.
+
 ### Generation
 
 MTP on, `gen=` measures from the first sampled token (after the prompt GPU sync).

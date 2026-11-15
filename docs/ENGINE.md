@@ -36,7 +36,9 @@ detail in `AGENTS.md`.
   replaces the trailing primer token, and a completions append can re-merge the
   final BPE token, so a whole-prompt blob always mismatches at its last token and
   is thrown away for a full re-prefill (measured 65 s / 15.6k tokens). The token
-  held back is decoded immediately after the save.
+  held back is decoded immediately after the save. Verified on device
+  2026-11-15 (build `llamaserver-28222b3`): 14,184-token prompt repeated costs
+  0.21 s instead of a full 62.78 s decode — see `docs/PERFORMANCE.md`.
 - The write is skipped when the live cache already held the whole prompt prefix
   and no recreate is due (`ReuseSurvival.hybridSnapshotSaveNeeded`). It is
   refreshed on a recreate turn and whenever the live cache could not be reused
