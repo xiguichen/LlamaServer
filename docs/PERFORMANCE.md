@@ -230,6 +230,107 @@ better setting.
 Prefill is unaffected by depth (296–400 t/s at 6.9k–21k) — the prompt is
 mirrored into the draft context once either way.
 
+### 9B coder model: MTP **active** (2026-11-15)
+
+Different model from the 4B rig above: the app reported `Qwopus3.5-9B-Coder-MTP.gguf`
+via `GET /v1/models`, so these numbers are not comparable to the 4B tables
+one-for-one — they are the 9B baseline. **MTP was active for every case**, not
+requested-but-unavailable and not off: every case parsed an `MTP stats:` line
+(`path=mtp`) with a live draft pass (`draft-gpu` 30–44 ms/round) and ~2 tokens
+emitted per round. The plain path would have printed `plain stats:` with
+`gpu-wait` instead.
+
+Build `llamaserver-241e47e`, `temperature: 0`, `--max-tokens 128`, single client,
+one run per size, no GPU reset. `scripts/bench.py --contexts 200,8000,16000,32000`,
+2026-11-15 15:05–15:12 (fresh server restart immediately before).
+
+| target | prompt | reused | prefill s | prefill t/s | gen s | gen t/s | emit/rd | draft-gpu | verify-gpu | wall/rd |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 200 | 210 | 0 | 1.00 | 209.6 | 8.56 | **14.9** | 1.97 | 30.7 ms | 93.9 ms | 131.7 ms |
+| 8,000 | 7,567 | 0 | 32.67 | 231.6 | 9.51 | **13.4** | 2.17 | 32.2 ms | 121.7 ms | 161.2 ms |
+| 16,000 | 15,960 | 0 | 93.36 | 170.9 | 14.76 | **8.7** | 2.10 | 40.8 ms | 193.6 ms | 242.0 ms |
+| 32,000 | 31,960 | 0 | 212.87 | 150.1 | 15.65 | **8.2** | 2.21 | 43.8 ms | 218.0 ms | 269.8 ms |
+
+All `finish=length`; every case reports `system_fingerprint=llamaserver-241e47e` in
+the response and its own `generated …` line in the inference log.
+
+- **Prefill 150–232 t/s** for genuinely new tokens (the 210-token case is the
+  slowest per token, short-prompt overhead): 7,567 tokens in 32.7 s,
+  15,960 in 93.4 s, 31,960 in **212.9 s** — a cold 32k prompt costs ~3.5 minutes.
+- **Generation 8.2–14.9 t/s**, falling with context: 13–15 t/s at ≤7.6k, 8.2–8.7
+  t/s at 16k–32k. Compared with the 4B at similar contexts (~17 t/s at 24k,
+  ~15 t/s at 35k), the 9B is roughly half the generation rate.
+- **The verify pass is 71–81% of every round** (94 ms → 218 ms as context grows
+  0.2k → 32k), i.e. the same bandwidth/context scaling as the 4B, just heavier:
+  wall/round 132 → 270 ms. MTP emits ~2.0–2.2 tokens/round throughout
+  (`hits` 66–77%, i.e. 0.97–1.21 accepted drafts/round).
+- **Caveat on the printed engine block.** The load block for *this* model was
+  lost: logging stopped writing after 23:50 the previous day and was cleared/
+  restarted before the run, so `bench.py` printed the config of an earlier
+  `Qwopus3.5-9B-v3.Q4_K_M.gguf` load (62,144 tokens, MTP off). That header — and
+  the 9,216 B/token q4_0 KV figure — describes that earlier load, not this one.
+  What is verified for this run: the `MTP stats:` lines above (MTP active), the
+  build fingerprint, and that a 31,960-token prompt plus 128 generated tokens
+  fit (`cache now 32087`), so context is **≥ 32k**; the exact context and KV
+  bytes/token were not re-read. Reload the model before the next run so the
+  load block is captured.
+
+### 9B MTP **off**: plain path, same sweep (2026-11-15, second run)
+
+Same build, same model, same sweep sizes and `--max-tokens 128`, ~13 minutes
+after the MTP-on run, with the model **reloaded** after turning MTP off. This
+reload captured a clean load block (`bench.py` printed it, and the case stats
+are `plain stats:` with no draft pass):
+
+| | |
+|---|---|
+| model | `Qwopus3.5-9B-Coder-MTP.gguf` (MTP off is a setting, not a model swap) |
+| context | **159,488** (requested 262,144, reduced by the memory budget) |
+| batch | **512** |
+| KV | q4_0, 9,216 B/token |
+| YaRN | x5.0 (orig 32768) |
+| decode path | **plain** (`gpu-wait`/`wall` are per **step**, 1 token) |
+
+| target | prompt | reused | prefill s | prefill t/s | gen s | gen t/s | gpu-wait | wall/step |
+|---|---|---|---|---|---|---|---|---|
+| 200 | 210 | 0 | 0.95 | 221.4 | 10.45 | **12.2** | 76.7 ms | 81.7 ms |
+| 8,000 | 7,567 | 0 | 30.99 | 244.2 | 11.21 | **11.4** | 82.5 ms | 87.6 ms |
+| 16,000 | 15,960 | 0 | 88.01 | 181.3 | 15.42 | **8.3** | 115.4 ms | 120.5 ms |
+| 32,000 | 31,960 | 0 | 194.80 | 164.1 | 16.77 | **7.6** | 125.8 ms | 131.0 ms |
+
+All `finish=length`, `system_fingerprint=llamaserver-241e47e`, no GPU reset.
+
+#### MTP on vs off, same day
+
+| prompt | gen on t/s | gen off t/s | Δ gen | prefill on t/s | prefill off t/s | Δ prefill | on ms/tok | off ms/tok |
+|---|---|---|---|---|---|---|---|---|
+| 210 | 14.95 | 12.25 | **+22.0%** | 209.6 | 221.4 | −5.4% | 66.9 | 81.7 |
+| 7,567 | 13.45 | 11.42 | **+17.8%** | 231.6 | 244.2 | −5.1% | 74.3 | 87.6 |
+| 15,960 | 8.67 | 8.30 | **+4.5%** | 170.9 | 181.3 | −5.7% | 115.2 | 120.5 |
+| 31,960 | 8.18 | 7.63 | **+7.2%** | 150.1 | 164.1 | −8.5% | 122.1 | 131.0 |
+
+`on ms/tok` = MTP wall/round ÷ tokens emitted per round; `off ms/tok` = the
+plain wall/step.
+
+- **Generation: MTP on wins every size, +4.5–22%.** The gain is largest at short
+  context and shrinks as the context grows, because the verify pass widens with
+  the KV (see the on-run table above) while the draft pass stays ~31–44 ms/round.
+- **Prefill: MTP on is 5–8.5% lower**, in line with the 4B's −4% and the same
+  cause (the prompt is also mirrored into the draft context). Caveat: this is
+  **not** a clean MTP-only delta — the off run loaded with batch 512 and a
+  159,488 context, the on run had (unverified) batch 1024 and ~63k context, so
+  batch size contributes to this column.
+- **MTP costs context headroom.** With MTP off the same 9B request reaches
+  159,488 tokens (clamped from 262,144); the MTP-on run's exact context was
+  never captured. Do not quote an MTP-on long-context limit for the 9B until it
+  is measured.
+
+Protocol limits: this is a same-day sequential pair, not a strict paired A/B —
+different loads, different batch/context, and each run built its own prompts
+(`reused=0` in both). Thermal drift across ~13 minutes is not controlled. The
+direction matches the 4B's paired results, but treat the exact percentages as
+indicative.
+
 ### CPU-path changes: no measurable generation gain (2026-11-11)
 
 `1c05e35` (before) vs `42f47ef` (after the per-token/stream/tool-filter work),
@@ -397,6 +498,11 @@ record.
 5. **Is 262,144 coherent?** Loading it is answered: q4_0 reaches 262,144
    (measured). Still open: compare output against the ×4/131,072 config on the
    same long prompt, and measure snapshot size/time at the top of the range.
+6. **9B MTP-on config and a batch-controlled A/B.** The 2026-11-15 MTP-on run
+   has verified throughput and `path=mtp` lines, but its load block was lost to
+   a logging freeze, so its exact context/batch are open; the MTP-off reload
+   used batch 512 at 159,488 context. Reload with MTP on to capture the block,
+   then repeat both configs at one batch size with identical prompts.
 
 ## Log-line semantics
 
