@@ -1823,20 +1823,23 @@ final class LlamaInference: @unchecked Sendable {
             let saveSnapshot = ReuseSurvival.hybridSnapshotSaveNeeded(
                 recreateDue: recreateDueAfterGeneration,
                 liveCacheReused: didReuseLiveCache)
-            let stableLen = max(reuseLen, min(total, stablePrefixLength(prompt: prompt, promptTokens: promptTokens)))
-            try decodeRange(reuseLen, stableLen)
-            if stableLen > 0 && stableLen < total {
-                if saveSnapshot {
-                    savePromptSnapshot(Array(promptTokens[0..<stableLen]))
-                }
-            }
-            try decodeRange(stableLen, total)
-            if stableLen >= total {
-                // No primer boundary found — fall back to snapshotting the whole
-                // prompt (behaviour as before; may simply be unusable next turn).
-                if saveSnapshot { savePromptSnapshot(promptTokens) }
-            }
-            if !saveSnapshot {
+            if saveSnapshot {
+                var stableLen = max(reuseLen,
+                                    min(total, stablePrefixLength(prompt: prompt,
+                                                                  promptTokens: promptTokens)))
+                // A whole-prompt snapshot can never be restored: see
+                // `PromptBoundary.snapshotBoundary`. Holding the last token back
+                // costs one decode right here and keeps a multi-thousand-token
+                // prefix reusable next turn instead of a full 65 s re-prefill.
+                stableLen = PromptBoundary.snapshotBoundary(stablePrefix: stableLen, total: total)
+                try decodeRange(reuseLen, stableLen)
+                if stableLen > 0 { savePromptSnapshot(Array(promptTokens[0..<stableLen])) }
+                try decodeRange(stableLen, total)
+            } else {
+                // No snapshot to write at the boundary, so a split would only add
+                // another llama_decode (a full weight pass over the tail) for the
+                // primer tokens. Decode the delta in one batch instead.
+                try decodeRange(reuseLen, total)
                 FileLogger.shared.debug("KV snapshot save skipped (live cache reused, no recreate due)")
             }
         } else {

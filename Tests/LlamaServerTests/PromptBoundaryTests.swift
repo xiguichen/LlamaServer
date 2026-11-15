@@ -41,4 +41,19 @@ final class PromptBoundaryTests: XCTestCase {
                                                          tailTokens: [1, 2]),
                        0)
     }
+
+    func testSnapshotBoundaryKeepsLastTokenOutOfAWholePromptSnapshot() {
+        XCTAssertEqual(PromptBoundary.snapshotBoundary(stablePrefix: 15628, total: 15628),
+                       15627,
+                       "the next turn replaces the trailing token, so a whole-prompt blob is never restorable")
+    }
+
+    func testSnapshotBoundaryLeavesARealPrimerBoundaryAlone() {
+        XCTAssertEqual(PromptBoundary.snapshotBoundary(stablePrefix: 1610, total: 1656), 1610)
+    }
+
+    func testSnapshotBoundaryHandlesTinyPrompts() {
+        XCTAssertEqual(PromptBoundary.snapshotBoundary(stablePrefix: 1, total: 1), 1)
+        XCTAssertEqual(PromptBoundary.snapshotBoundary(stablePrefix: 0, total: 0), 0)
+    }
 }

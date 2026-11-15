@@ -31,6 +31,12 @@ detail in `AGENTS.md`.
 - The snapshot is not free (size and per-turn write cost are measured in
   `docs/PERFORMANCE.md`). It is taken at the *stable* prefix, before generation,
   so the next turn re-decodes the previous turn's generation.
+- The boundary never covers the whole prompt
+  (`PromptBoundary.snapshotBoundary` holds the last token back): the next turn
+  replaces the trailing primer token, and a completions append can re-merge the
+  final BPE token, so a whole-prompt blob always mismatches at its last token and
+  is thrown away for a full re-prefill (measured 65 s / 15.6k tokens). The token
+  held back is decoded immediately after the save.
 - The write is skipped when the live cache already held the whole prompt prefix
   and no recreate is due (`ReuseSurvival.hybridSnapshotSaveNeeded`). It is
   refreshed on a recreate turn and whenever the live cache could not be reused

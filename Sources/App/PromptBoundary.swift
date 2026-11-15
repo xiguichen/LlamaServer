@@ -20,4 +20,18 @@ enum PromptBoundary {
         guard promptTokens.suffix(tailTokens.count).elementsEqual(tailTokens) else { return nil }
         return promptTokens.count - tailTokens.count
     }
+
+    /// Token count the hybrid prompt-state snapshot may cover.
+    ///
+    /// A whole-prompt snapshot is never restorable: the next turn replaces the
+    /// trailing assistant-primer token, and a completions append can re-merge
+    /// the final BPE token, so the longest common prefix stops one token short
+    /// and `restorePromptSnapshot` has to discard the blob for a full
+    /// re-prefill (measured at 65 s / 15.6k tokens). Holding the last token
+    /// back makes the saved state a strict prefix of every continuation; that
+    /// token is decoded immediately after the save.
+    static func snapshotBoundary(stablePrefix: Int, total: Int) -> Int {
+        guard stablePrefix > 0, total > 1 else { return stablePrefix }
+        return min(stablePrefix, total - 1)
+    }
 }
