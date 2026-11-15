@@ -32,6 +32,13 @@ final class FileLoggerTests: XCTestCase {
                        "per-token verbose lines must never fsync on the inference thread")
     }
 
+    func testRotationHappensOnlyPastTheCap() {
+        XCTAssertFalse(FileLogger.shouldRotate(fileSize: 999_999, maxBytes: 1_000_000))
+        XCTAssertFalse(FileLogger.shouldRotate(fileSize: 1_000_000, maxBytes: 1_000_000),
+                       "exactly at the cap keeps appending, matching the launch-time sweep")
+        XCTAssertTrue(FileLogger.shouldRotate(fileSize: 1_000_001, maxBytes: 1_000_000))
+    }
+
     func testNSLogLimitedToWarningsAndAbove() {
         XCTAssertTrue(FileLogger.shouldNSLog(.error))
         XCTAssertTrue(FileLogger.shouldNSLog(.warn))

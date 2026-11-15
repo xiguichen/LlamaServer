@@ -14,7 +14,9 @@ off the device.
 | `llamaserver-inference.log` | anything logged from `LlamaInference.swift` (engine internals) |
 | `llamaserver-payloads.log` | `.verbose` payload dumps (prompts, responses) |
 
-Each file rotates at 1 MB to `<name>.1.log`. The `file: String = #file` default on
+Each file rotates at 1 MB to `<name>.1.log`, checked after the write that
+crosses the cap and swept at launch (a long session keeps the cap too, not just
+the next process). The `file: String = #file` default on
 every log method supplies the source, so call sites need no category argument.
 
 ## Levels and durability

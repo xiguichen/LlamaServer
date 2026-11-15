@@ -1434,10 +1434,15 @@ final class LlamaInference: @unchecked Sendable {
     /// impossible once it has (delivered text cannot be taken back) — which is
     /// exactly what `DecodeRetry` decides. Without this, a transient GPU fault
     /// surfaced to the client as a 500 for a turn that would have succeeded.
+    /// `shouldCancel` is polled between prefill chunks (in addition to the
+    /// shutdown flag), so a client that abandons a long prompt stops the serial
+    /// queue instead of paying for the whole prefill. The streaming handler
+    /// passes its disconnect watcher; non-streaming callers pass nil.
     func generate(prompt: String,
                   maxTokens: Int,
                   params: SamplingParams,
                   recreateDueAfterGeneration: Bool = false,
+                  shouldCancel: (() -> Bool)? = nil,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
         var retriesSoFar = 0
         // Count what the caller has already been handed, so a retry can never
@@ -1454,6 +1459,7 @@ final class LlamaInference: @unchecked Sendable {
                 return try generateOnce(prompt: prompt, maxTokens: maxTokens,
                                         params: params,
                                         recreateDueAfterGeneration: recreateDueAfterGeneration,
+                                        shouldCancel: shouldCancel,
                                         onToken: countedOnToken)
             } catch {
                 guard DecodeRetry.shouldRetry(isDecodeFailure: Self.isRecoverableDecodeFailure(error),
@@ -1473,6 +1479,7 @@ final class LlamaInference: @unchecked Sendable {
                   maxTokens: Int,
                   params: SamplingParams,
                   recreateDueAfterGeneration: Bool,
+                  shouldCancel: (() -> Bool)? = nil,
                   onToken: ((String) -> Bool)? = nil) throws -> GenerationResult {
 
         // A prior recreateContext() may have failed and left no live context.
@@ -1482,10 +1489,11 @@ final class LlamaInference: @unchecked Sendable {
             throw InferenceError.contextInit
         }
 
-        // The server is stopping: don't spend seconds tokenizing a prompt whose
-        // decode is about to be cancelled anyway.
-        if isCancellationRequested {
-            FileLogger.shared.debug("generate: cancelled before tokenize (server stopping)")
+        // The client may already be gone (or the server stopping): don't spend
+        // seconds tokenizing a prompt whose decode is about to be cancelled.
+        if let cause = GenerationCancel.cause(isShuttingDown: isCancellationRequested,
+                                              isClientDisconnected: shouldCancel?() ?? false) {
+            FileLogger.shared.debug("generate: cancelled before tokenize (\(cause.logDescription))")
             throw InferenceError.cancelled
         }
 
@@ -1655,14 +1663,15 @@ final class LlamaInference: @unchecked Sendable {
         // (partial prompt decode and/or partial generation).  Invalidate the
         // tracking so the next call always clears the cache and starts fresh.
         var generationSucceeded = false
-        // Distinguishes a shutdown abort (expected, logged at debug) from a real
-        // failure (logged as an error) in the defer below.
-        var cancelledForShutdown = false
+        // Distinguishes an expected cancellation (shutdown or a client that left)
+        // from a real failure in the defer below — both invalidate the tracking,
+        // but only a real failure is an error.
+        var cancelCause: GenerationCancel?
         defer {
             if !generationSucceeded {
                 if cachedTokenCount > 0 || !cachedTokenIds.isEmpty {
-                    if cancelledForShutdown {
-                        FileLogger.shared.debug("generation cancelled by shutdown — cache tracking invalidated")
+                    if let cancelCause {
+                        FileLogger.shared.debug("generation cancelled by \(cancelCause.logDescription) — cache tracking invalidated")
                     } else {
                         FileLogger.shared.error("generation failed — cache tracking invalidated")
                     }
@@ -1748,13 +1757,15 @@ final class LlamaInference: @unchecked Sendable {
         func decodeRange(_ lo: Int, _ hi: Int) throws {
             var off = lo
             while off < hi {
-                // Shutdown check BETWEEN chunks: a single llama_decode cannot be
-                // interrupted, but the caller's queue drain must not wait for the
-                // whole prompt. Cache tracking is invalidated by the defer above,
-                // and the next turn trims any partially-decoded suffix.
-                if isCancellationRequested {
-                    cancelledForShutdown = true
-                    FileLogger.shared.debug("prompt decode cancelled at \(off)/\(hi) (server stopping)")
+                // A single llama_decode cannot be interrupted, but the caller's
+                // queue drain must not wait for the whole prompt — and neither
+                // should an abandoned client. Cache tracking is invalidated by
+                // the defer above, and the next turn trims any partially-decoded
+                // suffix.
+                if let cause = GenerationCancel.cause(isShuttingDown: isCancellationRequested,
+                                                      isClientDisconnected: shouldCancel?() ?? false) {
+                    cancelCause = cause
+                    FileLogger.shared.debug("prompt decode cancelled at \(off)/\(hi) (\(cause.logDescription))")
                     throw InferenceError.cancelled
                 }
                 let count = min(batchSize, hi - off)

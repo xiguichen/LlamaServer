@@ -300,6 +300,20 @@ final class OpenAIModelsTests: XCTestCase {
         XCTAssertEqual(decoded.values, ["a", "b"])
     }
 
+    // MARK: - ModelInfo
+
+    /// `/v1/models` must publish the *effective* window. A 9B loads at ~48,640
+    /// tokens on this device even when 262,144 is requested; the 2026-11-15 log
+    /// shows a client replaying 50,270 tokens into that clamp and failing.
+    func testModelInfoReportsEffectiveContextLength() throws {
+        let info = ModelInfo(id: "Qwopus3.5-9B-Coder-MTP.gguf", object: "model",
+                             created: 0, owned_by: "local", context_length: 48_640)
+        let data = try encoder.encode(info)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["context_length"] as? Int, 48_640)
+        XCTAssertEqual(json["id"] as? String, "Qwopus3.5-9B-Coder-MTP.gguf")
+    }
+
     // MARK: - AnyCodable
 
     func testAnyCodableStringRoundTrip() throws {

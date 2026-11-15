@@ -203,6 +203,17 @@ The `generated N tokens` line prints seconds and t/s with 2 decimals, and its
 2026-10-18 it divided the full prompt by the delta decode time and printed rates
 like `33116.58t/s` after cache reuse; re-derive such numbers by hand.
 
+### Cancellation
+
+`generate(shouldCancel:)` is polled between prefill chunks (the same boundary as
+the shutdown flag) and before tokenize, so a client that closes the socket during
+a long prompt stops the serial queue instead of paying for the rest of the
+prefill. The streaming handler passes its disconnect watcher; shutdown wins when
+both fire (`GenerationCancel`), because `stop()` drains the queue and its
+breadcrumbs are keyed on that path. In the 2026-11-15 device log a client left
+1.5 s into a 4,451-token prefill and the remaining ~19 s decoded for a dead
+socket.
+
 ### Greedy fast path
 
 When the chain is pure greedy (`MtpSpec.isPureGreedy`: temperature <= 0 and no

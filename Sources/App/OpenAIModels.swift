@@ -375,6 +375,11 @@ struct ModelInfo: Codable {
     let object: String
     let created: Int
     let owned_by: String
+    /// The window the loaded model actually runs with — after the memory-budget
+    /// clamp, not the requested value. A 9B on this device loads at 48,640 even
+    /// when 262,144 is requested; without this a client cannot know the real
+    /// window before replaying a conversation into it.
+    let context_length: Int
 }
 
 struct ModelList: Codable {

@@ -54,7 +54,7 @@ llm-comply's pinned spec marks `logprobs` (per choice), `refusal` and `content`
 | `GET /health`, `GET /v1/health` | `{"status":"ok"}`; used by `scripts/upload-ipa.sh` as a reachability check |
 | `POST /v1/chat/completions` | streaming and non-streaming |
 | `POST /v1/completions` | legacy completions |
-| `GET /v1/models` | model list |
+| `GET /v1/models` | model list; `context_length` is the effective (post-clamp) window |
 | `GET /v1/logs`, `GET /logs` | see `docs/LOGGING.md` |
 | `GET /v1/updates`, `PUT /v1/updates/ipa?build=<sha>` | self-upgrade, see `docs/OPERATIONS.md` |
 

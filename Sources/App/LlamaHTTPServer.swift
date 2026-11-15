@@ -439,7 +439,8 @@ final class LlamaHTTPServer {
     private func modelsResponse() -> HTTPResponse {
         let info = ModelInfo(id: inference.modelName, object: "model",
                              created: Int(Date().timeIntervalSince1970),
-                             owned_by: "local")
+                             owned_by: "local",
+                             context_length: inference.contextSize)
         let list = ModelList(object: "list", data: [info])
         return json(encodable: list, status: .ok)
     }
@@ -761,12 +762,17 @@ final class LlamaHTTPServer {
             // only user (the keep-alive timer owns its own).
             let chunkEncoder = JSONEncoder()
 
-            func sendChunk(delta: Delta, finishReason: String?) {
+            /// Returns whether the chunk reached the connection. The finish
+            /// reason flag and its log line use the result: logging "sent" after
+            /// `sendChunk` dropped it (client gone) produced two contradictory
+            /// lines in the 2026-11-15 device log.
+            @discardableResult
+            func sendChunk(delta: Delta, finishReason: String?) -> Bool {
                 guard !disconnectWatcher.didDisconnect else {
                     if finishReason != nil {
                         FileLogger.shared.warn("streaming #\(currentRequest): finish_reason dropped — client disconnected")
                     }
-                    return
+                    return false
                 }
                 guard let data = try? chunkEncoder.encode(
                     StreamingChunk(id: chatId, created: created, model: modelName,
@@ -775,10 +781,11 @@ final class LlamaHTTPServer {
                 ), let str = String(data: data, encoding: .utf8),
                       let chunkData = "data: \(str)\n\n".data(using: .utf8) else {
                     FileLogger.shared.error("streaming #\(currentRequest): sendChunk ENCODE FAILED")
-                    return
+                    return false
                 }
                 connection.send(data: chunkData, timeout: 10)
                 lastChunkTime = CFAbsoluteTimeGetCurrent()
+                return true
             }
 
             func flushKeepAliveIfNeeded() {
@@ -827,7 +834,8 @@ final class LlamaHTTPServer {
                 let genResult = try self.inference.generate(prompt: prompt,
                                                 maxTokens: maxTokens,
                                                 params: samplingParams,
-                                                recreateDueAfterGeneration: self.recreateTracker.recreateDueAfterNextGeneration) { text in
+                                                recreateDueAfterGeneration: self.recreateTracker.recreateDueAfterNextGeneration,
+                                                shouldCancel: { disconnectWatcher.didDisconnect }) { text in
                     generatedTokens += 1
                     let now = CFAbsoluteTimeGetCurrent()
                     if now - lastTokenTime >= 10 {
@@ -992,10 +1000,14 @@ final class LlamaHTTPServer {
                                                           hasToolCalls: toolCallsFound,
                                                           outputUnusable: outputUnusable)
 
-                // Final chunk carries the finish reason.
-                sendChunk(delta: Delta(role: nil, content: nil), finishReason: streamReason)
-                finishReasonSent = true
-                FileLogger.shared.debug("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
+                // Final chunk carries the finish reason. `finishReasonSent`
+                // records delivery, not the attempt: a dropped chunk must not be
+                // logged (or summarised) as sent.
+                finishReasonSent = sendChunk(delta: Delta(role: nil, content: nil),
+                                             finishReason: streamReason)
+                if finishReasonSent {
+                    FileLogger.shared.debug("streaming #\(currentRequest): finish_reason chunk sent (\(streamReason))")
+                }
 
                 // Optional usage chunk (OpenAI: empty choices array, usage set).
                 if includeUsage {
@@ -1013,11 +1025,13 @@ final class LlamaHTTPServer {
             } catch {
                 if let inferenceError = error as? LlamaInference.InferenceError,
                    case .cancelled = inferenceError {
-                    // Deliberate shutdown, not a failure: end the stream cleanly
-                    // (the queue drain in stop() is waiting for this to return).
-                    FileLogger.shared.debug("streaming #\(currentRequest): generation cancelled by server stop")
-                    sendChunk(delta: Delta(role: nil, content: nil), finishReason: "stop")
-                    finishReasonSent = true
+                    // Expected cancellation, not a failure: server shutdown (the
+                    // queue drain in stop() waits for this to return) or a client
+                    // that closed the socket during prefill.
+                    let cause = GenerationCancel.cause(isShuttingDown: self._stopping.withLock { $0 },
+                                                       isClientDisconnected: disconnectWatcher.didDisconnect)
+                    FileLogger.shared.debug("streaming #\(currentRequest): generation cancelled by \(cause?.logDescription ?? "cancel")")
+                    finishReasonSent = sendChunk(delta: Delta(role: nil, content: nil), finishReason: "stop")
                 } else {
                     FileLogger.shared.error("streaming #\(currentRequest): generation error: \(error.localizedDescription)")
                     // A headroom failure carries an actionable message the client
@@ -1037,8 +1051,8 @@ final class LlamaHTTPServer {
                             FileLogger.shared.debug("streaming #\(currentRequest): context-too-full error event sent")
                         }
                     }
-                    sendChunk(delta: Delta(role: nil, content: nil), finishReason: "error")
-                    finishReasonSent = true
+                    finishReasonSent = sendChunk(delta: Delta(role: nil, content: nil),
+                                                 finishReason: "error")
                 }
             }
             stopKeepAlive()

@@ -121,6 +121,11 @@ final class FileLogger {
     /// per model load that was real time off the critical path.
     static func shouldNSLog(_ level: LogLevel) -> Bool { level <= .warn }
 
+    /// Rotation threshold, shared by the launch sweep and the write path. The
+    /// 2026-11-15 device log showed 2.8 MB / 3.4 MB live files because only
+    /// launch rotated them; a session must honour the same cap.
+    static func shouldRotate(fileSize: Int, maxBytes: Int) -> Bool { fileSize > maxBytes }
+
     /// Buffered lines are fsynced at most this long after the first unflushed
     /// write — bounds breadcrumb loss on a hard crash to ~1s of routine lines.
     static let diskSyncInterval: TimeInterval = 1.0
@@ -237,6 +242,11 @@ final class FileLogger {
             try handle.write(contentsOf: data)
         } catch {
             return
+        }
+        // Rotate on the write that crosses the cap, not only at launch.
+        if let size = try? handle.offsetInFile,
+           Self.shouldRotate(fileSize: Int(size), maxBytes: maxBytes) {
+            rotate(category)
         }
         pendingSyncBytes += data.count
         if syncNow || pendingSyncBytes >= Self.diskSyncBytes {
@@ -386,6 +396,20 @@ final class FileLogger {
         }
     }
 
+    /// Move one category's live file to its backup (the writer must reopen).
+    /// Safe with no open handle (the launch sweep).
+    private func rotate(_ category: LogCategory) {
+        if let handle = writeHandles.removeValue(forKey: category) {
+            try? handle.synchronize()
+            try? handle.close()
+        }
+        let fm = FileManager.default
+        let live = url(for: category)
+        let backup = backupURL(for: category)
+        try? fm.removeItem(at: backup)
+        try? fm.moveItem(at: live, to: backup)
+    }
+
     /// Keep one rolled-over backup per file so none can grow unbounded.
     private func rotateIfNeeded() {
         let fm = FileManager.default
@@ -393,10 +417,8 @@ final class FileLogger {
             let path = url(for: category)
             guard let attrs = try? fm.attributesOfItem(atPath: path.path),
                   let size = (attrs[.size] as? NSNumber)?.intValue,
-                  size > maxBytes else { continue }
-            let backup = backupURL(for: category)
-            try? fm.removeItem(at: backup)
-            try? fm.moveItem(at: path, to: backup)
+                  Self.shouldRotate(fileSize: size, maxBytes: maxBytes) else { continue }
+            rotate(category)
         }
     }
 }
