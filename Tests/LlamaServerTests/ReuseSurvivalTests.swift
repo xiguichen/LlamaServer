@@ -149,4 +149,70 @@ final class ReuseSurvivalTests: XCTestCase {
                                                       seqPosMin: 0,
                                                       seqPosMax: 0))
     }
+
+    // MARK: - Snapshot restore guard (whole-prompt blobs are never reusable)
+
+    /// The 2026-11-14 device log, replayed as pure logic. A 15628-token prompt was
+    /// snapshotted whole; the next prompt shared its first 15627 tokens, so the
+    /// old guard rejected the blob with `lcp 15627/15628; full decode` and spent
+    /// 65.25 s re-prefilling 15653 tokens.
+    func testWholePromptSnapshotIsRejectedWhenTheTrailingTokenDrifts() {
+        let snapshotted: [Int32] = [10, 11, 12, 13, 14]
+        let nextPrompt: [Int32] = [10, 11, 12, 13, 99, 20, 21]
+        let lcp = commonPrefix(snapshotted, nextPrompt)
+
+        XCTAssertEqual(lcp, 4, "the reply replaced the primer's last token")
+        XCTAssertNil(ReuseSurvival.snapshotRestorablePrefix(lcp: lcp,
+                                                            snapshotCount: snapshotted.count,
+                                                            promptCount: nextPrompt.count),
+                     "this is the '+65.25 s full decode' branch")
+    }
+
+    func testHeldBackSnapshotIsRestoredForTheSameTrailingTokenDrift() {
+        let snapshotted: [Int32] = [10, 11, 12, 13]     // PromptBoundary holds 14 back
+        let nextPrompt: [Int32] = [10, 11, 12, 13, 99, 20, 21]
+        let lcp = commonPrefix(snapshotted, nextPrompt)
+
+        XCTAssertEqual(lcp, 4)
+        XCTAssertEqual(ReuseSurvival.snapshotRestorablePrefix(lcp: lcp,
+                                                              snapshotCount: snapshotted.count,
+                                                              promptCount: nextPrompt.count),
+                       4,
+                       "same drift, same lcp — the blob is now a strict prefix and restores")
+    }
+
+    /// The repeated-identical-prompt case from the same log
+    /// (`lcp 15653/15653, prompt 15653; full decode`).
+    func testIdenticalPromptRestoresFromAHeldBackSnapshot() {
+        let whole: [Int32] = [10, 11, 12, 13, 14]
+        XCTAssertNil(ReuseSurvival.snapshotRestorablePrefix(lcp: whole.count,
+                                                            snapshotCount: whole.count,
+                                                            promptCount: whole.count),
+                     "a whole-prompt blob leaves nothing to decode for fresh logits")
+
+        let heldBack: [Int32] = [10, 11, 12, 13]
+        XCTAssertEqual(ReuseSurvival.snapshotRestorablePrefix(lcp: heldBack.count,
+                                                              snapshotCount: heldBack.count,
+                                                              promptCount: whole.count),
+                       4,
+                       "one token is decoded instead of all five")
+    }
+
+    func testSnapshotRejectedWhenThePrefixDivergesMidway() {
+        XCTAssertNil(ReuseSurvival.snapshotRestorablePrefix(lcp: 1950,
+                                                            snapshotCount: 2054,
+                                                            promptCount: 15602),
+                     "a genuine divergence still has to re-decode")
+    }
+
+    func testSnapshotRejectedWhenNoPromptTokenRemains() {
+        XCTAssertNil(ReuseSurvival.snapshotRestorablePrefix(lcp: 5, snapshotCount: 5, promptCount: 5))
+    }
+
+    private func commonPrefix(_ a: [Int32], _ b: [Int32]) -> Int {
+        let n = min(a.count, b.count)
+        var i = 0
+        while i < n && a[i] == b[i] { i += 1 }
+        return i
+    }
 }

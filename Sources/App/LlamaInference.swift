@@ -1360,7 +1360,10 @@ final class LlamaInference: @unchecked Sendable {
         // `snapshotTokens.count`; it can only be restored whole. Require the new
         // prompt to contain it entirely AND leave >= 1 token to decode for fresh
         // logits. Anything less can't use the snapshot — re-decode from scratch.
-        guard lcp == snapshotTokens.count, snapshotTokens.count < promptTokens.count else {
+        guard let restorable = ReuseSurvival.snapshotRestorablePrefix(
+            lcp: lcp,
+            snapshotCount: snapshotTokens.count,
+            promptCount: promptTokens.count) else {
             llama_memory_clear(memory, false)
             FileLogger.shared.debug("KV snapshot unusable (lcp \(lcp)/\(snapshotTokens.count), prompt \(promptTokens.count)); full decode")
             return 0
@@ -1379,8 +1382,8 @@ final class LlamaInference: @unchecked Sendable {
             discardPromptSnapshot()
             return 0
         }
-        FileLogger.shared.debug("KV snapshot restored (\(snapshotTokens.count) tokens, prompt \(promptTokens.count)); decoding \(promptTokens.count - snapshotTokens.count) new")
-        return snapshotTokens.count
+        FileLogger.shared.debug("KV snapshot restored (\(restorable) tokens, prompt \(promptTokens.count)); decoding \(promptTokens.count - restorable) new")
+        return restorable
     }
 
     /// Token length of the prompt's "stable prefix" — everything up to (but not
@@ -1388,8 +1391,9 @@ final class LlamaInference: @unchecked Sendable {
     /// appends. Excluding the primer from the hybrid/recurrent snapshot is what
     /// makes that snapshot a strict prefix of the next turn's prompt (the primer
     /// is replaced by the real assistant message next turn). Returns the full
-    /// length when no primer boundary is found (snapshot then falls back to the
-    /// whole prompt). Re-tokenizes the prefix and takes the common-prefix length
+    /// length when no primer boundary is found; `PromptBoundary.snapshotBoundary`
+    /// then holds the last token back so the save is still a strict prefix.
+    /// Re-tokenizes the prefix and takes the common-prefix length
     /// with `promptTokens` to stay robust against BPE boundary drift.
     private func stablePrefixLength(prompt: String, promptTokens: [llama_token]) -> Int {
         guard let r = prompt.range(of: "<|im_start|>assistant", options: .backwards) else {

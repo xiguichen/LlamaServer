@@ -91,6 +91,27 @@ enum ReuseSurvival {
     /// - Returns: the reusable prefix length, or nil when the live cache cannot
     ///   be used whole and the caller must fall back to the snapshot / full
     ///   decode.
+    /// Whether a restored prompt-state snapshot can supply `lcp` tokens of `prompt`.
+    ///
+    /// The snapshot is one indivisible state blob at position `snapshotCount`, so
+    /// it can only be restored whole: every one of its token ids must match the
+    /// new prompt, and at least one prompt token must remain to decode for fresh
+    /// logits. Returns the number of tokens the restored state covers, or nil
+    /// when the caller must clear the cache and decode from scratch.
+    ///
+    /// This is why the snapshot boundary may never be the whole prompt
+    /// (`PromptBoundary.snapshotBoundary`): a chat turn replaces the trailing
+    /// primer token and a completions append re-merges the final BPE token, so a
+    /// whole-prompt blob has `lcp == snapshotCount - 1` and is rejected.
+    static func snapshotRestorablePrefix(lcp: Int,
+                                         snapshotCount: Int,
+                                         promptCount: Int) -> Int? {
+        guard snapshotCount > 0, lcp == snapshotCount, snapshotCount < promptCount else {
+            return nil
+        }
+        return snapshotCount
+    }
+
     static func liveHybridReuseLen(cachedTokens: [Int32],
                                    promptTokens: [Int32],
                                    seqPosMin: Int,
