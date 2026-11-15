@@ -31,6 +31,16 @@ Traffic: pi (17 tools), 2026-10-18 12:22–12:57, single client, prompt growing
 
 ## How to measure
 
+Repeatable sweep (reads the loaded model's own load block, including whether MTP
+is enabled, unsupported, or off, and parses the matching stats line):
+
+```bash
+python3 scripts/bench.py --contexts 200,8000,16000,32000
+```
+
+See [`BENCH.md`](BENCH.md) for the options, the MTP classification, and the
+measurement rules. Raw logs, when a specific turn needs reading:
+
 ```bash
 curl 'http://<device>:8443/logs?name=inference&tail=6000&backups=1'   # engine internals
 curl 'http://<device>:8443/logs?name=server&tail=4000&backups=1'      # request lifecycle

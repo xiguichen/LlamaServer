@@ -26,6 +26,7 @@ No local Xcode build or test runs — use CI (`docs/CI.md`). Run
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | debugging a deployed build, uploading an IPA, or running on-device compliance tests |
 | [`docs/CI.md`](docs/CI.md) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild) |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | making or repeating any performance claim (measured baseline, method, disproved claims) |
+| [`docs/BENCH.md`](docs/BENCH.md) | running the on-device benchmark or adding a PERFORMANCE.md row |
 | [`.github/workflows/build.yml`](.github/workflows/build.yml) | CI configuration: test & build jobs (xcode-27 runner, xcodegen + xcodebuild)
 
 

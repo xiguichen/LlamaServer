@@ -4,6 +4,9 @@
 Parses the engine's own `generated …` line (prefill=, gen=) plus the `MTP stats:`
 line (accepted, depth, draft/verify GPU phases). Each case has a unique prompt
 header so the previous case's prefix cannot be reused.
+
+Superseded for general runs by `scripts/bench.py` (MTP-aware, see
+`docs/BENCH.md`); kept for the historical depth A/B runs.
 """
 import argparse, json, re, sys, time, urllib.request
 
